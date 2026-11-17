@@ -101,8 +101,9 @@ jobs:
           nproc; free -g
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: false
 
@@ -161,7 +162,7 @@ jobs:
 
       - name: Restore SDK image cache
         id: sdk
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/sdk-image.tar.zst
           key: ${{ env.SDK_CACHE_KEY }}
@@ -178,7 +179,7 @@ jobs:
 
       - name: Save SDK image cache
         if: steps.sdk.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/sdk-image.tar.zst
           key: ${{ env.SDK_CACHE_KEY }}
@@ -191,35 +192,35 @@ jobs:
       # or by an earlier run with the same sources).
       - name: Restore graphics output
         if: inputs.stage == 1 && contains(format(' {0} ', inputs.restore), ' graphics ')
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/grp/graphics.tar.zst
           key: ${{ fromJSON(inputs.keys).graphics }}
           fail-on-cache-miss: true
       - name: Restore fex output
         if: inputs.stage == 1 && contains(format(' {0} ', inputs.restore), ' fex ')
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/grp/fex.tar.zst
           key: ${{ fromJSON(inputs.keys).fex }}
           fail-on-cache-miss: true
       - name: Restore media output
         if: inputs.stage == 1 && contains(format(' {0} ', inputs.restore), ' media ')
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/grp/media.tar.zst
           key: ${{ fromJSON(inputs.keys).media }}
           fail-on-cache-miss: true
       - name: Restore misc output
         if: inputs.stage == 1 && contains(format(' {0} ', inputs.restore), ' misc ')
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/grp/misc.tar.zst
           key: ${{ fromJSON(inputs.keys).misc }}
           fail-on-cache-miss: true
       - name: Restore wine output
         if: inputs.stage == 1 && contains(format(' {0} ', inputs.restore), ' wine ')
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/grp/wine.tar.zst
           key: ${{ fromJSON(inputs.keys).wine }}
@@ -238,7 +239,7 @@ jobs:
 
       - name: Restore previous stage
         if: inputs.stage > 1
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2; Node 24
         with:
           name: state-${{ inputs.group }}-stage${{ inputs.prev_stage }}
           path: /home/runner/state
@@ -252,7 +253,7 @@ jobs:
 
       - name: Restore ccache
         if: inputs.stage == 1 && inputs.group != 'assemble'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/.ccache
           key: ccache-aarch64-${{ inputs.group }}-${{ github.run_id }}
@@ -335,7 +336,7 @@ jobs:
 
       - name: Upload make logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2; Node 24
         with:
           name: make-log-${{ inputs.group }}-stage${{ inputs.stage }}
           path: build/make*.log
@@ -350,7 +351,7 @@ jobs:
 
       - name: Upload build state
         if: steps.make.outputs.done == 'false'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2; Node 24
         with:
           name: state-${{ inputs.group }}-stage${{ inputs.stage }}
           path: /home/runner/state.tar.zst
@@ -365,14 +366,14 @@ jobs:
 
       - name: Save group output
         if: steps.make.outputs.done == 'true' && inputs.group != 'assemble'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/grp/${{ inputs.group }}.tar.zst
           key: ${{ env.GROUP_KEY }}
 
       - name: Save ccache
         if: steps.make.outputs.done == 'true' && inputs.group != 'assemble'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with:
           path: /home/runner/.ccache
           key: ccache-aarch64-${{ inputs.group }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -426,7 +427,7 @@ jobs:
 
       - name: Upload tarball
         if: steps.make.outputs.done == 'true' && inputs.group == 'assemble'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2; Node 24
         with:
           name: ${{ inputs.build_name }}
           path: |

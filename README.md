@@ -352,6 +352,14 @@ Use `banner-proton/check-softdenchi-selection.py --app-id <APP_ID>` for a limite
 Keep configuration backups and diagnostic reports local. Per-game scripts, device-specific test
 reports and prefix-preparation design documents are not distributed in this branch.
 
+The build workflows pin GitHub's checkout, cache and artifact actions to full commit SHAs using
+their Node 24 versions. They run on GitHub-hosted `ubuntu-24.04-arm` runners; self-hosted runners
+would need their own compatibility check. Checkout credentials are not persisted, ordinary jobs
+have read-only contents access, and release publication defaults to off. The release job retains
+its explicit publish input and main-branch guard. Builds are started manually; pushing the
+maintenance branch does not start a build. A workflow update has not itself validated a new
+Proton binary on a device.
+
 ## Credits
 
 [Valve](https://github.com/ValveSoftware/Proton) (Proton, Wine, Steam Linux Runtime) ·

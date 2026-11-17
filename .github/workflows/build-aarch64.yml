@@ -17,7 +17,7 @@ on:
       publish:
         description: "Publish the tarball as the latest GitHub release (main only)"
         type: boolean
-        default: true
+        default: false
       prerelease:
         description: "Publish as a prerelease, not marked latest (until it is device-proven)"
         type: boolean
@@ -28,7 +28,7 @@ on:
         default: ""
 
 permissions:
-  contents: write
+  contents: read
   actions: write
 
 concurrency:
@@ -50,7 +50,9 @@ jobs:
       misc_hit: ${{ steps.misc.outputs.cache-hit }}
       wine_hit: ${{ steps.wine.outputs.cache-hit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
+        with:
+          persist-credentials: false
       - id: v
         run: |
           v=$(tr -d '[:space:]' < banner-proton/VERSION)
@@ -64,19 +66,19 @@ jobs:
           echo "keys=$keys" >> "$GITHUB_OUTPUT"
           echo "$keys" | python3 -m json.tool
       - id: graphics
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with: { path: /home/runner/grp/graphics.tar.zst, key: "${{ fromJSON(steps.k.outputs.keys).graphics }}", lookup-only: true }
       - id: fex
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with: { path: /home/runner/grp/fex.tar.zst, key: "${{ fromJSON(steps.k.outputs.keys).fex }}", lookup-only: true }
       - id: media
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with: { path: /home/runner/grp/media.tar.zst, key: "${{ fromJSON(steps.k.outputs.keys).media }}", lookup-only: true }
       - id: misc
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with: { path: /home/runner/grp/misc.tar.zst, key: "${{ fromJSON(steps.k.outputs.keys).misc }}", lookup-only: true }
       - id: wine
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0; Node 24
         with: { path: /home/runner/grp/wine.tar.zst, key: "${{ fromJSON(steps.k.outputs.keys).wine }}", lookup-only: true }
 
   graphics:
@@ -203,7 +205,9 @@ jobs:
     name: Wine protocol unchanged
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
+        with:
+          persist-credentials: false
       - name: Wine submodule
         run: git submodule update --init --filter=tree:0 wine
       - name: Check the wineserver protocol against the pinned base
@@ -290,8 +294,10 @@ jobs:
     if: "!cancelled() && needs.assemble.result == 'success'"
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2; Node 24
         with:
           name: ${{ needs.meta.outputs.build_name }}
           path: new
@@ -410,7 +416,7 @@ jobs:
           json.dump(info, open(name + '.build-info.json', 'w'), indent=2)
           print(json.dumps(info, indent=2))
           EOF
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2; Node 24
         with:
           name: build-info
           path: ${{ needs.meta.outputs.build_name }}.build-info.json
@@ -435,16 +441,21 @@ jobs:
 
   release:
     name: Release
+    permissions:
+      contents: write
+      actions: read
     needs: [meta, assemble, verify, protocol]
     if: "!cancelled() && needs.verify.result == 'success' && needs.protocol.result == 'success' && inputs.publish && github.ref == 'refs/heads/main'"
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2; Node 24
         with:
           name: ${{ needs.meta.outputs.build_name }}
           path: out
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2; Node 24
         with:
           name: build-info
           path: out

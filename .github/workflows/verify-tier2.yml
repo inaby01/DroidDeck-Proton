@@ -14,11 +14,16 @@ on:
       - banner-proton/**
       - .github/workflows/verify-tier2.yml
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
+        with:
+          persist-credentials: false
       - name: Submodules (wine, wine-staging)
         run: |
           git submodule update --init --filter=tree:0 wine wine-staging
