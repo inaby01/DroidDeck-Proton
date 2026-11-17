@@ -1,0 +1,38 @@
+#!/bin/bash
+# Build only the test harness; do not rebuild Proton or modify any device.
+set -euo pipefail
+script_path=${BASH_SOURCE[0]}
+script_parent=.
+if [[ $script_path == */* ]]; then
+    script_parent=${script_path%/*}
+fi
+script_dir=$(CDPATH='' cd -- "$script_parent" && pwd -P)
+preparation_dir=${script_dir%/*}
+banner_dir=${preparation_dir%/*}
+repo_dir=${banner_dir%/*}
+image=droiddeck-prefix-tests:ubuntu26.04-arm64
+
+# Build from a private allowlisted snapshot, without host bind mounts or repository secrets.
+context=$(mktemp -d "${TMPDIR:-/tmp}/droiddeck-prefix-tests.XXXXXXXX")
+trap 'rm -rf -- "$context"' EXIT
+mkdir -p "$context/input/prefix-preparation/container" "$context/input/banner-proton"
+cp "$script_dir/Dockerfile" "$script_dir/.dockerignore" "$context/"
+cp "$script_dir/run-in-container.sh" "$context/input/prefix-preparation/container/"
+for file in prepare-game.sh prepare_game.py preparation_common.py preparation_assets.py preparation_store.py test_prepare_game.py test_preparation_store.py; do
+    cp "$preparation_dir/$file" "$context/input/prefix-preparation/"
+done
+for file in test-softdenchi-install.py test-softdenchi-setup.py test-softdenchi-observer.py install-softdenchi.py setup-softdenchi.py; do
+    cp "$banner_dir/$file" "$context/input/banner-proton/"
+done
+cp "$repo_dir/softdenchi_observer.py" "$repo_dir/proton" "$context/input/"
+docker build --platform linux/arm64 --tag "$image" "$context"
+docker image inspect --format 'TEST_IMAGE={{.Id}} PLATFORM={{.Os}}/{{.Architecture}}' "$image"
+for test_user in 0:0 10000:10000; do
+    printf '\nTesting as uid:gid %s\n' "$test_user"
+    docker run --rm --platform linux/arm64 --user "$test_user" \
+        --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+        --pids-limit 128 --memory 512m --cpus 2 \
+        --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,size=128m \
+        "$image" \
+        /bin/bash /input/prefix-preparation/container/run-in-container.sh
+done

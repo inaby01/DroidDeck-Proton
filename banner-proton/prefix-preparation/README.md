@@ -115,7 +115,15 @@ Exit codes: inspection `0` means a report was produced, input rejection `1`,
 blocked plan or local staging paused before preparation `2`. A successful
 inspection exit is not preparation completion.
 
-Local tests (synthetic files only):
+Primary local validation is the [Ubuntu 26.04/arm64 container](container/README.md),
+which runs these tests plus installer/setup/observer regressions as root and nonroot.
+From the repository root:
+
+```bash
+bash banner-proton/prefix-preparation/container/run-tests.sh
+```
+
+Supplementary host tests (synthetic files only, from this directory):
 
 ```bash
 /usr/bin/python3 -I -B test_prepare_game.py
