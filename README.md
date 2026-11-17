@@ -351,9 +351,10 @@ perform its usual prefix update when subsequently launched. The helpers target D
 Use `banner-proton/check-softdenchi-selection.py --app-id <APP_ID>` for a limited selection report.
 
 The separate [prefix preparation tool](banner-proton/prefix-preparation/README.md)
-currently supports explicit local registration inputs, offline inspection and blocked
-plans only. It does not invoke the installer or synchronizer and cannot prepare a
-prefix yet. Its version and validation results are independent of the Proton build.
+supports explicit local registration inputs, offline inspection, blocked plans and
+opt-in private asset caching/journaling. It does not invoke the installer or
+synchronizer and cannot prepare a prefix yet. Its version and validation results
+are independent of the Proton build.
 Keep configuration backups and diagnostic reports local. Per-game scripts, device-specific test
 reports and prefix-preparation design documents are not distributed in this branch.
 

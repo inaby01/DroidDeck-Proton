@@ -1,10 +1,15 @@
-# Prefix preparation: read-only stage (0.1.0)
+# Prefix preparation: offline planning and local staging (0.2.0)
 
-`prepare-game.sh` inspects explicit local inputs and displays a blocked preparation
-plan. It does not launch Wine, execute DroidDeck helpers or `user_settings.py`,
-install dependencies, download, register Proton, synchronize settings, write state,
-or create/modify a prefix. Running without a mode defaults to inspection. There
-is no execution mode. No result file is saved automatically.
+`prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
+inputs without any writes. `--stage-local` separately opts into caching declared
+assets and journaling progress inside one explicit private management root;
+`--list-local` reads its inventory. See [local staging](LOCAL-STAGING.md) for its
+asset schema, write boundaries and restart procedure.
+
+No mode launches Wine, executes DroidDeck helpers or `user_settings.py`, installs
+dependencies, downloads, extracts archives, registers Proton, synchronizes settings,
+or creates/modifies a game prefix. There is no prefix executor. No inspection or
+plan result file is saved automatically.
 
 Use the complete directory from a trusted local installation. The entry point uses
 `/usr/bin/python3 -I -B` (Python 3.9 or later), ignoring `PYTHONPATH` and avoiding
@@ -27,8 +32,8 @@ bash prepare-game.sh --plan \
 
 The first command lists registrations. Select by ID with `--app-id`; selection by
 name or basename is deliberately unsupported. `--exe-root` must explicitly bound
-the selected executable. All input paths must be absolute, without `..`, symlink
-parents or `.env` files. Input files must be single-link regular files. Prefix
+the selected executable. All explicit input paths must be absolute, without `..`,
+symlink parents or `.env` files. Input files must be single-link regular files. Prefix
 contents are not recursively scanned. Only the offline prefix version is read;
 registry, authentication and save contents are not collected.
 
@@ -85,8 +90,8 @@ Recipe document (declarative blockers only, **no installer commands or paths**):
 Reserved handlers are `mfc-local` and `softdenchi-interactive`; neither is
 executable in this stage. Recipes cannot declare success or arbitrary commands.
 JSON inputs are limited to 1 MiB, nesting depth 16, strings of 4 KiB, 128 dependency
-nodes, and dependency graph depth 16. Rendered reports are limited to 1 MiB. Duplicate keys, unknown schema/fields,
-missing references, cycles and invalid scalar types are rejected.
+nodes, and dependency graph depth 16. Rendered reports are limited to 1 MiB.
+Duplicate keys, unknown schema/fields, missing references, cycles and invalid scalar types are rejected.
 
 The report includes an input digest and separate profile/recipe revisions. Local
 paths and registration IDs appear in terminal output, so treat it as private.
@@ -98,23 +103,30 @@ unsupported syntax fails closed instead of executing the installed helper.
 
 Version arguments are operator declarations. A matching declared version or EXE
 reference hash does not promote a combination to `verified`. Process state, free
-space, assets, dependency postconditions, fonts, payload integrity, sync impact
-and real launch binding remain uninspected. Existing prefixes are read-only.
-Every plan includes `execution-not-implemented`; `writes` is always empty.
+space, dependency postconditions, fonts, payload integrity, sync impact and real
+launch binding remain uninspected. Assets are uninspected unless a manifest is
+supplied. Existing prefixes are read-only.
+Every plan includes `execution-not-implemented`; inspection/plan `writes` is always
+empty. Optional `--assets` and `--asset-root` inspect a local asset manifest and
+include its raw digest plus measured identities in the plan digest. Asset evidence
+remains operator-declared, and assets are not yet bound to executable recipes.
 
 Exit codes: inspection `0` means a report was produced, input rejection `1`,
-blocked plan `2`. A successful inspection exit is not preparation completion.
+blocked plan or local staging paused before preparation `2`. A successful
+inspection exit is not preparation completion.
 
 Local tests (synthetic files only):
 
 ```bash
 /usr/bin/python3 -I -B test_prepare_game.py
+/usr/bin/python3 -I -B test_preparation_store.py
 ```
 
 The source contract was checked against DroidDeck commit
 `cdff94e72c45da50af43bbceff28effaf0179caf`:
 [registration and prefix resolution](https://github.com/Droid-Deck/DroidDeck/blob/cdff94e72c45da50af43bbceff28effaf0179caf/tools/linuxfs/overlay/usr/local/bin/droiddeck-proton-run).
 The stricter ambiguity checks intentionally stop instead of choosing among
-multiple prefix candidates. Executable recipes, asset caching, state persistence,
-locks, synchronization and template cloning require subsequent implementation
-and dedicated tests. Device validation has not been performed for this tool.
+multiple prefix candidates. Asset caching, journal persistence and tool/prefix
+preparation locks are available for local staging. Executable recipes, DroidDeck setting locks, synchronization
+and template cloning require subsequent implementation and dedicated tests. Device
+validation has not been performed for this tool.

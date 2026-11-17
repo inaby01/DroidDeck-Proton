@@ -1,139 +1,41 @@
 #!/usr/bin/env python3
-"""Offline, read-only prefix inspection and blocked preparation plans (no executor)."""
+"""Offline inspection, blocked plans and private local staging (no prefix executor)."""
 
 import argparse
 import hashlib
 import itertools
 import json
-import os
 import re
-import stat
-import struct
+import sys
 import unicodedata
 from pathlib import Path
 
-VERSION = "0.1.0"
-MAX_JSON = 1024 * 1024
-MAX_REPORT = 1024 * 1024
-MAX_DEPTH = 16
-MAX_STRING = 4096
-MAX_DEPENDENCIES = 128
-MAX_EXE = 2 * 1024**3
-ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z", re.ASCII)
-SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
-HANDLERS = {"mfc-local", "softdenchi-interactive"}
+# -I excludes script paths; add only the trusted distribution directory, never CWD.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from preparation_assets import exe_identity, inspect_assets
+from preparation_common import (
+    HANDLERS,
+    MAX_DEPENDENCIES,
+    MAX_DEPTH,
+    MAX_REPORT,
+    MAX_STRING,
+    SHA256,
+    VERSION,
+    Invalid,
+    app_id,
+    fields,
+    identifier,
+    load_json,
+    read_bytes,
+    require,
+    revision,
+    safe_path,
+    string,
+    unchanged,
+)
+from preparation_store import PrivateStore, stage_local
 
-
-class Invalid(ValueError):
-    """An input cannot be interpreted safely."""
-
-
-def require(condition, message):
-    if not condition:
-        raise Invalid(message)
-
-
-def fields(value, required, optional=()):
-    require(type(value) is dict, "expected object")
-    require(set(required) <= value.keys() <= set(required) | set(optional), "unknown or missing fields")
-
-
-def string(value):
-    require(type(value) is str and 0 < len(value.encode("utf-8")) <= MAX_STRING, "invalid string")
-    return value
-
-
-def identifier(value):
-    require(type(value) is str and ID.fullmatch(value), "invalid identifier")
-    return value
-
-
-def revision(value):
-    require(type(value) is int and 1 <= value <= 0x7FFFFFFF, "invalid revision")
-
-
-def app_id(value):
-    if type(value) is str:
-        require(re.fullmatch(r"(?:0|[1-9][0-9]{0,9}|-[1-9][0-9]{0,9})", value), "invalid app ID")
-        value = int(value)
-    require(type(value) is int and -0x80000000 <= value <= 0xFFFFFFFF and value != 0, "invalid app ID")
-    return str(value & 0xFFFFFFFF)
-
-
-def safe_path(value, root=None):
-    path = Path(string(str(value)))
-    require(path.is_absolute() and ".." not in path.parts, "absolute path without '..' required")
-    require(not any(part == ".env" or part.startswith(".env.") for part in path.parts), "environment files forbidden")
-    if root is not None:
-        require(path != root and path.is_relative_to(root), "path outside allowed root")
-    for part in reversed([path, *path.parents]):
-        try:
-            mode = part.lstat().st_mode
-        except FileNotFoundError:
-            continue
-        require(not stat.S_ISLNK(mode), "symlink in input path")
-    return path
-
-
-def regular_open(path, limit):
-    path = safe_path(path)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    stream = os.fdopen(descriptor, "rb")
-    try:
-        info = os.fstat(stream.fileno())
-        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "single-link regular file required")
-        require(info.st_size <= limit, "input file too large")
-    except BaseException:
-        stream.close()
-        raise
-    return stream
-
-
-def unchanged(before, after):
-    require((before.st_ino, before.st_dev, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
-            (after.st_ino, after.st_dev, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed during read")
-
-
-def read_bytes(path, limit=MAX_JSON):
-    with regular_open(path, limit) as stream:
-        before = os.fstat(stream.fileno())
-        data = stream.read(limit + 1)
-        unchanged(before, os.fstat(stream.fileno()))
-    require(len(data) <= limit, "input file too large")
-    return data
-
-
-def pairs(items):
-    result = {}
-    for key, value in items:
-        require(key not in result, "duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def bounded(value, depth=0):
-    require(depth <= MAX_DEPTH, "input nesting too deep")
-    if type(value) is str:
-        require(len(value.encode("utf-8")) <= MAX_STRING, "string too long")
-    elif type(value) is dict:
-        for key, item in value.items():
-            bounded(key, depth + 1)
-            bounded(item, depth + 1)
-    elif type(value) is list:
-        for item in value:
-            bounded(item, depth + 1)
-    else:
-        require(value is None or type(value) in (int, bool), "unsupported JSON scalar")
-
-
-def load_json(path):
-    raw = read_bytes(path)
-    try:
-        value = json.loads(raw, object_pairs_hook=pairs)
-        bounded(value)
-    except (ValueError, UnicodeError, RecursionError) as error:
-        raise Invalid("invalid or excessive JSON") from error
-    return value, hashlib.sha256(raw).hexdigest()
+__all__ = ["Invalid", "unchanged"]
 
 
 def unique_ids(values):
@@ -228,35 +130,6 @@ def registrations(document):
         require(key not in result, "duplicate or signed/unsigned alias registration ID")
         result[key] = {"app_id": key, "title": title, "exe": str(exe)}
     return result
-
-
-def exe_identity(path):
-    """Stream a bounded executable; inspect only DOS/PE headers, never load it."""
-    with regular_open(path, MAX_EXE) as stream:
-        before = os.fstat(stream.fileno())
-        dos = stream.read(64)
-        require(len(dos) == 64 and dos[:2] == b"MZ", "EXE lacks DOS header")
-        offset = struct.unpack_from("<I", dos, 60)[0]
-        require(64 <= offset <= before.st_size - 26, "invalid PE offset")
-        stream.seek(offset)
-        header = stream.read(26)
-        require(header[:4] == b"PE\0\0", "EXE lacks PE signature")
-        optional_size = struct.unpack_from("<H", header, 20)[0]
-        require(optional_size >= 2 and offset + 24 + optional_size <= before.st_size, "truncated PE optional header")
-        machine = struct.unpack_from("<H", header, 4)[0]
-        magic = struct.unpack_from("<H", header, 24)[0]
-        require((machine, magic) in ((0x14C, 0x10B), (0x8664, 0x20B), (0xAA64, 0x20B)), "unsupported PE architecture")
-        stream.seek(0)
-        digest = hashlib.sha256()
-        size = 0
-        while chunk := stream.read(1024 * 1024):
-            size += len(chunk)
-            require(size <= MAX_EXE, "EXE grew beyond limit")
-            digest.update(chunk)
-        unchanged(before, os.fstat(stream.fileno()))
-    return {"sha256": digest.hexdigest(), "size": size,
-            "pe_machine": {0x14C: "x86", 0x8664: "x86_64", 0xAA64: "arm64"}[machine],
-            "provenance": "local-measurement-only"}
 
 
 def prefix_info(steam, key):
@@ -370,6 +243,20 @@ def build_report(args):
                   "running-processes", "free-space", "asset-provenance-and-hashes", "dependency-postconditions",
                   "payload-integrity", "synchronization-impact", "normal-launch-binding"],
               "input_hashes": {"registrations": added_hash}, "games": list(games.values())}
+    assets = getattr(args, "assets", None)
+    asset_root = getattr(args, "asset_root", None)
+    if assets is not None:
+        require(asset_root is not None, "--asset-root required with --assets")
+        document, manifest_hash = load_json(assets)
+        report["assets"] = inspect_assets(document, asset_root)
+        report["input_hashes"]["assets"] = manifest_hash
+        report["uninspected"].remove("asset-provenance-and-hashes")
+        report["uninspected"].append("asset-evidence-authenticity-and-recipe-binding")
+        report["blockers"].append("assets-not-bound-to-executable-recipes")
+        for asset in report["assets"]:
+            report["blockers"].extend("asset:" + asset["asset_id"] + ":" + reason for reason in asset["blockers"])
+    else:
+        require(asset_root is None, "--asset-root requires --assets")
     if args.app_id is None:
         require(args.profile is None and args.recipes is None, "select --app-id before choosing a profile")
         report["blockers"].append("select-registration-id")
@@ -419,7 +306,7 @@ def build_report(args):
         report["blockers"].append("compatibility-unverified")
     report["input_digest"] = hashlib.sha256(json.dumps(
         {"hashes": report["input_hashes"], "target": report["target"], "prefix": report["prefix"],
-         "selection": selection, "compatibility": report.get("compatibility")}, sort_keys=True).encode()).hexdigest()
+         "selection": selection, "compatibility": report.get("compatibility"), "assets": report.get("assets")}, sort_keys=True).encode()).hexdigest()
     if args.plan:
         report["proposed_steps"] = [
             {"step": "proton-add-or-reuse", "status": "uninspected"},
@@ -444,24 +331,49 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--inspect", action="store_true")
     mode.add_argument("--plan", action="store_true")
-    parser.add_argument("--registrations", type=Path, required=True, help="DroidDeck added-games JSON, explicit input only")
-    parser.add_argument("--steam-root", type=Path, required=True)
-    parser.add_argument("--settings-root", type=Path, required=True)
+    mode.add_argument("--stage-local", action="store_true", help="cache assets and pause private state; never prepare a prefix")
+    mode.add_argument("--list-local", action="store_true", help="read private cache/run inventory")
+    parser.add_argument("--registrations", type=Path, help="DroidDeck added-games JSON, explicit input only")
+    parser.add_argument("--steam-root", type=Path)
+    parser.add_argument("--settings-root", type=Path)
     parser.add_argument("--exe-root", type=Path)
     parser.add_argument("--app-id")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--recipes", type=Path)
     parser.add_argument("--droiddeck-version")
     parser.add_argument("--proton-version")
+    parser.add_argument("--assets", type=Path)
+    parser.add_argument("--asset-root", type=Path)
+    parser.add_argument("--management-root", type=Path)
+    parser.add_argument("--resume-run")
     args = parser.parse_args()
     try:
-        report = display(build_report(args))
+        if args.list_local:
+            require(args.management_root is not None, "--management-root required")
+            require(not any((args.registrations, args.steam_root, args.settings_root, args.exe_root, args.app_id,
+                             args.profile, args.recipes, args.assets, args.asset_root, args.resume_run,
+                             args.droiddeck_version, args.proton_version)), "inventory accepts only a management root")
+            with PrivateStore(args.management_root) as store:
+                result = {"tool_version": VERSION, "mode": "list-local", "writes": [], **store.inventory()}
+        else:
+            require(args.registrations is not None and args.steam_root is not None and args.settings_root is not None,
+                    "registration and settings paths required")
+            if args.stage_local:
+                require(args.management_root is not None, "--management-root required")
+                result = stage_local(args, lambda: build_report(args))
+            else:
+                require(args.management_root is None and args.resume_run is None, "store options require a local management mode")
+                result = build_report(args)
+        report = display(result)
     except (OSError, ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
         # Do not echo exception text, filesystem paths or unknown input content.
+        if args.stage_local:
+            parser.exit(1, "Local staging stopped; private cache/run files may remain. "
+                           "Use --list-local to inspect them. No prefix preparation performed.\n")
         parser.exit(1, "Input rejected; no preparation performed. Check input formats and paths.\n")
     print(report)
     # A readable report is distinct from a usable preparation plan.
-    return 2 if args.plan else 0
+    return 2 if args.plan or args.stage_local else 0
 
 
 if __name__ == "__main__":
