@@ -9,6 +9,13 @@ user_settings = {
     #enable logging
     "PROTON_LOG": "1",
 
+    #Observe SoftDenchi process lifetimes in the log; never terminates processes.
+    #"PROTON_SOFTDENCHI_OBSERVE": "1",
+
+    #Experimental: revalidate and send SIGTERM to residual SdProxy after game exit.
+    #Requires pidfd support and an observed game process handoff; disabled by default.
+    #"PROTON_SOFTDENCHI_CLEANUP": "1",
+
     #custom Wine debug logging
     #"WINEDEBUG": "+timestamp,+pid,+tid,+seh,+unwind,+threadname,+debugstr,+loaddll,+mscoree",
 

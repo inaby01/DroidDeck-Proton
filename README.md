@@ -325,6 +325,33 @@ instead of `patches/protonprep-valve-staging.sh` and
 
 </details>
 
+## Custom SoftDenchi build
+
+This fork maintains the SoftDenchi compatibility patch and an optional process observer in
+`codex/proton-maintenance`. The Wine patch is vendored unchanged from
+[wine-patches commit 0299ce0](https://github.com/fitudao3788/wine-patches/blob/0299ce0ef53bb2a1ea2a4b08382de009b03b1517/patch/softdenchi-fixes.patch).
+Its commit and SHA-256 are recorded in `banner-proton/PINS` and build metadata. The patch changes
+`crypt32`, `imagehlp` and MSI COM registration; it does not install Windows runtimes or supply credentials.
+
+`PROTON_SOFTDENCHI_OBSERVE=1` records process observations. The experimental
+`PROTON_SOFTDENCHI_CLEANUP=1` additionally revalidates and sends SIGTERM to residual SdProxy
+processes after an observed game handoff and exit. Both are disabled by default. Cleanup requires
+pidfd support and confirmed process identity/origin; missing observations or unknown processes
+prevent cleanup. It does not terminate UCManSvc or reset authentication state.
+
+`banner-proton/install-softdenchi.py` verifies the supplied archive's SHA-512 and installs it as
+`SoftDenchi-Proton`, outside DroidDeck's official-build replacement family. The generic
+`banner-proton/setup-softdenchi.py` accepts an explicit `--app-id` and `--mode`, installs or reuses
+the build, selects it, invokes DroidDeck's registration/synchronization and verifies the mapping.
+Stop games and Steam sessions first. Existing destinations with different metadata are rejected.
+Synchronization can apply other pending game selections as well; inspect those before using this
+helper. These tools do not create or reset game prefixes or install their dependencies. Proton may
+perform its usual prefix update when subsequently launched. The helpers target DroidDeck 0.7.1.
+
+Use `banner-proton/check-softdenchi-selection.py --app-id <APP_ID>` for a limited selection report.
+Keep configuration backups and diagnostic reports local. Per-game scripts, device-specific test
+reports and prefix-preparation design documents are not distributed in this branch.
+
 ## Credits
 
 [Valve](https://github.com/ValveSoftware/Proton) (Proton, Wine, Steam Linux Runtime) ·

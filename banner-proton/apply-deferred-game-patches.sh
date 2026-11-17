@@ -37,3 +37,12 @@ if [ -f "$root/FEX/CMakeLists.txt" ]; then
     patch -d External/rpmalloc -Np1 --forward < "$p"
   done
 fi
+
+# Keep this after prep.sh's clean-Wine check. Use -C because FEX patching changes cwd.
+. "$root/banner-proton/PINS"
+softdenchi_patch="$root/patches/softdenchi-fixes.patch"
+echo "SoftDenchi patch source commit: $SOFTDENCHI_PATCH_COMMIT"
+echo "$SOFTDENCHI_PATCH_SHA256  $softdenchi_patch" | sha256sum -c -
+git -C "$root/wine" apply --check "$softdenchi_patch"
+git -C "$root/wine" apply "$softdenchi_patch"
+git -C "$root/wine" apply --reverse --check "$softdenchi_patch"

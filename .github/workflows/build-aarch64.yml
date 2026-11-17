@@ -370,6 +370,12 @@ jobs:
           # the shipped script against the shipped files.
           tar -C x -xzf new/$NAME.tar.gz "$DIR/proton" --wildcards '*/files/lib/wine/igdext/*'
           python3 -I banner-proton/test-igdext.py "x/$DIR"
+      - name: SoftDenchi observer in the distribution
+        run: |
+          NAME="${{ needs.meta.outputs.build_name }}"
+          DIR="${{ needs.meta.outputs.display_name }}"
+          tar -C x -xzf new/$NAME.tar.gz "$DIR/softdenchi_observer.py"
+          python3 -I banner-proton/test-softdenchi-observer.py "x/$DIR"
       - name: Build info
         run: |
           NAME="${{ needs.meta.outputs.build_name }}"
@@ -393,6 +399,10 @@ jobs:
             "valve_wine": {"branch": pins.get("VALVE_WINE_BRANCH"), "commit": pins.get("VALVE_WINE_COMMIT")},
             "cachyos": {"release": pins.get("CACHYOS_RELEASE"), "wine_branch": pins.get("CACHYOS_WINE_BRANCH"), "wine_commit": pins.get("CACHYOS_WINE_COMMIT")},
             "droiddeck_esync_patch": pins.get("DROIDDECK_ESYNC_PATCH") or None,
+            "softdenchi_patch": {
+              "source_commit": pins["SOFTDENCHI_PATCH_COMMIT"],
+              "sha256": pins["SOFTDENCHI_PATCH_SHA256"],
+            },
             "build_dir": os.path.join(os.environ["GITHUB_WORKSPACE"], "build"),
             "sha256": sums,
             "run_id": os.environ["GITHUB_RUN_ID"],

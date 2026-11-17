@@ -2995,7 +2995,26 @@ class Session:
             else:
                 argv = [g_proton.wine_bin, "c:\\windows\\system32\\steam.exe"]
 
-        rc = self.run_proc(adverb + argv + sys.argv[2:] + self.cmdlineappend)
+        observer = None
+        if (self.env.get("PROTON_SOFTDENCHI_OBSERVE") == "1"
+                or self.env.get("PROTON_SOFTDENCHI_CLEANUP") == "1"):
+            try:
+                from softdenchi_observer import Observer
+                observer = Observer(self.env, sys.argv[2] if len(sys.argv) > 2 else "",
+                                    self.log_file if self.log_file is not None else sys.stderr,
+                                    mirror=sys.stderr, wineserver_path=g_proton.wineserver_bin)
+                observer.start()
+            except Exception as exc:
+                log("SoftDenchi observer could not start: " + type(exc).__name__)
+                if observer is not None:
+                    observer.stop()
+                observer = None
+        rc = None
+        try:
+            rc = self.run_proc(adverb + argv + sys.argv[2:] + self.cmdlineappend)
+        finally:
+            if observer is not None:
+                observer.stop(returncode=rc)
 
         if remote_debug_proc:
             remote_debug_proc.kill()
