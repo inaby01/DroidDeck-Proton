@@ -1,0 +1,120 @@
+# Prefix preparation: read-only stage (0.1.0)
+
+`prepare-game.sh` inspects explicit local inputs and displays a blocked preparation
+plan. It does not launch Wine, execute DroidDeck helpers or `user_settings.py`,
+install dependencies, download, register Proton, synchronize settings, write state,
+or create/modify a prefix. Running without a mode defaults to inspection. There
+is no execution mode. No result file is saved automatically.
+
+Use the complete directory from a trusted local installation. The entry point uses
+`/usr/bin/python3 -I -B` (Python 3.9 or later), ignoring `PYTHONPATH` and avoiding
+bytecode writes. It does not search the current directory or PATH for Python.
+
+Example with synthetic paths and an explicitly chosen ID:
+
+```bash
+bash prepare-game.sh --inspect \
+  --registrations /test/added-games.json \
+  --steam-root /test/Steam --settings-root /test/droiddeck-compat
+
+bash prepare-game.sh --plan \
+  --registrations /test/added-games.json \
+  --steam-root /test/Steam --settings-root /test/droiddeck-compat \
+  --app-id 42 --exe-root /test/games \
+  --profile /test/profile.json --recipes /test/recipes.json \
+  --droiddeck-version 0.7.1 --proton-version example-proton-r1
+```
+
+The first command lists registrations. Select by ID with `--app-id`; selection by
+name or basename is deliberately unsupported. `--exe-root` must explicitly bound
+the selected executable. All input paths must be absolute, without `..`, symlink
+parents or `.env` files. Input files must be single-link regular files. Prefix
+contents are not recursively scanned. Only the offline prefix version is read;
+registry, authentication and save contents are not collected.
+
+The registration input is the **added-games JSON list** consumed by DroidDeck
+0.7.1's `droiddeck-proton-run` via `BL_ADDED_GAMES`. This stage does not discover the
+Android-owned file, read Steam binary `shortcuts.vdf`, or verify the installed
+DroidDeck version. Supply an existing local list explicitly; do not interpret this
+as a request to change game registration. Only `appid`, `exe`, and optional
+`name`/`title` are projected into the report; other registration fields are ignored.
+
+```json
+[{"appid": 42, "exe": "/test/games/Example/Game.exe", "name": "Example"}]
+```
+
+Signed 32-bit IDs are normalized to unsigned. Duplicate normalized IDs and
+multiple signed/unsigned compatdata candidates are rejected. The EXE's current
+SHA-256, size and PE architecture are measured without execution. A measured hash
+is not provenance or a known reference hash. EXE input has a fixed 2 GiB ceiling.
+
+Optional declarative profile (all fields required, unknown fields rejected):
+
+```json
+{
+  "schema_version": 1,
+  "profile_id": "example",
+  "revision": 1,
+  "title": "Example",
+  "edition": "Unconfirmed edition",
+  "edition_status": "unconfirmed",
+  "droiddeck_versions": ["0.7.1"],
+  "proton_versions": ["example-proton-r1"],
+  "dependencies": ["example-runtime"],
+  "evidence": ["Local investigation pending"],
+  "exe_sha256": null
+}
+```
+
+Recipe document (declarative blockers only, **no installer commands or paths**):
+
+```json
+{
+  "schema_version": 1,
+  "dependencies": [{
+    "dependency_id": "example-runtime",
+    "revision": 1,
+    "handler": "mfc-local",
+    "requires": [],
+    "status": "blocked",
+    "reason": "Asset provenance and postconditions not established"
+  }]
+}
+```
+
+Reserved handlers are `mfc-local` and `softdenchi-interactive`; neither is
+executable in this stage. Recipes cannot declare success or arbitrary commands.
+JSON inputs are limited to 1 MiB, nesting depth 16, strings of 4 KiB, 128 dependency
+nodes, and dependency graph depth 16. Rendered reports are limited to 1 MiB. Duplicate keys, unknown schema/fields,
+missing references, cycles and invalid scalar types are rejected.
+
+The report includes an input digest and separate profile/recipe revisions. Local
+paths and registration IDs appear in terminal output, so treat it as private.
+Raw settings, environment values and unrelated configuration fields are omitted;
+terminal controls are escaped. Steam's game/default mapping and the UI's choice
+are reported separately. A choice alone does not prove a matching wrapper or
+payload. The parser accepts bounded quoted text VDF with braces and line comments;
+unsupported syntax fails closed instead of executing the installed helper.
+
+Version arguments are operator declarations. A matching declared version or EXE
+reference hash does not promote a combination to `verified`. Process state, free
+space, assets, dependency postconditions, fonts, payload integrity, sync impact
+and real launch binding remain uninspected. Existing prefixes are read-only.
+Every plan includes `execution-not-implemented`; `writes` is always empty.
+
+Exit codes: inspection `0` means a report was produced, input rejection `1`,
+blocked plan `2`. A successful inspection exit is not preparation completion.
+
+Local tests (synthetic files only):
+
+```bash
+/usr/bin/python3 -I -B test_prepare_game.py
+```
+
+The source contract was checked against DroidDeck commit
+`cdff94e72c45da50af43bbceff28effaf0179caf`:
+[registration and prefix resolution](https://github.com/Droid-Deck/DroidDeck/blob/cdff94e72c45da50af43bbceff28effaf0179caf/tools/linuxfs/overlay/usr/local/bin/droiddeck-proton-run).
+The stricter ambiguity checks intentionally stop instead of choosing among
+multiple prefix candidates. Executable recipes, asset caching, state persistence,
+locks, synchronization and template cloning require subsequent implementation
+and dedicated tests. Device validation has not been performed for this tool.
