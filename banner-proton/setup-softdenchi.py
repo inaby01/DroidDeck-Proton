@@ -74,13 +74,23 @@ def select_game(steam, settings, directory, app_id, compatibility):
     return backup
 
 
-def setup(archive, app_id, mode, home, compatibility, installer, synchronize):
+def prepare_tool(archive, mode, home, compatibility, installer):
+    """Add/reuse the tool only; leave game choices and synchronization for later."""
+    require_stopped(compatibility)
+    steam = home / ".local/share/Steam"
+    if not (steam / "config/config.vdf").is_file():
+        raise ValueError("既存のSteam設定がないため停止しました。")
+    return install_or_reuse(archive, steam / "compatibilitytools.d", mode, installer)
+
+
+def finish_binding(app_id, directory, home, compatibility, synchronize):
+    """Legacy global synchronization, isolated from installation for existing callers.
+
+    The prefix engine must use its target-only adapter instead of this global path.
+    """
     require_stopped(compatibility)
     steam = home / ".local/share/Steam"
     settings = home / ".local/share/droiddeck-compat"
-    if not (steam / "config/config.vdf").is_file():
-        raise ValueError("既存のSteam設定がないため停止しました。")
-    directory = install_or_reuse(archive, steam / "compatibilitytools.d", mode, installer)
     backup = select_game(steam, settings, directory, app_id, compatibility)
     require_stopped(compatibility)
     synchronize(steam)
@@ -92,7 +102,12 @@ def setup(archive, app_id, mode, home, compatibility, installer, synchronize):
     if not wanted or mapping.get(app_id) != wanted or choices.get(app_id) != request:
         raise ValueError("選択と起動設定が一致しません。ゲームを起動せず、表示内容を共有してください。")
     return {"app_id": app_id, "tool": wanted, "directory": directory.name,
-            "mode": mode, "selection_verified": True, "backup": str(backup)}
+            "selection_verified": True, "backup": str(backup)}
+
+
+def setup(archive, app_id, mode, home, compatibility, installer, synchronize):
+    directory = prepare_tool(archive, mode, home, compatibility, installer)
+    return {**finish_binding(app_id, directory, home, compatibility, synchronize), "mode": mode}
 
 
 def main():

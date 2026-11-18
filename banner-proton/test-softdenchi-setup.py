@@ -109,6 +109,25 @@ class SetupTests(unittest.TestCase):
             SETUP["install_or_reuse"](archive, directory.parent, "observe", installer)
         self.assertEqual((directory / "proton").read_text(), "keep")
 
+    def test_prepare_tool_leaves_selection_and_sync_for_later(self):
+        before = (self.settings / "games.json").read_bytes()
+        state = (self.settings / "state.json").read_bytes()
+        with patch.dict(SETUP["prepare_tool"].__globals__, install_or_reuse=Mock(return_value=self.directory)):
+            result = SETUP["prepare_tool"](Path("archive"), "cleanup", self.home, self.compatibility, {})
+        self.assertEqual(result, self.directory)
+        self.assertEqual((self.settings / "games.json").read_bytes(), before)
+        self.assertEqual((self.settings / "state.json").read_bytes(), state)
+        self.assertFalse((self.settings / "backups").exists())
+
+    def test_finish_binding_is_separate_from_installation(self):
+        self.compatibility.update({"tool_catalog": Mock(return_value=[]), "requested_tool": Mock(return_value="wanted"),
+                                   "read_config_mapping": Mock(return_value={"42": "wanted"})})
+        sync = Mock()
+        with patch.dict(SETUP["finish_binding"].__globals__, install_or_reuse=Mock(side_effect=AssertionError("install forbidden"))):
+            result = SETUP["finish_binding"]("42", self.directory, self.home, self.compatibility, sync)
+        sync.assert_called_once_with(self.steam)
+        self.assertTrue(result["selection_verified"])
+
     def test_failed_synchronization_is_not_reported_as_success(self):
         self.compatibility.update({
             "tool_catalog": Mock(return_value=[]),
