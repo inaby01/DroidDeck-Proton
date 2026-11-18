@@ -38,6 +38,7 @@ from preparation_common import (
     string,
 )
 from preparation_execution import validate_launch_record
+from preparation_tool_writer import validate_installation_record
 
 MAX_OBJECTS = 4096
 MARKER = {"schema_version": 1, "application": "droiddeck-prefix-preparation"}
@@ -336,8 +337,8 @@ class PrivateStore:
 
     def inventory(self):
         """Read-only bounded inventory. Incomplete objects remain visible, never deleted."""
-        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "backups": [], "temporary_records": []}
-        for directory in ("assets", "runs", "bindings", "launches", "backups"):
+        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "installations": [], "backups": [], "temporary_records": []}
+        for directory in ("assets", "runs", "bindings", "launches", "installations", "backups"):
             try:
                 with self.directory((directory,)) as fd:
                     names = self._names(fd)
@@ -370,6 +371,15 @@ class PrivateStore:
                         result["launches"][-1]["reinspection_required"] = True
                     except (OSError, Invalid, TypeError, KeyError):
                         result["launches"].append({"object": name, "status": "invalid"})
+                elif directory == "installations" and not name.startswith("tmp-"):
+                    try:
+                        record, _ = self.read_record("installations", name)
+                        validate_installation_record(record)
+                        result["installations"].append({key: record[key] for key in
+                            ("installation_id", "status", "phase", "published", "staging_name", "directory", "preparation_complete")})
+                        result["installations"][-1]["reinspection_required"] = True
+                    except (OSError, Invalid, TypeError, KeyError):
+                        result["installations"].append({"object": name, "status": "invalid"})
                 elif directory == "assets":
                     try:
                         with self.directory((directory, name)) as fd:

@@ -50,6 +50,7 @@ class InstallationPlan:
     customization: object = field(repr=False)
     runtime: object = field(repr=False)
     target: object = field(repr=False)
+    archive: object = field(repr=False)
 
     def summary(self):
         # No renderer bytes, runtime values, label contents or raw settings.
@@ -127,4 +128,4 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
                   {"path": str(destination), "action": "publish-new-tree-without-replacement"}],
               "binding": "deferred-until-dependencies-verified", "blockers": blockers,
               "preparation_complete": False, "writes": []}
-    return InstallationPlan(digest, report, inventory, customization, runtime, target)
+    return InstallationPlan(digest, report, inventory, customization, runtime, target, safe_path(archive))

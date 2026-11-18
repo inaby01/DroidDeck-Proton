@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.9.0)
+# Prefix preparation: offline planning and local staging (0.10.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -64,6 +64,33 @@ An internal minimum-runtime plan pins source/library/label identities and a supp
 umask, constructs only known loader-hook paths, and keeps environment values private.
 A snapshot plan cannot authorize a live launch; provenance, process scope and actual
 GUI/Wine compatibility still need caller checks.
+An internal Linux installation writer now materializes a pinned archive into a
+private staging directory using directory FDs, with bounded streaming and deferred
+links. It applies the generated six metadata files, explicitly preserves archive
+permissions under umask 0022/0077, verifies the whole completed tree, and publishes
+with Linux `renameat2(RENAME_NOREPLACE)`. There is no replacing fallback if libc,
+the kernel or the filesystem lacks support. See the
+[Linux rename documentation](https://man7.org/linux/man-pages/man2/renameat2.2.html).
+No Wine, wrapper, helper or archived Python is executed.
+
+The writer requires the private global/target locks, DroidDeck's settings lock,
+a fresh matching plan, scoped process observations and trusted caller readiness
+for provenance, target freshness, runtime and complete stopped scope. A snapshot
+may receive tool writes only inside that same snapshot; it cannot authorize a
+live installation or launch. The live path requires the real runtime/proc roots.
+New installation parents must be owned and not writable by others; unsafe archive
+permissions are refused. This writer remains unavailable through the CLI.
+
+Private `installations` records track staging, verification, publication intent and
+observed publication. Failed staging is retained. After publication, any failure
+requires inspection and never deletes the installed tree. If journal persistence
+itself fails, the last durable phase remains; `published: false` in a publication-
+intent record is not proof the destination was never created. Inventory always
+requires reinspection, including after a successful identity check. No automatic
+recovery, staging garbage collection or interrupted-install resume is implemented.
+Only our own empty staging wrapper is removed on success. Existing prefix, game,
+selection and state contents are not written by this operation.
+
 No inspection or plan result file is saved automatically.
 
 Use the complete directory from a trusted local installation. The entry point uses
@@ -192,6 +219,6 @@ The stricter ambiguity checks intentionally stop instead of choosing among
 multiple prefix candidates. Asset caching, journal persistence and tool/prefix
 preparation locks are available for local staging. A target-only binding planner/writer with the DroidDeck setting
 lock is implemented and locally tested; the writer still requires connection to
-real readiness checks. Executable recipes, new-tool installation/registration writers, final engine
+real readiness checks. Executable recipes, installation CLI/readiness integration, final engine
 integration and template cloning remain pending. Device
 validation has not been performed for this tool.
