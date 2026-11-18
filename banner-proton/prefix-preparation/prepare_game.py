@@ -34,6 +34,7 @@ from preparation_common import (
     string,
     unchanged,
 )
+from preparation_payload import inspect_archive, verify_tree
 from preparation_store import PrivateStore, stage_local
 from preparation_vdf import parse_vdf
 
@@ -302,6 +303,7 @@ def main():
     parser.add_argument("--version", action="version", version=VERSION)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--inspect", action="store_true")
+    mode.add_argument("--inspect-payload", action="store_true", help="read-only archive and optional installed-tree identity check")
     mode.add_argument("--plan", action="store_true")
     mode.add_argument("--stage-local", action="store_true", help="cache assets and pause private state; never prepare a prefix")
     mode.add_argument("--list-local", action="store_true", help="read private cache/run inventory")
@@ -319,9 +321,22 @@ def main():
     parser.add_argument("--tool-directory", help="plan target-only binding to an already registered custom tool")
     parser.add_argument("--management-root", type=Path)
     parser.add_argument("--resume-run")
+    parser.add_argument("--payload-archive", type=Path)
+    parser.add_argument("--payload-sha512")
+    parser.add_argument("--payload-root")
+    parser.add_argument("--payload-directory", type=Path)
     args = parser.parse_args()
     try:
-        if args.list_local:
+        if args.inspect_payload:
+            allowed = {"inspect_payload", "payload_archive", "payload_sha512", "payload_root", "payload_directory"}
+            require(not any(value for key, value in vars(args).items() if key not in allowed), "payload inspection is a separate mode")
+            inventory = inspect_archive(args.payload_archive, args.payload_sha512, args.payload_root)
+            result = {"tool_version": VERSION, "mode": "inspect-payload", **inventory.summary()}
+            if args.payload_directory is not None:
+                result["installed_payload"] = verify_tree(args.payload_directory, inventory)
+        elif args.list_local:
+            require(not any((args.payload_archive, args.payload_sha512, args.payload_root, args.payload_directory)),
+                    "payload options require --inspect-payload")
             require(args.management_root is not None, "--management-root required")
             require(not any((args.registrations, args.steam_root, args.settings_root, args.exe_root, args.app_id,
                              args.profile, args.recipes, args.assets, args.asset_root, args.resume_run,
@@ -329,6 +344,8 @@ def main():
             with PrivateStore(args.management_root) as store:
                 result = {"tool_version": VERSION, "mode": "list-local", "writes": [], **store.inventory()}
         else:
+            require(not any((args.payload_archive, args.payload_sha512, args.payload_root, args.payload_directory)),
+                    "payload options require --inspect-payload")
             require(args.registrations is not None and args.steam_root is not None and args.settings_root is not None,
                     "registration and settings paths required")
             if args.stage_local:

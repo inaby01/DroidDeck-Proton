@@ -18,7 +18,7 @@ trap 'rm -rf -- "$context"' EXIT
 mkdir -p "$context/input/prefix-preparation/container" "$context/input/banner-proton"
 cp "$script_dir/Dockerfile" "$script_dir/.dockerignore" "$context/"
 cp "$script_dir/run-in-container.sh" "$context/input/prefix-preparation/container/"
-for file in prepare-game.sh prepare_game.py preparation_common.py preparation_assets.py preparation_store.py preparation_vdf.py preparation_binding.py preparation_execution.py test_preparation_execution.py test_preparation_binding.py test_prepare_game.py test_preparation_store.py; do
+for file in prepare-game.sh prepare_game.py preparation_common.py preparation_assets.py preparation_store.py preparation_vdf.py preparation_binding.py preparation_execution.py preparation_payload.py test_preparation_payload.py test_preparation_execution.py test_preparation_binding.py test_prepare_game.py test_preparation_store.py; do
     cp "$preparation_dir/$file" "$context/input/prefix-preparation/"
 done
 for file in test-softdenchi-install.py test-softdenchi-setup.py test-softdenchi-observer.py install-softdenchi.py setup-softdenchi.py; do

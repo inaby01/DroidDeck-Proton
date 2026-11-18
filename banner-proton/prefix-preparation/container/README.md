@@ -52,10 +52,11 @@ For each UID the harness runs the same tests without replacing assertions:
 | Asset/cache/journal/locks | 36 |
 | Target-only binding / VDF | 30 |
 | Internal initialization/probe launch contracts | 28 |
+| Payload archive/tree identity | 33 |
 | Existing installer | 5 |
 | Existing setup | 9 |
 | Existing observer/cleanup | 74 |
-| Total | 205 |
+| Total | 238 |
 
 The script stops at the first failing suite and preserves the raw console error.
 A zero script exit means both UID runs finished; it is not a device preparation
@@ -72,3 +73,6 @@ The launch-contract suite executes a disposable Python substitute with fixed
 arguments, selected environment and synthetic prefix files. It tests process
 handling and rejection paths, including timeout without termination. It does not
 run Wine or an installer, verify the real payload, or establish runtime equivalence.
+
+Payload tests generate tiny archives and installed trees in temporary storage.
+Real NAS archives and runtime binaries are excluded from the Docker build context.
