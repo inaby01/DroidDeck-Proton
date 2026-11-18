@@ -408,8 +408,10 @@ member inspection, requires both material and registered EXE/marker to agree,
 and checks the same registration, baseline new ID, uniqueness, absent prefix
 including signed/numeric aliases, source stability and inode/metadata pins.
 It does not authorize a write based on a diagnostic JSON or receipt status.
-All checks are repeated under the existing private global/target locks and again
-immediately before the atomic receipt update. Any mismatch stops the operation.
+All checks are repeated under the existing private global/target locks. Receipt,
+registration, material content and inode pins are checked again immediately before
+the atomic receipt update; the archive is not streamed a third time in that
+callback. Any mismatch stops the operation.
 
 The original receipt is retained without overwrite under `probe-history`, named
 by its original SHA-256. An identical existing backup may be reused after an
