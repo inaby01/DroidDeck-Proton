@@ -40,7 +40,8 @@ def _text(value):
 
 
 def validate_selection_config(config):
-    fields(config, ("schema_version", "payload", "runtime_reference"))
+    fields(config, ("schema_version", "payload", "runtime_reference"), ("probe_material",))
+    require(type(config.get("probe_material", False)) is bool, "invalid probe menu option")
     require(type(config["schema_version"]) is int and config["schema_version"] == 1, "unknown selection config")
     payload = config["payload"]
     fields(payload, ("archive", "sha512", "root", "mode"), ("alternate_relative_path", "tool_slot"))
@@ -83,7 +84,7 @@ def _prefix_state(steam, key):
         with os.scandir(base) as children:
             for count, child in enumerate(children):
                 require(count < 4096, "too many prefix entries")
-                if re.fullmatch(r"-?[0-9]{1,10}", child.name) and int(child.name) % 2**32 == int(key):
+                if re.fullmatch(r"-?[0-9]+", child.name) and int(child.name) % 2**32 == int(key):
                     require(child.name in names, "noncanonical prefix alias")
                     require(safe_path(base / child.name, steam).is_dir(), "invalid existing prefix")
                     existing.append(child.name)
@@ -145,6 +146,12 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
               "preparation_complete": False, "writes": []}
     if prefix["exists"]:
         report["blockers"].append("existing-prefix-preserve")
+    from preparation_probe import EXE, verify_probe_registration
+    if exe.name == EXE:
+        report["probe_registration"] = checked("dedicated-probe-registration", verify_probe_registration,
+            exe, key, source, steam, home / ".local/state/droiddeck-prefix-preparation/probe-store")
+        report["blockers"].remove("new-test-registration-not-confirmed")
+        report["blockers"].append("registration-probe-only-not-game-profile")
     archive = None
     try:
         archive = _archive(directory, config["payload"])
@@ -199,7 +206,7 @@ def save_selection_report(directory, report, protected_roots=()):
         for _ in range(8):
             name = "plan-" + secrets.token_hex(4) + ".json"
             saved = copy.deepcopy(report)
-            saved["writes"] = [{"scope": "report-only", "filename": name}]
+            saved["writes"] = list(saved.get("writes", [])) + [{"scope": "report-only", "filename": name}]
             raw = (json.dumps(saved, ensure_ascii=True, indent=2) + "\n").encode()
             require(len(raw) <= MAX_REPORT, "report too large")
             current = safe_path(directory).stat()
@@ -409,7 +416,8 @@ def selection_script(config=None):
     parent = Path(__file__).resolve().parent
     names = ("preparation_common", "preparation_assets", "preparation_vdf", "preparation_binding", "preparation_target",
              "preparation_payload", "preparation_runtime", "preparation_customization", "preparation_runtime_context",
-             "preparation_installation", "preparation_selection")
+             "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
+             "preparation_tool_writer", "preparation_store", "preparation_probe", "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}
     installer = parent.parent / "install-softdenchi.py"
     if not installer.exists():
@@ -422,13 +430,13 @@ def selection_script(config=None):
             "    sys.modules[name] = module\n"
             "    exec(compile(source, name, 'exec'), module.__dict__)\n" +
             "with os.fdopen(os.dup(3), 'r', encoding='utf-8') as selection_input:\n"
-            "    status, _ = sys.modules['preparation_selection'].interactive_selection(\n"
+            "    status, _ = sys.modules['preparation_probe'].interactive_workflow(\n"
             "        sys.argv[1], sys.modules['preparation_distributed_installer'].render_installation,\n"
             "        config=" + ascii(config) + ", input_stream=selection_input)\n"
             "raise SystemExit(status)\n")
     compile(code, "selection-launcher", "exec")
     delimiter = "DROIDDECK_SELECTION_" + hashlib.sha256(code.encode()).hexdigest()[:16]
-    return ("#!/bin/bash\n# Plan only; automatically saves a new private report next to this script.\n"
+    return ("#!/bin/bash\n# Numbered plans and explicitly confirmed registration material; no prefix execution.\n"
             "if (( $# != 0 )); then echo 'この起動にはオプションは不要です。' >&2; exit 1; fi\n"
             'script_parent=.\nif [[ ${BASH_SOURCE[0]} == */* ]]; then script_parent=${BASH_SOURCE[0]%/*}; fi\n'
             'script_dir=$(CDPATH=\'\' cd -- "$script_parent" && pwd -P) || exit 1\n'

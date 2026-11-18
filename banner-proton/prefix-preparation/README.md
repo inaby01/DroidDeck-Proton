@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.13.0)
+# Prefix preparation: offline planning and local staging (0.14.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -333,3 +333,38 @@ lock is implemented and locally tested; the writer still requires connection to
 real readiness checks. Executable recipes, installation CLI/readiness integration, final engine
 integration and template cloning remain pending. Device
 validation has not been performed for this tool.
+
+
+## Dedicated registration material
+
+An emitted `prepare.sh` with the explicit boolean bundle option
+`"probe_material": true` adds a numbered common menu. Option 1 retains the
+read-only target plan. Option 2 previews a **new** randomly named folder under
+`HOME/Games`, then requires a separate `1` confirmation before writing anything.
+Canceling the preview writes nothing. There are no additional user flags.
+
+Creation validates the entire pinned archive, captures only the regular x86
+`files/lib/wine/i386-windows/cmd.exe` member (at most 2 MiB) in memory, and copies
+it as `prefix-probe.exe`, with `probe.json`. It never executes this EXE. A private
+receipt and global/target locks live under
+`HOME/.local/state/droiddeck-prefix-preparation/probe-store`; a new report is
+saved/exported with the existing report rules. Only these new material and private
+record/report paths are written. No existing destination is reused, replaced or
+repaired. Failures preserve partial material and a creating/failed receipt.
+
+The user must refresh the Android library or add the newly created EXE without
+launching it, then choose the new registration in the same common entry. This
+Android UI path has not yet been verified on a device. The plan requires the
+private ready receipt, exact marker and executable identity, the same directory
+and EXE inode (allowing real bind aliases), one unambiguous new registration ID
+relative to the pre-copy baseline, and absent compatdata including signed and
+noncanonical numeric aliases. A missing unrelated old EXE does not become a match.
+This confirms only the observed registration, not Android export freshness,
+a game profile, runtime provenance, full stopped scope or permission to execute.
+The registration probe remains distinct from any real game profile.
+
+An executable name or shared marker alone never establishes a trusted probe.
+Existing game files, saves, authenticated prefixes, Android registrations,
+Proton installations and compatibility settings are not copied or modified.
+Template creation, prefix initialization and dependency installation are still
+unavailable through this user entry.

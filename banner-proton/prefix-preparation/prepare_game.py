@@ -304,7 +304,7 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--inspect", action="store_true")
     mode.add_argument("--select-plan", action="store_true", help="select a registration and save a blocked plan only")
-    mode.add_argument("--emit-selection-script", action="store_true", help="emit short plan-only user launcher")
+    mode.add_argument("--emit-selection-script", action="store_true", help="emit short user launcher; optional confirmed registration material")
     mode.add_argument("--inspect-preflight", action="store_true", help="inspect paths/runtime; optionally probe private temporary capabilities")
     mode.add_argument("--emit-preflight-script", action="store_true", help="emit a standalone preflight script without running probes")
     mode.add_argument("--emit-runtime-audit", action="store_true", help="print a pasteable read-only runtime audit command")

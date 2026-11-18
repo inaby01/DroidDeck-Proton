@@ -98,6 +98,14 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(Invalid):
             self.plan()
 
+    def test_noncanonical_long_prefix_alias_is_not_missed(self):
+        prefix = self.steam / "steamapps/compatdata/04294967295"
+        prefix.mkdir(parents=True)
+        before = self.fixture.game.snapshot()
+        with self.assertRaises(Invalid):
+            self.plan()
+        self.assertEqual(before, self.fixture.game.snapshot())
+
     def test_reuse_connects_binding_plan_without_changing_settings(self):
         self.fixture.install_fixture()
         before = self.fixture.game.snapshot()
