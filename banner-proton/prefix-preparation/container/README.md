@@ -51,10 +51,11 @@ For each UID the harness runs the same tests without replacing assertions:
 | Offline preparation | 23 |
 | Asset/cache/journal/locks | 36 |
 | Target-only binding / VDF | 30 |
+| Internal initialization/probe launch contracts | 28 |
 | Existing installer | 5 |
 | Existing setup | 9 |
 | Existing observer/cleanup | 74 |
-| Total | 177 |
+| Total | 205 |
 
 The script stops at the first failing suite and preserves the raw console error.
 A zero script exit means both UID runs finished; it is not a device preparation
@@ -66,3 +67,8 @@ not an exact installed DroidDeck rootfs. The Docker Desktop Linux kernel, native
 UIDs, tmpfs and ordinary Linux syscalls differ from Android/proot and device
 storage. GUI, graphics/audio drivers, Wine, actual installer behavior,
 authentication, Steam binding and game operation are outside these tests.
+
+The launch-contract suite executes a disposable Python substitute with fixed
+arguments, selected environment and synthetic prefix files. It tests process
+handling and rejection paths, including timeout without termination. It does not
+run Wine or an installer, verify the real payload, or establish runtime equivalence.

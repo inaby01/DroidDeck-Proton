@@ -37,6 +37,7 @@ from preparation_common import (
     safe_path,
     string,
 )
+from preparation_execution import validate_launch_record
 
 MAX_OBJECTS = 4096
 MARKER = {"schema_version": 1, "application": "droiddeck-prefix-preparation"}
@@ -335,8 +336,8 @@ class PrivateStore:
 
     def inventory(self):
         """Read-only bounded inventory. Incomplete objects remain visible, never deleted."""
-        result = {"assets": [], "runs": [], "bindings": [], "backups": [], "temporary_records": []}
-        for directory in ("assets", "runs", "bindings", "backups"):
+        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "backups": [], "temporary_records": []}
+        for directory in ("assets", "runs", "bindings", "launches", "backups"):
             try:
                 with self.directory((directory,)) as fd:
                     names = self._names(fd)
@@ -360,6 +361,15 @@ class PrivateStore:
                                                   "completed_files": record["completed_files"], "preparation_complete": False})
                     except (OSError, Invalid, TypeError, KeyError):
                         result["bindings"].append({"object": name, "status": "invalid"})
+                elif directory == "launches" and not name.startswith("tmp-"):
+                    try:
+                        record, _ = self.read_record("launches", name)
+                        validate_launch_record(record)
+                        result["launches"].append({key: record[key] for key in
+                                                   ("launch_id", "app_id", "operation", "status", "preparation_complete")})
+                        result["launches"][-1]["reinspection_required"] = True
+                    except (OSError, Invalid, TypeError, KeyError):
+                        result["launches"].append({"object": name, "status": "invalid"})
                 elif directory == "assets":
                     try:
                         with self.directory((directory, name)) as fd:
