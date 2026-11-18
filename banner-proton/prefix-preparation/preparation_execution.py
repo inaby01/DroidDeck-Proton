@@ -28,6 +28,7 @@ from preparation_common import (
 )
 from preparation_payload import PayloadInventory, verify_tree
 from preparation_processes import ProcessStopCheck
+from preparation_runtime_context import HOOK_KEYS, RuntimeEnvironmentPlan
 from preparation_target import RegistrationPin
 
 RUNTIME_KEYS = frozenset((
@@ -151,7 +152,7 @@ class LaunchPlan:
 
 
 def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_environment,
-                expected_hashes, payload_inventory=None, payload_overlays=None, target_pin=None, operation="initialize",
+                expected_hashes, payload_inventory=None, payload_overlays=None, target_pin=None, runtime_plan=None, operation="initialize",
                 prefix_version_sha256=None, origin_launch_id=None):
     """Read-only plan. Hashes/runtime inputs come from trusted adapters, never profile JSON."""
     require(operation in OPERATIONS, "unsupported preparation operation")
@@ -187,7 +188,13 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
         launcher_hashes[name] = None if entry is None else entry["sha256"]
     require(launcher_hashes == expected_hashes, "launcher hashes differ from pinned payload")
     hashes = _identities(tool, launcher_hashes)
-    require(type(runtime_environment) is dict and runtime_environment.keys() <= RUNTIME_KEYS,
+    if runtime_plan is not None:
+        require(isinstance(runtime_plan, RuntimeEnvironmentPlan) and runtime_plan.root == safe_path("/")
+                and runtime_plan.view == "current-root", "live runtime environment plan required")
+        runtime_plan.verify()
+        require(runtime_environment == runtime_plan.environment, "runtime environment differs from pinned plan")
+    allowed_runtime_keys = RUNTIME_KEYS if runtime_plan is None else RUNTIME_KEYS | HOOK_KEYS | {"XAUTHORITY"}
+    require(type(runtime_environment) is dict and runtime_environment.keys() <= allowed_runtime_keys,
             "unsupported preparation runtime variable")
     require(all(type(v) is str and len(v.encode()) <= 4096 and not any(c in v for c in "\0\r\n")
                 for v in runtime_environment.values()), "invalid preparation runtime value")
@@ -204,11 +211,15 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
            "SteamGameId": game_id, "SteamOverlayGameId": game_id}
     spec = {"tool": tool, "steam": steam, "registration_id": key, "install": install, "work": work,
             "home": home, "runtime_environment": dict(runtime_environment), "expected_hashes": hashes,
-            "payload_inventory": payload_inventory, "payload_overlays": overlays, "target_pin": target_pin,
+            "payload_inventory": payload_inventory, "payload_overlays": overlays, "target_pin": target_pin, "runtime_plan": runtime_plan,
             "operation": operation, "prefix_version_sha256": prefix_version_sha256, "origin_launch_id": origin_launch_id}
     signature = {k: str(v) if hasattr(v, "parts") else v for k, v in spec.items()}
     signature["payload_inventory"] = payload_digest
     signature["target_pin"] = target_pin.digest
+    signature["runtime_plan"] = None if runtime_plan is None else runtime_plan.identity_digest
+    # Protocol keys remain private and are rechecked live, not persisted as credentials/digests.
+    signature["runtime_environment"] = {key:("present" if key == "PROOT_FP_KEY" else value)
+                                        for key,value in runtime_environment.items()}
     signature["tool_version"] = VERSION
     context = {k: v for k, v in signature.items() if k not in ("operation", "prefix_version_sha256", "origin_launch_id")}
     return LaunchPlan(operation, key, _digest(signature), _digest(context), payload_digest, target_pin.digest, spec, env, (str(tool / "proton"), *OPERATIONS[operation]))
@@ -225,6 +236,13 @@ def _verify_payload(plan):
     inventory, overlays = plan.spec["payload_inventory"], plan.spec["payload_overlays"]
     require(_payload_digest(inventory, overlays) == plan.payload_pin_digest, "payload pin changed")
     return verify_tree(plan.spec["tool"], inventory, overlays)
+
+
+def _verify_runtime(plan):
+    context = plan.spec["runtime_plan"]
+    if context is not None:
+        context.verify()
+        require(plan.spec["runtime_environment"] == context.environment, "runtime inputs changed")
 
 
 def _verify_target(plan):
@@ -320,6 +338,7 @@ class LaunchSession:
                 compatdata.mkdir(mode=0o700)  # Never replace or remove an existing prefix, including failed attempts.
             checks = self._guard()
             require(all(checks.values()), "launch prerequisites changed")
+            _verify_runtime(self.plan)
             _verify_target(self.plan)
             _verify_payload(self.plan)
             _identities(self.plan.spec["tool"], self.plan.spec["expected_hashes"])
@@ -350,6 +369,7 @@ class LaunchSession:
         self.record["status"] = "needs-user" if not checks["stopped"] else "failed"
         if checks["stopped"] and checks["target"] and checks["payload"] and checks["runtime"] and code == 0:
             try:
+                _verify_runtime(self.plan)
                 _verify_target(self.plan)
                 _verify_payload(self.plan)
                 _identities(self.plan.spec["tool"], self.plan.spec["expected_hashes"])

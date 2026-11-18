@@ -17,6 +17,7 @@ import preparation_execution as execution
 from preparation_common import Invalid
 from preparation_payload import inspect_archive
 from preparation_processes import ProcessStopCheck
+from preparation_runtime_context import RuntimeEnvironmentPlan
 from preparation_store import PrivateStore
 from preparation_target import pin_registration
 
@@ -500,6 +501,11 @@ class ExecutionTests(unittest.TestCase):
         with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), self.assertRaises(Invalid):
             self.session(store).start()
         self.assertFalse(self.compatdata.exists())
+
+    def test_runtime_snapshot_cannot_be_used_as_live_launch_environment(self):
+        context = RuntimeEnvironmentPlan("0"*64,"0077","root-snapshot",self.root,{},None,{},())
+        with self.assertRaisesRegex(Invalid,"live runtime environment plan required"):
+            self.plan(runtime_plan=context)
 
     def test_launch_record_validation_rejects_invalid_identifiers(self):
         result = self.launch()

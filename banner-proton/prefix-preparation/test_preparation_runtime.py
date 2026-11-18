@@ -164,7 +164,8 @@ class RuntimeTests(unittest.TestCase):
     def test_proc_diagnostics_preserve_reader_failures_without_promoting_namespace(self):
         proc = self.proc_fixture(links=2)
         result = runtime.inspect_process_basis(proc,{"DROIDDECK_AUDIT_SHELL_UMASK":"0077"})
-        self.assertFalse(result["self_proc_readable"])
+        self.assertTrue(result["self_proc_readable"])
+        self.assertEqual(result["status_read_basis"],"proc-self-directory-fd")
         self.assertEqual(result["shared_reader"]["validation"],"single-link regular file required")
         self.assertEqual(result["numeric_pid_fd_reader"]["status"],"read")
         self.assertEqual(result["numeric_pid_fd_reader"]["link_count"],2)

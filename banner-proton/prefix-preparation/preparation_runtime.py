@@ -187,6 +187,13 @@ def inspect_process_basis(proc, environment):
             result["proc_self_fd_reader"] = _status_via_directory_fd(proc,match[1])
     except (OSError,ValueError) as error:
         result["proc_self_link"] = _probe_error(error,"read-proc-self-link")
+    selected = result.get("proc_self_fd_reader",{})
+    if selected.get("status") == "read":
+        result.update(self_proc_readable=True,proc_uid_matches_getuid=selected["uid_matches_getuid"],
+                      proc_owner_matches_getuid=selected["owner_matches_getuid"],umask=selected["umask"],
+                      status_read_basis="proc-self-directory-fd")
+    else:
+        result["status_read_basis"] = "shared-reader" if result["self_proc_readable"] else "unavailable"
     shell_umask = environment.get("DROIDDECK_AUDIT_SHELL_UMASK","")
     result["shell_umask"] = shell_umask if re.fullmatch(r"[0-7]{4}",shell_umask) else None
     result["reader_diagnostics_only"] = True
