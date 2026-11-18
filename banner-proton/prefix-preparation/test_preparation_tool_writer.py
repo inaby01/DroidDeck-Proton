@@ -110,6 +110,22 @@ class ToolWriterTests(unittest.TestCase):
     def test_new_install_under_public_umask_uses_pinned_metadata_modes(self):
         self.assert_new_install(0o022)
 
+    def test_preparation_slot_publication_keeps_existing_legacy_tree(self):
+        with self.store() as store:
+            self.apply(store)
+            legacy = self.destination()
+            (legacy / "proton").write_bytes(b"KEEP_EXISTING_TOOL")
+            before = {str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in legacy.rglob("*") if path.is_file()}
+            self.fixture.options["tool_slot"] = "preparation"
+            plan = self.plan()
+            result = self.apply(store, plan)
+            self.assertEqual(result["status"], "installed-tree-verified")
+            destination = Path(plan.summary()["destination"])
+            self.assertNotEqual(destination, legacy)
+            self.assertTrue(verify_tree(destination, plan.inventory, plan.customization.overlays)["tree_matches"])
+            self.assertEqual(before, {str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in legacy.rglob("*") if path.is_file()})
+            self.assertFalse(self.compatdata.exists())
+
     def test_reuse_rechecks_whole_tree_without_installation_writes(self):
         with self.store() as store:
             self.apply(store)

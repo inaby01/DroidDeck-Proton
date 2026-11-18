@@ -58,8 +58,25 @@ class InstallationPlan:
         return copy.deepcopy(self.report)
 
 
+def _tree_variants(directory, inventory, archive_name, mode, helper, renderer, label, tool_slot):
+    matches, observations = [], []
+    for mask in (0o022, 0o077):
+        candidate = plan_customizations(inventory, archive_name, mode, helper, renderer, label=label, umask=mask, tool_slot=tool_slot)
+        try:
+            verify_tree(directory, inventory, candidate.overlays)
+        except (OSError, Invalid) as error:
+            diagnostic = getattr(error, "tree_diagnostic", {"check": "tree-validation-rejected", "error_class": type(error).__name__,
+                                                          "errno": getattr(error, "errno", None)})
+            observations.append({"creation_umask": format(mask, "04o"), "tree_matches": False, **diagnostic})
+            continue
+        observations.append({"creation_umask": format(mask, "04o"), "tree_matches": True})
+        matches.append((mask, candidate))
+    return matches, {"directory": directory.name, "strict_match": len(matches) == 1, "variants": observations,
+                     "modified_by_tool": False, "contents_recorded": False, "first_mismatch_only": True}
+
+
 def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runtime_audit,
-                      registrations, registration_id, exe_root, steam, renderer, parent_environment=None):
+                      registrations, registration_id, exe_root, steam, renderer, parent_environment=None, tool_slot="legacy"):
     require(mode in ("off", "observe", "cleanup"), "unsupported installation mode")
     steam = safe_path(steam)
     target = checked("target-registration-exe", pin_registration, registrations, registration_id, exe_root, steam)
@@ -68,7 +85,7 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
     runtime = checked("runtime-context", plan_runtime_environment, runtime_root, runtime_audit, parent_environment)
     helper = runtime.root / "usr/local/bin/steam-compatibility"
     customization = checked("expected-customizations", plan_customizations, inventory, safe_path(archive).name, mode, helper, renderer,
-                                        label=runtime.label, umask=int(runtime.umask, 8))
+                                        label=runtime.label, umask=int(runtime.umask, 8), tool_slot=tool_slot)
     destination = safe_path(steam / "compatibilitytools.d" / customization.directory, steam)
     # A game executable/install directory must never be inside the tool tree,
     # and the tree must never be installed inside that game's directory.
@@ -79,18 +96,20 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
         require(destination.is_dir(), "installation destination must be a directory")
         # The old installer did not record its creation mask. Accept only these
         # two generator-backed variants; never measure a file into expectations.
-        matches = []
-        for mask in (0o022, 0o077):
-            candidate = checked("expected-customizations", plan_customizations, inventory, safe_path(archive).name, mode, helper, renderer,
-                                             label=runtime.label, umask=mask)
-            try:
-                verify_tree(destination, inventory, candidate.overlays)
-            except Invalid:
-                continue
-            matches.append((mask, candidate))
-        require(len(matches) == 1, "existing installation differs from approved generated trees")
+        matches, observation = _tree_variants(destination, inventory, safe_path(archive).name, mode, helper, renderer, runtime.label, tool_slot)
+        if len(matches) != 1:
+            error = Invalid("existing installation differs from approved generated trees")
+            error.installed_tree_diagnostic = observation
+            raise error
         mask, customization = matches[0]
         reused_mask, action = format(mask, "04o"), "reuse-verified-tree"
+    legacy_observation = None
+    if tool_slot == "preparation":
+        legacy = plan_customizations(inventory, safe_path(archive).name, mode, helper, renderer,
+                                     label=runtime.label, umask=int(runtime.umask, 8))
+        legacy_path = steam / "compatibilitytools.d" / legacy.directory
+        if os.path.lexists(legacy_path):
+            _, legacy_observation = _tree_variants(legacy_path, inventory, safe_path(archive).name, mode, helper, renderer, runtime.label, "legacy")
     base = safe_path(steam / "steamapps/compatdata", steam)
     require(not base.exists() or base.is_dir(), "compatdata parent must be a directory")
     key = int(target.registration_id)
@@ -114,12 +133,13 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
         blockers.append("insufficient-estimated-installation-capacity")
     signature = {"inventory": inventory.digest, "archive_sha512": sha512, "customization": customization.digest,
                  "runtime": runtime.identity_digest, "target": target.digest, "destination": str(destination),
-                 "action": action, "prefix": prefix, "mode": mode}
+                 "action": action, "prefix": prefix, "mode": mode, "tool_slot": tool_slot}
     digest = digest_json(signature)
     # Recheck mutable identity inputs before publishing a composed report.
     target.verify()
     runtime.verify(parent_environment)
-    report = {"input_digest": digest, "action": action, "destination": str(destination), "mode": mode,
+    report = {"input_digest": digest, "action": action, "destination": str(destination), "mode": mode, "tool_slot": tool_slot,
+              "legacy_tool_observation": legacy_observation,
               "reused_creation_umask": reused_mask, "payload": inventory.summary(),
               "customization": customization.summary(), "runtime": runtime.summary(),
               "target_pin_digest": target.digest, "prefix": prefix, "capacity": capacity,

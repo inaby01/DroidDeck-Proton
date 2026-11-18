@@ -43,7 +43,7 @@ def validate_selection_config(config):
     fields(config, ("schema_version", "payload", "runtime_reference"))
     require(type(config["schema_version"]) is int and config["schema_version"] == 1, "unknown selection config")
     payload = config["payload"]
-    fields(payload, ("archive", "sha512", "root", "mode"), ("alternate_relative_path",))
+    fields(payload, ("archive", "sha512", "root", "mode"), ("alternate_relative_path", "tool_slot"))
     name = string(payload["archive"])
     require(re.fullmatch(r"DroidDeck-Proton-11-12\.8-softdenchi[1-9][A-Za-z0-9.-]*-aarch64\.tar\.gz", name), "unsupported archive name")
     require(type(payload["sha512"]) is str and re.fullmatch(r"[0-9a-f]{128}", payload["sha512"]), "expected archive checksum required")
@@ -56,6 +56,7 @@ def validate_selection_config(config):
         parts = relative.split("/")
         require(1 < len(parts) <= 8 and all(part and part not in (".", "..", ".env") and not part.startswith(".env.")
                 and not any(c in part for c in "\0\\\r\n") for part in parts) and parts[-1] == name, "invalid archive layout")
+    require(payload.get("tool_slot", "legacy") in ("legacy", "preparation"), "unknown tool slot")
     require(type(config["runtime_reference"]) is dict, "runtime reference required")
     return config
 
@@ -152,7 +153,7 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
     if archive is not None:
         installation = checked("installation-plan", plan_installation, archive=archive, sha512=config["payload"]["sha512"], archive_root=config["payload"]["root"],
             mode=config["payload"]["mode"], runtime_root=runtime_root, runtime_audit=config["runtime_reference"],
-            registrations=source, registration_id=key, exe_root=exe.parent, steam=steam, renderer=renderer, parent_environment=environment)
+            registrations=source, registration_id=key, exe_root=exe.parent, steam=steam, renderer=renderer, parent_environment=environment, tool_slot=config["payload"].get("tool_slot", "legacy"))
         report["installation_plan"] = installation.summary()
         report["blockers"].extend(report["installation_plan"]["blockers"])
         report["planned_writes"].extend(report["installation_plan"]["planned_writes"])
@@ -358,6 +359,8 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
             action = "新規配置（未実行）" if installation["action"] == "install-new" else "全体照合済みの既存版を再利用する計画"
             print("Proton: " + action, file=output)
             print("配置先: " + _text(installation["destination"]), file=output)
+            if installation.get("legacy_tool_observation") is not None:
+                print("既存のProtonはそのまま保持し、準備用の別配置を計画します。", file=output)
             capacity = installation["capacity"]
             print(f"tool配置の見積: {capacity['estimated_additional_bytes'] / 1024**2:.1f} MiB / 空き {capacity['available_bytes'] / 1024**3:.1f} GiB", file=output)
             baseline = report["prefix_capacity"]["template_allocation_estimate_bytes"]
@@ -377,6 +380,8 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
                              "registration or executable changed": "target-changed",
                              "single-link regular file required": "input-link-metadata-rejected"}.get(str(error), "input-rejected"),
                   "preparation_complete": False, "writes": []}
+        if hasattr(error, "installed_tree_diagnostic"):
+            report["installed_tree_diagnostic"] = error.installed_tree_diagnostic
         if selected_exe is not None:
             report["selected_exe_metadata"] = _input_metadata(selected_exe)
         print("検査停止: " + _text(report["check"]) + " / " + report["reason"] +

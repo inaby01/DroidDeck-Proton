@@ -167,6 +167,29 @@ class InstallationTests(unittest.TestCase):
         with self.assertRaises(Invalid):
             self.plan()
 
+    def test_root_mode_mismatch_has_bounded_metadata_diagnostics(self):
+        directory = self.install_fixture()
+        directory.chmod(0o700)
+        with self.assertRaises(Invalid) as failure:
+            self.plan()
+        diagnostic = failure.exception.installed_tree_diagnostic
+        self.assertFalse(diagnostic["strict_match"])
+        for variant in diagnostic["variants"]:
+            self.assertEqual(variant["check"], "root-mode")
+            self.assertEqual(variant["expected_mode"], "0755")
+            self.assertEqual(variant["actual_mode"], "0700")
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+
+    def test_binary_mismatch_diagnostic_does_not_record_file_contents(self):
+        directory = self.install_fixture()
+        (directory / "proton").write_bytes(b"DUMMY_PRIVATE_MODIFIED_CONTENT")
+        with self.assertRaises(Invalid) as failure:
+            self.plan()
+        diagnostic = failure.exception.installed_tree_diagnostic
+        self.assertTrue(any("sha256" in item.get("differing_fields", []) for item in diagnostic["variants"]))
+        self.assertNotIn("DUMMY_PRIVATE_MODIFIED_CONTENT", json.dumps(diagnostic))
+        self.assertNotIn(str(self.game.root), json.dumps(diagnostic))
+
     def test_modified_binary_or_extra_file_prevents_reuse(self):
         directory = self.install_fixture()
         proton = directory / "proton"

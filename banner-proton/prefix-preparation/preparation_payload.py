@@ -194,6 +194,18 @@ def inspect_archive(path, expected_sha512, root, capture=()):
                             digest_json({"root_mode": root_mode, "entries": entries}), expanded, external, captured)
 
 
+class TreeMismatch(Invalid):
+    """Fixed metadata-only discrepancy; no raw settings, link text or file bytes."""
+
+    def __init__(self, check, relative_path=None, differing_fields=(), expected_mode=None, actual_mode=None):
+        super().__init__("installed payload differs from archive/overlay")
+        self.tree_diagnostic = {"check": check, "relative_path": relative_path, "differing_fields": list(differing_fields)}
+        if expected_mode is not None:
+            self.tree_diagnostic["expected_mode"] = format(expected_mode, "04o")
+        if actual_mode is not None:
+            self.tree_diagnostic["actual_mode"] = format(actual_mode, "04o")
+
+
 def verify_tree(root, inventory, overlays=None):
     """Compare every installed object, including extras and hardlink topology.
 
@@ -224,7 +236,8 @@ def verify_tree(root, inventory, overlays=None):
             for child in children:
                 require(len(seen) < MAX_MEMBERS, "too many installed payload objects")
                 name = _relative(relative + child.name)
-                require(name in expected and name not in seen, "unexpected installed payload object")
+                if name not in expected or name in seen:
+                    raise TreeMismatch("unexpected-object")
                 info = os.stat(child.name, dir_fd=directory_fd, follow_symlinks=False)
                 entry = {"kind": "directory", "mode": stat.S_IMODE(info.st_mode)}
                 require(not info.st_mode & 0o7000, "privileged installed payload mode")
@@ -248,7 +261,9 @@ def verify_tree(root, inventory, overlays=None):
                 if want["kind"] == "hardlink":
                     want.pop("target")
                     want["kind"] = "file"
-                require(entry == want, "installed payload differs from archive/overlay")
+                if entry != want:
+                    changed = sorted(key for key in entry.keys() | want.keys() if entry.get(key) != want.get(key))
+                    raise TreeMismatch("entry-differs", name, changed, want.get("mode"), entry.get("mode"))
                 seen[name] = entry
                 if entry["kind"] == "directory":
                     fd = os.open(child.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
@@ -261,7 +276,8 @@ def verify_tree(root, inventory, overlays=None):
         unchanged(before, os.fstat(directory_fd))
 
     before = root.lstat()
-    require(stat.S_IMODE(before.st_mode) == inventory.root_mode, "payload root permissions changed")
+    if stat.S_IMODE(before.st_mode) != inventory.root_mode:
+        raise TreeMismatch("root-mode", expected_mode=inventory.root_mode, actual_mode=stat.S_IMODE(before.st_mode))
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         unchanged(before, os.fstat(fd))
@@ -270,7 +286,8 @@ def verify_tree(root, inventory, overlays=None):
         unchanged(before, root.lstat())
     finally:
         os.close(fd)
-    require(seen.keys() == expected.keys(), "installed payload members missing")
+    if seen.keys() != expected.keys():
+        raise TreeMismatch("missing-objects")
     groups = {}
     for name, entry in expected.items():
         if entry["kind"] == "file":
@@ -279,7 +296,8 @@ def verify_tree(root, inventory, overlays=None):
             groups.setdefault(entry["target"], [entry["target"]]).append(name)
     for names in groups.values():
         actual = [identities[name] for name in names]
-        require(len(set(actual)) == 1 and actual[0][2] == len(names), "payload hardlink topology changed")
+        if len(set(actual)) != 1 or actual[0][2] != len(names):
+            raise TreeMismatch("hardlink-topology", names[0])
     return {"tree_matches": True, "inventory_digest": inventory.digest, "overlay_digest": digest_json(overlays),
             "checked_members": len(seen), "external_link_targets_checked": False,
             "payload_trust": "not-established-by-identity-check", "preparation_complete": False, "writes": []}

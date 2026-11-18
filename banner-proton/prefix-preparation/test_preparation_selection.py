@@ -109,6 +109,30 @@ class SelectionTests(unittest.TestCase):
         self.assertFalse(report["binding_plan"]["default_changed"])
         self.assertEqual(before, self.fixture.game.snapshot())
 
+    def test_preparation_plan_preserves_mismatched_legacy_tool(self):
+        legacy = self.fixture.install_fixture()
+        (legacy / "proton").write_bytes(b"DUMMY_LEGACY_BINARY")
+        before = self.fixture.game.snapshot()
+        self.config["payload"]["tool_slot"] = "preparation"
+        _, report, output, _ = self.run_menu()
+        self.assertEqual(report["status"], "blocked")
+        installation = report["installation_plan"]
+        self.assertEqual(installation["tool_slot"], "preparation")
+        self.assertEqual(installation["action"], "install-new")
+        self.assertNotEqual(Path(installation["destination"]), legacy)
+        self.assertFalse(installation["legacy_tool_observation"]["strict_match"])
+        self.assertFalse(installation["legacy_tool_observation"]["modified_by_tool"])
+        self.assertIn("既存のProtonはそのまま保持", output)
+        self.assertEqual(before, self.fixture.game.snapshot())
+
+    def test_legacy_rejection_keeps_structural_diagnostic_in_result(self):
+        legacy = self.fixture.install_fixture()
+        legacy.chmod(0o700)
+        _, report, _, _ = self.run_menu()
+        self.assertEqual(report["reason"], "installed-tool-differs")
+        self.assertEqual(report["installed_tree_diagnostic"]["variants"][0]["check"], "root-mode")
+        self.assertEqual(legacy.stat().st_mode & 0o777, 0o700)
+
     def test_registration_change_while_menu_is_open_is_rejected(self):
         source = self.fixture.game.added
         def choose(_):

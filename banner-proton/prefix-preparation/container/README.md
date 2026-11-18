@@ -54,17 +54,17 @@ For each UID the harness runs the same tests without replacing assertions:
 | Internal initialization/probe launch contracts | 48 |
 | Scoped process observation | 13 |
 | Payload archive/tree identity | 36 |
-| Expected installation/adoption metadata | 13 |
+| Expected installation/adoption metadata | 15 |
 | Read-only runtime audit/emitted command | 22 |
 | Pinned minimum runtime environment | 10 |
-| Composed installation/reuse plans | 15 |
-| Internal tool staging/publication/failure contracts | 26 |
+| Composed installation/reuse plans | 17 |
+| Internal tool staging/publication/failure contracts | 27 |
 | Runtime preflight / standalone / native capability probes | 21 |
-| Numbered selection / source pins / report storage/export / short launcher | 31 |
+| Numbered selection / source pins / report storage/export / short launcher | 33 |
 | Existing installer | 5 |
 | Existing setup | 9 |
 | Existing observer/cleanup | 74 |
-| Total | 412 |
+| Total | 419 |
 
 The script stops at the first failing suite and preserves the raw console error.
 A zero script exit means both UID runs finished; it is not a device preparation

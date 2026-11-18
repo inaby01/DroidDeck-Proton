@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.12.1)
+# Prefix preparation: offline planning and local staging (0.13.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -141,6 +141,28 @@ link count and owner-comparison metadata are projected without reading contents
 when diagnosing an input refusal. This does not relax the strict reader.
 The automatic save is explicit in this user launcher; existing developer
 inspection modes keep their read-only/default no-save behavior.
+
+Selection bundle payloads may choose the fixed `tool_slot: "preparation"` instead
+of the backward-compatible default `"legacy"`. It uses a distinct
+`SoftDenchi-Prep-Proton <version>` directory and `SoftDenchi-Prep-Proton-<version>`
+tool ID; arbitrary slot/directory names are rejected. The source archive/version,
+Wine binaries and wrapper code do not change. Only generated catalog/receipt
+identity metadata differs, within the same six permitted overlays.
+
+A preparation-slot plan observes an existing legacy tree without modifying it and
+does not require that unused legacy tree to match. The actual preparation slot
+must still be absent or match the complete expected tree; mismatch never falls
+back to the legacy tool or permits overwrite. Native synthetic installation tests
+publish the preparation slot while preserving a deliberately changed legacy tree.
+The live installation and game binding remain blocked pending real prerequisites.
+
+Tree mismatch diagnostics identify the first discrepancy per creation-mask
+variant: root modes, known relative member path and differing field names, missing/
+unexpected object or hardlink topology. Raw file bytes, settings, link target text,
+unknown extra filenames and exception text are not collected. It is a bounded
+first-mismatch observation, not a complete diff or a corruption diagnosis. Existing
+strict tree validation is retained. Legacy-mode rejection reports retain these
+same structured diagnostics when available.
 
 No CLI mode launches Wine, executes DroidDeck helpers or `user_settings.py`, installs
 dependencies, downloads, extracts archives to disk, registers Proton, synchronizes settings,

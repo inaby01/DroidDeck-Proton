@@ -160,6 +160,24 @@ class CustomizationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 INSTALLER["render_installation"](*args)
 
+    def test_preparation_slot_is_fixed_distinct_and_preserves_source_version(self):
+        legacy = self.plan()
+        prepared = self.plan(tool_slot="preparation")
+        self.assertEqual(prepared.directory, "SoftDenchi-Prep-Proton " + VERSION)
+        self.assertNotEqual(legacy.directory, prepared.directory)
+        self.assertNotEqual(legacy.digest, prepared.digest)
+        receipt = json.loads(prepared.files["softdenchi-install.json"])
+        self.assertEqual(receipt["source_build"], "DroidDeck-Proton-" + VERSION)
+        self.assertEqual(receipt["sha512"], self.sha)
+        self.assertEqual(receipt["tool_slot"], "preparation")
+        tool = Document(prepared.files["compatibilitytool.vdf"]).node(("compatibilitytools", "compat_tools")).value
+        self.assertEqual(list(tool), ["SoftDenchi-Prep-Proton-" + VERSION])
+        self.assertEqual(prepared.files["droiddeck-proton-wrap"], legacy.files["droiddeck-proton-wrap"])
+
+    def test_arbitrary_tool_slot_names_are_refused(self):
+        with self.assertRaises(Invalid):
+            self.plan(tool_slot="../other-tool")
+
     def test_renderer_preserves_legacy_newline_and_custom_settings_behavior(self):
         files = INSTALLER["render_installation"](self.archive.name,self.sha,"off",self.inventory.captured["version"],
                                                   b'user_settings={"CUSTOM":"preserve"}\r\n')

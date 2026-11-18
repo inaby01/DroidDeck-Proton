@@ -56,14 +56,15 @@ class CustomizationPlan:
     files: dict = field(repr=False)
     overlays: dict = field(repr=False)
     digest: str
+    tool_slot: str = "legacy"
 
     def summary(self):
-        return {"directory": self.directory, "helper_sha256": self.helper_sha256, "label_sha256": self.label_sha256,
+        return {"directory": self.directory, "tool_slot": self.tool_slot, "helper_sha256": self.helper_sha256, "label_sha256": self.label_sha256,
                 "expected_files": sorted(self.files), "customization_digest": self.digest,
                 "runtime_equivalence": "unverified", "preparation_complete": False, "writes": []}
 
 
-def plan_customizations(inventory, archive_name, mode, helper_path, renderer, *, label=None, umask=0o022):
+def plan_customizations(inventory, archive_name, mode, helper_path, renderer, *, label=None, umask=0o022, tool_slot="legacy"):
     """renderer is the trusted installer's pure render_installation function.
 
     label=None models an absent label file; b'' models an existing empty file.
@@ -73,6 +74,7 @@ def plan_customizations(inventory, archive_name, mode, helper_path, renderer, *,
             digest_json({"root_mode": inventory.root_mode, "entries": inventory.entries}), "source inventory changed")
     require(type(umask) is int and umask in (0o022, 0o077), "unsupported installation umask")
     require(callable(renderer), "trusted installer renderer required")
+    require(tool_slot in ("legacy", "preparation"), "unknown tool slot")
     source_version = _captured(inventory, "version")
     original_manifest = _captured(inventory, "toolmanifest.vdf")
     manifest = Document(original_manifest).node(("manifest",)).value
@@ -86,6 +88,12 @@ def plan_customizations(inventory, archive_name, mode, helper_path, renderer, *,
     tools = Document(files["compatibilitytool.vdf"]).node(("compatibilitytools", "compat_tools")).value
     require(type(tools) is dict and len(tools) == 1, "invalid rendered tool catalog")
     tool_id = next(iter(tools))
+    if tool_slot == "preparation":
+        require(directory.startswith("SoftDenchi-Proton ") and tool_id == directory.replace(" ", "-", 1), "unsupported source tool family")
+        version = directory.removeprefix("SoftDenchi-Proton ")
+        directory, tool_id = "SoftDenchi-Prep-Proton " + version, "SoftDenchi-Prep-Proton-" + version
+        receipt.update(installed_dir=directory, tool_slot="preparation")
+        files["softdenchi-install.json"] = (json.dumps(receipt, indent=2) + "\n").encode()
     require(type(label) in (bytes, type(None)) and (label is None or len(label) <= 4096), "invalid runtime label")
     text = "" if label is None else label.decode("utf-8").strip().replace('"', "'").replace("\\", "")
     require(not any(ord(c) < 32 for c in text), "unsupported runtime label control character")
@@ -111,4 +119,4 @@ def plan_customizations(inventory, archive_name, mode, helper_path, renderer, *,
     signature = {"archive_sha512": inventory.archive_sha512, "inventory_digest": inventory.digest,
                  "helper_sha256": HELPER_SHA256, "label_sha256": None if label is None else hashlib.sha256(label).hexdigest(),
                  "overlays": overlays}
-    return CustomizationPlan(directory, HELPER_SHA256, signature["label_sha256"], files, overlays, digest_json(signature))
+    return CustomizationPlan(directory, HELPER_SHA256, signature["label_sha256"], files, overlays, digest_json(signature), tool_slot)
