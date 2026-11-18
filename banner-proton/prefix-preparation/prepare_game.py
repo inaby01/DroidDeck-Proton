@@ -36,6 +36,7 @@ from preparation_common import (
 )
 from preparation_payload import inspect_archive, verify_tree
 from preparation_store import PrivateStore, stage_local
+from preparation_target import registrations
 from preparation_vdf import parse_vdf
 
 __all__ = ["Invalid", "unchanged"]
@@ -118,20 +119,6 @@ def dependency_order(profile, recipes):
 
     for key in profile["dependencies"]:
         visit(key)
-    return result
-
-
-def registrations(document):
-    """Read the added-games list consumed by DroidDeck 0.7.1's proton-run."""
-    require(type(document) is list and len(document) <= 4096, "invalid added-games list")
-    result = {}
-    for entry in document:
-        require(type(entry) is dict, "invalid game registration")
-        key = app_id(entry.get("appid"))
-        exe = safe_path(string(entry.get("exe")))
-        title = string(entry.get("name") or entry.get("title") or exe.name)
-        require(key not in result, "duplicate or signed/unsigned alias registration ID")
-        result[key] = {"app_id": key, "title": title, "exe": str(exe)}
     return result
 
 

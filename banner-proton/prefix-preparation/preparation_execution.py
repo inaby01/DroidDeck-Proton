@@ -1,10 +1,12 @@
 """Internal preparation launcher; no CLI execution or dependency installer yet.
 
-The caller must verify the entire trusted payload, registration and process state.
-Launcher hashes alone do not establish payload trust or runtime compatibility.
+Full payload identity, pinned registration and proc observations are mandatory.
+The caller must additionally establish provenance and actual runtime/stop scope;
+identity and proc visibility alone do not establish trust or compatibility.
 """
 
 import ast
+import copy
 import hashlib
 import json
 import os
@@ -24,6 +26,9 @@ from preparation_common import (
     safe_path,
     unchanged,
 )
+from preparation_payload import PayloadInventory, verify_tree
+from preparation_processes import ProcessStopCheck
+from preparation_target import RegistrationPin
 
 RUNTIME_KEYS = frozenset((
     "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "PULSE_SERVER", "DBUS_SESSION_BUS_ADDRESS",
@@ -132,24 +137,31 @@ class LaunchPlan:
     registration_id: str
     digest: str
     context_digest: str
+    payload_pin_digest: str
+    target_pin_digest: str
     spec: dict = field(repr=False)
     environment: dict = field(repr=False)
     argv: tuple = field(repr=False)
 
     def summary(self):
         return {"operation": self.operation, "app_id": self.registration_id, "input_digest": self.digest,
-                "command": list(OPERATIONS[self.operation]), "payload": "requires-caller-verification",
+                "command": list(OPERATIONS[self.operation]), "payload": "identity-pinned-provenance-unverified",
+                "payload_pin_digest": self.payload_pin_digest, "target_pin_digest": self.target_pin_digest,
                 "runtime_equivalence": "unverified", "preparation_complete": False, "writes": []}
 
 
 def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_environment,
-                expected_hashes, operation="initialize", prefix_version_sha256=None, origin_launch_id=None):
+                expected_hashes, payload_inventory=None, payload_overlays=None, target_pin=None, operation="initialize",
+                prefix_version_sha256=None, origin_launch_id=None):
     """Read-only plan. Hashes/runtime inputs come from trusted adapters, never profile JSON."""
     require(operation in OPERATIONS, "unsupported preparation operation")
     require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
     tool, steam, install, work, home = map(safe_path, (tool, steam, install, work, home))
     require(all(path.is_dir() for path in (tool, steam, install, work, home)), "launch directories absent")
     key = app_id(registration_id)
+    require(isinstance(target_pin, RegistrationPin) and target_pin.registration_id == key
+            and target_pin.steam == steam and target_pin.exe.parent == install, "matching target pin required")
+    target_pin.verify()
     base = _aliases(steam, key)
     compatdata = safe_path(base / key, base)
     # Only dedicated work/home areas, separate from payload, game and Steam data.
@@ -163,7 +175,18 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
         _launch_id(origin_launch_id)
         require(type(prefix_version_sha256) is str and SHA256.fullmatch(prefix_version_sha256)
                 and _prefix(compatdata) == prefix_version_sha256, "unverified or changed prefix version")
-    hashes = _identities(tool, expected_hashes)
+    overlays = {} if payload_overlays is None else copy.deepcopy(payload_overlays)
+    payload_digest = _payload_digest(payload_inventory, overlays)
+    verify_tree(tool, payload_inventory, overlays)
+    source_entries = {**payload_inventory.entries, **overlays}
+    launcher_hashes = {}
+    for name in ("proton", "version", "user_settings.py"):
+        entry = source_entries.get(name)
+        require(entry is not None or name == "user_settings.py", "payload launcher inputs absent")
+        require(entry is None or entry["kind"] == "file", "payload launcher input must be regular")
+        launcher_hashes[name] = None if entry is None else entry["sha256"]
+    require(launcher_hashes == expected_hashes, "launcher hashes differ from pinned payload")
+    hashes = _identities(tool, launcher_hashes)
     require(type(runtime_environment) is dict and runtime_environment.keys() <= RUNTIME_KEYS,
             "unsupported preparation runtime variable")
     require(all(type(v) is str and len(v.encode()) <= 4096 and not any(c in v for c in "\0\r\n")
@@ -181,11 +204,33 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
            "SteamGameId": game_id, "SteamOverlayGameId": game_id}
     spec = {"tool": tool, "steam": steam, "registration_id": key, "install": install, "work": work,
             "home": home, "runtime_environment": dict(runtime_environment), "expected_hashes": hashes,
+            "payload_inventory": payload_inventory, "payload_overlays": overlays, "target_pin": target_pin,
             "operation": operation, "prefix_version_sha256": prefix_version_sha256, "origin_launch_id": origin_launch_id}
     signature = {k: str(v) if hasattr(v, "parts") else v for k, v in spec.items()}
+    signature["payload_inventory"] = payload_digest
+    signature["target_pin"] = target_pin.digest
     signature["tool_version"] = VERSION
     context = {k: v for k, v in signature.items() if k not in ("operation", "prefix_version_sha256", "origin_launch_id")}
-    return LaunchPlan(operation, key, _digest(signature), _digest(context), spec, env, (str(tool / "proton"), *OPERATIONS[operation]))
+    return LaunchPlan(operation, key, _digest(signature), _digest(context), payload_digest, target_pin.digest, spec, env, (str(tool / "proton"), *OPERATIONS[operation]))
+
+
+def _payload_digest(inventory, overlays):
+    require(isinstance(inventory, PayloadInventory), "full payload inventory required")
+    require(inventory.external_links == 0, "external payload links not supported for launch")
+    return _digest({"archive_sha512": inventory.archive_sha512, "inventory_digest": inventory.digest,
+                    "overlays": overlays})
+
+
+def _verify_payload(plan):
+    inventory, overlays = plan.spec["payload_inventory"], plan.spec["payload_overlays"]
+    require(_payload_digest(inventory, overlays) == plan.payload_pin_digest, "payload pin changed")
+    return verify_tree(plan.spec["tool"], inventory, overlays)
+
+
+def _verify_target(plan):
+    pin = plan.spec["target_pin"]
+    require(isinstance(pin, RegistrationPin) and pin.digest == plan.target_pin_digest, "target pin changed")
+    return pin.verify()
 
 
 def _launch_id(value):
@@ -195,12 +240,12 @@ def _launch_id(value):
 
 def validate_launch_record(record):
     fields(record, ("schema_version", "tool_version", "launch_id", "app_id", "operation", "input_digest",
-                    "status", "exit_code", "prefix_version_sha256", "context_digest", "preparation_complete"))
-    require(type(record["schema_version"]) is int and record["schema_version"] == 1, "unknown launch record")
+                    "status", "exit_code", "prefix_version_sha256", "context_digest", "payload_pin_digest", "target_pin_digest", "preparation_complete"))
+    require(type(record["schema_version"]) is int and record["schema_version"] == 2, "unknown launch record")
     require(type(record["tool_version"]) is str and len(record["tool_version"]) <= 64, "invalid launch version")
     _launch_id(record["launch_id"])
     require(app_id(record["app_id"]) == record["app_id"] and record["operation"] in OPERATIONS, "invalid launch target")
-    for key in ("input_digest", "context_digest"):
+    for key in ("input_digest", "context_digest", "payload_pin_digest", "target_pin_digest"):
         require(type(record[key]) is str and SHA256.fullmatch(record[key]), "invalid launch digest")
     require(record["status"] in ("running", "needs-user", "failed", "initialized-unverified", "probe-exited")
             and record["preparation_complete"] is False, "invalid launch state")
@@ -216,13 +261,14 @@ class LaunchSession:
     stays running/needs-user on disk; reopening inventory never promotes it.
     """
 
-    def __init__(self, plan, store, ready):
+    def __init__(self, plan, store, ready, stop_check):
         self.plan, self.store, self.ready = plan, store, ready
+        self.stop_check = stop_check
         self.process = None
         self.record_hash = None
-        self.record = {"schema_version": 1, "tool_version": VERSION, "launch_id": "launch-" + secrets.token_hex(16),
+        self.record = {"schema_version": 2, "tool_version": VERSION, "launch_id": "launch-" + secrets.token_hex(16),
                        "app_id": plan.registration_id, "operation": plan.operation, "input_digest": plan.digest,
-                       "context_digest": plan.context_digest, "status": "running", "exit_code": None, "prefix_version_sha256": None,
+                       "context_digest": plan.context_digest, "payload_pin_digest": plan.payload_pin_digest, "target_pin_digest": plan.target_pin_digest, "status": "running", "exit_code": None, "prefix_version_sha256": None,
                        "preparation_complete": False}
 
     def _guard(self):
@@ -235,13 +281,20 @@ class LaunchSession:
             validate_launch_record(origin)
             require(origin["operation"] == "initialize" and origin["status"] == "initialized-unverified"
                     and origin["exit_code"] == 0 and origin["app_id"] == self.plan.registration_id
+                    and origin["target_pin_digest"] == self.plan.target_pin_digest
+                    and origin["payload_pin_digest"] == self.plan.payload_pin_digest
                     and origin["context_digest"] == self.plan.context_digest
                     and origin["prefix_version_sha256"] == self.plan.spec["prefix_version_sha256"],
                     "matching initialization record required")
         require(callable(self.ready), "trusted launch readiness checks required")
         checks = self.ready()
-        fields(checks, ("target", "payload", "stopped"))
+        fields(checks, ("target", "payload", "runtime", "stopped"))
         require(all(type(value) is bool for value in checks.values()), "boolean launch checks required")
+        require(isinstance(self.stop_check, ProcessStopCheck) and
+                safe_path(self.stop_check.compatdata) == compatdata, "matching process observation required")
+        observation = self.stop_check.check()
+        checks = dict(checks)
+        checks["stopped"] = checks["stopped"] and observation["clear_in_view"]
         return checks
 
     def _save(self):
@@ -267,6 +320,8 @@ class LaunchSession:
                 compatdata.mkdir(mode=0o700)  # Never replace or remove an existing prefix, including failed attempts.
             checks = self._guard()
             require(all(checks.values()), "launch prerequisites changed")
+            _verify_target(self.plan)
+            _verify_payload(self.plan)
             _identities(self.plan.spec["tool"], self.plan.spec["expected_hashes"])
             safe_path(compatdata)
             _aliases(self.plan.spec["steam"], self.plan.registration_id)
@@ -293,8 +348,10 @@ class LaunchSession:
         self.record["exit_code"] = code
         checks = self._guard()
         self.record["status"] = "needs-user" if not checks["stopped"] else "failed"
-        if checks["stopped"] and checks["target"] and checks["payload"] and code == 0:
+        if checks["stopped"] and checks["target"] and checks["payload"] and checks["runtime"] and code == 0:
             try:
+                _verify_target(self.plan)
+                _verify_payload(self.plan)
                 _identities(self.plan.spec["tool"], self.plan.spec["expected_hashes"])
                 _aliases(self.plan.spec["steam"], self.plan.registration_id)
                 compatdata = self.plan.spec["steam"] / "steamapps/compatdata" / self.plan.registration_id

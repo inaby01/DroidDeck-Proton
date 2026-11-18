@@ -51,12 +51,13 @@ For each UID the harness runs the same tests without replacing assertions:
 | Offline preparation | 23 |
 | Asset/cache/journal/locks | 36 |
 | Target-only binding / VDF | 30 |
-| Internal initialization/probe launch contracts | 28 |
+| Internal initialization/probe launch contracts | 47 |
+| Scoped process observation | 13 |
 | Payload archive/tree identity | 33 |
 | Existing installer | 5 |
 | Existing setup | 9 |
 | Existing observer/cleanup | 74 |
-| Total | 238 |
+| Total | 270 |
 
 The script stops at the first failing suite and preserves the raw console error.
 A zero script exit means both UID runs finished; it is not a device preparation
@@ -76,3 +77,8 @@ run Wine or an installer, verify the real payload, or establish runtime equivale
 
 Payload tests generate tiny archives and installed trees in temporary storage.
 Real NAS archives and runtime binaries are excluded from the Docker build context.
+
+The process suite includes a harmless native Linux Python child. It checks that a
+prefix-related environment is observed while the child waits on stdin and clears
+after normal exit. No signals or Wine processes are used. This does not establish
+Android/proot process visibility. macOS supplemental runs skip this native test.

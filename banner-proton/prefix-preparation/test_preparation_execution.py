@@ -7,6 +7,7 @@ import json
 import os
 import runpy
 import subprocess
+import tarfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,7 +15,10 @@ from unittest.mock import patch
 FIXTURES = runpy.run_path(str(Path(__file__).with_name("test_prepare_game.py")))
 import preparation_execution as execution
 from preparation_common import Invalid
+from preparation_payload import inspect_archive
+from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore
+from preparation_target import pin_registration
 
 FAKE = '''#!/usr/bin/python3
 import json, os, sys
@@ -57,22 +61,34 @@ class ExecutionTests(unittest.TestCase):
         self.home = self.root / "private-home"
         self.work.mkdir()
         self.home.mkdir()
+        self.proc = self.root / "fixture-proc"
+        (self.proc / str(os.getpid())).mkdir(parents=True)
+        self.stop_check = ProcessStopCheck(self.compatdata,self.proc)
         self.store_root = self.root / "launch-store"
-        self.checks = {"target": True, "payload": True, "stopped": True}
+        self.checks = {"target": True, "payload": True, "runtime": True, "stopped": True}
         self.options = {"tool": self.tool, "steam": self.steam, "registration_id": self.key, "install": self.exe.parent,
                         "work": self.work, "home": self.home, "runtime_environment": {"DISPLAY": ":7"},
-                        "expected_hashes": self.hashes()}
+                        "expected_hashes": self.hashes(), "payload_inventory": self.inventory(),
+                        "target_pin": pin_registration(self.added,self.key,self.exe_root,self.steam)}
         self.lock_key = hashlib.sha256(str(self.compatdata).encode()).hexdigest()
 
     def hashes(self):
         return {name: hashlib.sha256((self.tool / name).read_bytes()).hexdigest() if (self.tool / name).exists() else None
                 for name in ("proton", "version", "user_settings.py")}
 
+    def inventory(self):
+        archive = self.root / "fixture-payload.tar.gz"
+        with tarfile.open(archive,"w:gz") as package:
+            package.add(self.tool,arcname="Fixture Payload")
+        return inspect_archive(archive,hashlib.sha512(archive.read_bytes()).hexdigest(),"Fixture Payload")
+
     def plan(self, **options):
+        if "expected_hashes" in options and "payload_inventory" not in options:
+            options["payload_inventory"] = self.inventory()
         return execution.plan_launch(**(self.options | options))
 
     def session(self, store, plan=None):
-        return execution.LaunchSession(plan or self.plan(), store, lambda: dict(self.checks))
+        return execution.LaunchSession(plan or self.plan(), store, lambda: dict(self.checks), self.stop_check)
 
     def launch(self, **options):
         plan = self.plan(**options)
@@ -107,7 +123,9 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(self.exe.read_bytes(), FIXTURES["pe"]())
 
     def test_low_app_id_environment_matches_steam_identity(self):
-        env = self.plan(registration_id="42").environment
+        self.write_json(self.added,[{"appid":42,"exe":str(self.exe)}])
+        pin = pin_registration(self.added,"42",self.exe_root,self.steam)
+        env = self.plan(registration_id="42",target_pin=pin).environment
         for key in ("SteamAppId", "STEAM_COMPAT_APP_ID", "SteamGameId", "SteamOverlayGameId"):
             self.assertEqual(env[key], "42")
 
@@ -192,9 +210,12 @@ class ExecutionTests(unittest.TestCase):
                        {"target":False,"payload":True,"stopped":True}, {"target":True,"payload":False,"stopped":True},
                        {"target":True,"payload":True,"stopped":False}):
             with self.subTest(checks=checks), PrivateStore(self.store_root, create=True) as store, store.locked(self.lock_key):
-                self.checks = checks
+                self.checks = {**checks,"runtime":True}
                 with self.assertRaises(Invalid):
                     self.session(store).start()
+        self.checks = {"target":True,"payload":True,"runtime":False,"stopped":True}
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), self.assertRaises(Invalid):
+            self.session(store).start()
         self.assertFalse(self.compatdata.exists())
 
     def test_nonzero_exit_preserves_partial_prefix_and_blocks_reinitialize(self):
@@ -319,9 +340,170 @@ class ExecutionTests(unittest.TestCase):
                 with self.subTest(timeout=timeout), self.assertRaises(Invalid):
                     session.wait(timeout)
 
+    def test_full_payload_and_matching_registration_are_mandatory(self):
+        for values in ({"payload_inventory":None},{"target_pin":None},{"install":self.home}):
+            with self.subTest(values=list(values)), self.assertRaises(Invalid):
+                self.plan(**values)
+        self.assertFalse(self.compatdata.exists())
+
+    def test_extra_python_module_blocks_launch_even_when_callback_returns_true(self):
+        plan = self.plan()
+        (self.tool / "unexpected.py").write_text("raise RuntimeError('must not execute')")
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key):
+            with patch("subprocess.Popen") as child, self.assertRaises(Invalid):
+                self.session(store,plan).start()
+            child.assert_not_called()
+        self.assertFalse(self.compatdata.exists())
+
+    def test_missing_payload_member_blocks_launch(self):
+        plan = self.plan()
+        (self.tool / "launch_fixture_support.py").unlink()
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), self.assertRaises(Invalid):
+            self.session(store,plan).start()
+        self.assertFalse(self.compatdata.exists())
+
+    def test_nonlauncher_payload_change_after_zero_exit_is_failed(self):
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key):
+            session = self.session(store).start()
+            self.assertEqual(session.process.wait(10),0)
+            (self.tool / "launch_fixture_support.py").write_text("MARKER = 'changed'\n")
+            result = session.wait(1)
+            self.assertEqual(result["exit_code"],0)
+            self.assertEqual(result["status"],"failed")
+            self.assertTrue(self.compatdata.exists())
+
+    def test_launcher_reference_cannot_disagree_with_inventory(self):
+        hashes = self.hashes()
+        hashes["proton"] = "0"*64
+        with self.assertRaises(Invalid):
+            self.plan(expected_hashes=hashes)
+
+    def test_external_payload_link_cannot_be_launched(self):
+        (self.tool / "outside").symlink_to(self.exe)
+        with self.assertRaises(Invalid):
+            self.plan(payload_inventory=self.inventory())
+
+    def test_generated_settings_overlay_is_copied_and_verified(self):
+        original = self.options["payload_inventory"]
+        raw = b'user_settings = {"PROTON_LOG":"0"}\n'
+        settings = self.tool / "user_settings.py"
+        settings.write_bytes(raw)
+        overlays = {"user_settings.py":{"kind":"file","mode":settings.stat().st_mode & 0o777,
+                                        "size":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}}
+        plan = self.plan(payload_inventory=original,payload_overlays=overlays,expected_hashes=self.hashes())
+        overlays["user_settings.py"]["sha256"] = "0"*64
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key):
+            self.assertEqual(self.session(store,plan).start().wait(10)["status"],"initialized-unverified")
+
+    def test_overlay_inside_plan_cannot_be_changed_after_pinning(self):
+        plan = self.plan()
+        plan.spec["payload_overlays"]["user_settings.py"] = {"kind":"file","mode":0o644,"size":0,"sha256":"0"*64}
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), self.assertRaises(Invalid):
+            self.session(store,plan).start()
+        self.assertFalse(self.compatdata.exists())
+
+    def test_changed_registration_blocks_launch_with_true_callback(self):
+        plan = self.plan()
+        self.write_json(self.added,[])
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), self.assertRaises(Invalid):
+            self.session(store,plan).start()
+        self.assertFalse(self.compatdata.exists())
+
+    def test_changed_game_executable_blocks_launch(self):
+        plan = self.plan()
+        self.exe.write_bytes(self.exe.read_bytes()+b"changed")
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), self.assertRaises(Invalid):
+            self.session(store,plan).start()
+        self.assertFalse(self.compatdata.exists())
+
+    def test_target_pin_from_other_registration_is_refused(self):
+        self.write_json(self.added,[{"appid":42,"exe":str(self.exe)}])
+        other = pin_registration(self.added,"42",self.exe_root,self.steam)
+        with self.assertRaises(Invalid):
+            self.plan(target_pin=other)
+
+    def test_changed_executable_after_child_exit_is_failed(self):
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key):
+            session = self.session(store).start()
+            self.assertEqual(session.process.wait(10),0)
+            self.exe.write_bytes(self.exe.read_bytes()+b"changed")
+            self.assertEqual(session.wait(1)["status"],"failed")
+
+    def test_registration_removed_after_child_exit_is_failed(self):
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key):
+            session = self.session(store).start()
+            self.assertEqual(session.process.wait(10),0)
+            self.added.unlink()
+            self.assertEqual(session.wait(1)["status"],"failed")
+
+    def test_registration_change_between_checks_prevents_spawn(self):
+        plan = self.plan()
+        calls = []
+        def ready():
+            calls.append(True)
+            if len(calls)==2:
+                self.write_json(self.added,[])
+            return dict(self.checks)
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), patch("subprocess.Popen") as child:
+            session = execution.LaunchSession(plan,store,ready,self.stop_check)
+            with self.assertRaises(Invalid):
+                session.start()
+            child.assert_not_called()
+            self.assertEqual(store.inventory()["launches"][0]["status"],"failed")
+        self.assertTrue(self.compatdata.exists())
+
+    def test_payload_change_between_checks_prevents_spawn(self):
+        plan = self.plan()
+        calls = []
+        def ready():
+            calls.append(True)
+            if len(calls)==2:
+                (self.tool / "launch_fixture_support.py").write_text("MARKER='changed'")
+            return dict(self.checks)
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), patch("subprocess.Popen") as child:
+            with self.assertRaises(Invalid):
+                execution.LaunchSession(plan,store,ready,self.stop_check).start()
+            child.assert_not_called()
+
+    def test_registration_pinning_never_accepts_executable_outside_root(self):
+        with self.assertRaises(Invalid):
+            pin_registration(self.added,self.key,self.home,self.steam)
+
+    def test_visible_target_process_blocks_true_readiness_callback(self):
+        pid = str(os.getpid()+100000)
+        folder = self.proc / pid
+        folder.mkdir()
+        (folder / "stat").write_text(pid+" (fixture) "+" ".join(["S","1"]+["0"]*17+["123"]))
+        (folder / "environ").write_bytes(("WINEPREFIX="+str(self.compatdata / "pfx")+"\0").encode())
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), self.assertRaises(Invalid):
+            self.session(store).start()
+        self.assertFalse(self.compatdata.exists())
+
+    def test_process_observation_does_not_mutate_readiness_callback_state(self):
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key):
+            session = execution.LaunchSession(self.plan(),store,lambda:self.checks,self.stop_check).start()
+            self.assertEqual(session.process.wait(10),0)
+            pid = str(os.getpid()+100000)
+            folder = self.proc / pid
+            folder.mkdir()
+            (folder / "stat").write_text(pid+" (fixture) "+" ".join(["S","1"]+["0"]*17+["123"]))
+            (folder / "environ").write_bytes(("WINEPREFIX="+str(self.compatdata / "pfx")+"\0").encode())
+            self.assertEqual(session.wait(1)["status"],"needs-user")
+            self.assertTrue(self.checks["stopped"])
+            (folder / "stat").unlink()
+            (folder / "environ").unlink()
+            folder.rmdir()
+            self.assertEqual(session.wait(1)["status"],"initialized-unverified")
+
+    def test_stop_observer_for_another_prefix_is_refused(self):
+        self.stop_check = ProcessStopCheck(self.base / "42",self.proc)
+        with PrivateStore(self.store_root,create=True) as store, store.locked(self.lock_key), self.assertRaises(Invalid):
+            self.session(store).start()
+        self.assertFalse(self.compatdata.exists())
+
     def test_launch_record_validation_rejects_invalid_identifiers(self):
         result = self.launch()
-        for key, value in (("launch_id", "launch-../"), ("input_digest", "x"), ("app_id", "-1"),
+        for key, value in (("schema_version", 1), ("launch_id", "launch-../"), ("input_digest", "x"), ("app_id", "-1"),
                            ("operation", "run"), ("exit_code", True), ("prefix_version_sha256", "x")):
             record = copy.deepcopy(result)
             record[key] = value

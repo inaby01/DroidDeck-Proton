@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.5.0)
+# Prefix preparation: offline planning and local staging (0.6.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -18,8 +18,10 @@ identity; the report retains provenance/runtime blockers and never enables execu
 No CLI mode launches Wine, executes DroidDeck helpers or `user_settings.py`, installs
 dependencies, downloads, extracts archives to disk, registers Proton, synchronizes settings,
 or creates/modifies a game prefix. An internal initialization/probe launcher exists,
-but is not connected to the CLI or executable recipes. It requires trusted payload,
-registration and stop-check callbacks; local tests use a harmless substitute, not Wine.
+but is not connected to the CLI or executable recipes. It requires a complete pinned payload inventory, pinned registration/EXE and
+scoped proc observations, plus caller checks for provenance and runtime/stop scope.
+Local tests use a harmless substitute, not Wine. Launch records now use schema 2;
+schema-1 launch records are incompatible and are not migrated.
 No inspection or plan result file is saved automatically.
 
 Use the complete directory from a trusted local installation. The entry point uses
