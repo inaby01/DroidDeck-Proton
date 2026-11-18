@@ -219,45 +219,77 @@ def create_probe_material(plan, refresh, store):
 
 
 def verify_probe_registration(exe, key, source, steam, store_root):
-    """Read only. Receipt success alone is never proof of a new unstarted prefix."""
-    exe, source, steam = map(safe_path, (exe, source, steam))
-    require(exe.name == EXE, "not a registration probe executable")
-    marker, _ = load_json(exe.parent / MARKER)
-    require(type(marker) is dict and type(marker.get("probe_id")) is str and ID.fullmatch(marker["probe_id"]), "invalid probe marker")
-    with PrivateStore(store_root) as store:
-        record, receipt_digest = store.read_record("probe-runs", marker["probe_id"] + ".json")
-    _record_valid(record)
-    require(record["status"] == "probe-ready" and record["steam"] == str(steam) and record["registration_source"] == str(source),
-            "probe receipt not ready or context differs")
-    require(marker == _marker(record), "probe marker differs from private receipt")
-    destination = safe_path(record["destination"])
-    require(os.path.samefile(exe, destination / EXE) and os.path.samefile(exe.parent, destination), "registered probe path identity differs")
-    require(exe_identity(exe) == record["exe_identity"], "registered probe bytes changed")
-    document, source_digest = load_json(source)
-    games = registrations(document)
-    key = app_id(key)
-    require(key in games and key not in record["baseline_ids"], "registration is not new relative to staging baseline")
-    matches = []
-    for game in games.values():
+    """Read only. Fixed step diagnostics never include raw receipts/paths/data."""
+    history = []
+
+    def step(name, function, *args):
         try:
-            same = os.path.samefile(safe_path(game["exe"]), exe)
-        except FileNotFoundError:
-            same = False  # Unrelated stale entries are not this existing probe inode.
-        if same:
-            matches.append(game)
-    require(len(matches) == 1 and matches[0]["app_id"] == key, "ambiguous probe registration")
-    base = safe_path(steam / "steamapps/compatdata", steam)
-    require(not base.exists() or base.is_dir(), "invalid compatdata base")
+            result = checked(name, function, *args)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            error.probe_registration_diagnostic = {"checks": history + [{"check": name, "result": "failed"}],
+                                                   "read_only": True, "raw_record_included": False}
+            raise
+        history.append({"check": name, "result": "passed"})
+        return result
+
+    def receipt():
+        with PrivateStore(store_root) as store:
+            return store.read_record("probe-runs", marker["probe_id"] + ".json")
+
+    exe, source, steam = [step("probe-input-paths", safe_path, path) for path in (exe, source, steam)]
+    step("probe-exe-name", require, exe.name == EXE, "not a registration probe executable")
+    marker, _ = step("probe-marker-read", load_json, exe.parent / MARKER)
+    step("probe-marker-schema", require,
+         type(marker) is dict and type(marker.get("probe_id")) is str and ID.fullmatch(marker["probe_id"]), "invalid probe marker")
+    record, receipt_digest = step("probe-private-receipt-read", receipt)
+    step("probe-private-receipt-schema", _record_valid, record)
+    step("probe-private-receipt-ready", require, record["status"] == "probe-ready", "probe receipt not ready")
+    step("probe-steam-context", require, record["steam"] == str(steam), "probe Steam context differs")
+    step("probe-registration-source-context", require, record["registration_source"] == str(source), "probe registration source context differs")
+    step("probe-marker-receipt-match", require, marker == _marker(record), "probe marker differs from private receipt")
+    destination = step("probe-created-path", safe_path, record["destination"])
+    same_exe = step("probe-exe-samefile-read", os.path.samefile, exe, destination / EXE)
+    step("probe-exe-path-identity", require, same_exe, "registered probe EXE path identity differs")
+    same_directory = step("probe-folder-samefile-read", os.path.samefile, exe.parent, destination)
+    step("probe-folder-path-identity", require, same_directory, "registered probe folder identity differs")
+    identity = step("probe-exe-identity-read", exe_identity, exe)
+    step("probe-exe-content-match", require, identity == record["exe_identity"], "registered probe bytes changed")
+    document, source_digest = step("probe-registration-read", load_json, source)
+    games = step("probe-registration-schema", registrations, document)
+    key = step("probe-selected-id", app_id, key)
+    step("probe-selected-id-present", require, key in games, "selected registration absent")
+    step("probe-new-id-baseline", require, key not in record["baseline_ids"], "registration is not new relative to staging baseline")
+
+    def matching_ids():
+        matches = []
+        for game in games.values():
+            try:
+                same = os.path.samefile(safe_path(game["exe"]), exe)
+            except FileNotFoundError:
+                same = False  # Unrelated stale entries are not this existing probe inode.
+            if same:
+                matches.append(game["app_id"])
+        return matches
+
+    matches = step("probe-registration-path-scan", matching_ids)
+    step("probe-registration-unique", require, matches == [key], "ambiguous probe registration")
+    base = step("probe-compatdata-path", safe_path, steam / "steamapps/compatdata", steam)
+    step("probe-compatdata-base", require, not base.exists() or base.is_dir(), "invalid compatdata base")
     names = (key, str(int(key) - 2**32)) if int(key) >= 2**31 else (key,)
     for name in names:
-        require(not os.path.lexists(base / name), "probe prefix already exists; preserve it")
-    if base.exists():
-        with os.scandir(base) as children:
-            for count, child in enumerate(children):
-                require(count < 4096, "too many prefix entries")
-                if re.fullmatch(r"-?[0-9]+", child.name) and int(child.name) % 2**32 == int(key):
-                    require(False, "probe prefix alias already exists; preserve it")
-    require(load_json(source)[1] == source_digest, "registration changed during probe verification")
+        step("probe-prefix-absent", require, not os.path.lexists(base / name), "probe prefix already exists; preserve it")
+
+    def aliases_absent():
+        if base.exists():
+            with os.scandir(base) as children:
+                for count, child in enumerate(children):
+                    require(count < 4096, "too many prefix entries")
+                    if re.fullmatch(r"-?[0-9]+", child.name) and int(child.name) % 2**32 == int(key):
+                        require(False, "probe prefix alias already exists; preserve it")
+
+    step("probe-prefix-aliases-absent", aliases_absent)
+    observed = step("probe-registration-reread", load_json, source)[1]
+    step("probe-registration-stable", require, observed == source_digest, "registration changed during probe verification")
     return {"purpose": "registration-only-probe", "probe_id": record["probe_id"], "receipt_sha256": receipt_digest,
             "new_id_relative_to_baseline": True, "exe_matches_private_receipt": True, "prefix_absent": True,
             "observed_registration_sha256": source_digest, "preparation_complete": False}

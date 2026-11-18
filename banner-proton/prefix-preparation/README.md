@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.14.1)
+# Prefix preparation: offline planning and local staging (0.14.2)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -372,3 +372,14 @@ Existing game files, saves, authenticated prefixes, Android registrations,
 Proton installations and compatibility settings are not copied or modified.
 Template creation, prefix initialization and dependency installation are still
 unavailable through this user entry.
+
+
+Probe verification failures report a fixed `check` and
+`probe_registration_diagnostic.checks` containing only passed/failed step names.
+Marker reads, private receipt/schema/readiness, Steam/source context, path inode
+identity, executable bytes, baseline ID, duplicate registration, prefix absence
+and final reread are distinguished. Raw receipts, marker data, unrelated game
+paths, registry and environment values are never included. A diagnostic failure
+does not repair, recreate, move or execute the probe. Existing 0.14.x receipts
+remain readable; users can select the same registration again without creating
+new material.

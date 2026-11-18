@@ -208,6 +208,51 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaises(Invalid):
             self.verify(exe)
 
+    def test_fixed_diagnostic_distinguishes_context_without_raw_paths(self):
+        plan, _ = self.create()
+        exe = self.register(plan)
+        other_steam = self.f.root / 'PRIVATE_CONTEXT_SENTINEL'
+        other_steam.mkdir()
+        with self.assertRaises(Invalid) as caught:
+            probe.verify_probe_registration(exe, '12345', self.f.added, other_steam, self.store_root)
+        self.assertEqual(caught.exception.preparation_check, 'probe-steam-context')
+        diagnostic = caught.exception.probe_registration_diagnostic
+        self.assertEqual(diagnostic['checks'][-1], {'check': 'probe-steam-context', 'result': 'failed'})
+        self.assertNotIn('PRIVATE_CONTEXT_SENTINEL', json.dumps(diagnostic))
+        self.assertTrue(diagnostic['read_only'])
+        self.assertTrue(all(x['result'] == 'passed' for x in diagnostic['checks'][:-1]))
+
+    def test_samefile_failure_has_specific_check_and_preserves_files(self):
+        plan, _ = self.create()
+        exe = self.register(plan)
+        before = self.f.snapshot()
+        with patch.object(probe.os.path, 'samefile', return_value=False), self.assertRaises(Invalid) as caught:
+            self.verify(exe)
+        self.assertEqual(caught.exception.preparation_check, 'probe-exe-path-identity')
+        self.assertEqual(before, self.f.snapshot())
+
+    def test_missing_marker_has_read_step_not_generic_rejection(self):
+        plan, _ = self.create()
+        exe = self.register(plan)
+        (exe.parent / probe.MARKER).unlink()
+        with self.assertRaises(OSError) as caught:
+            self.verify(exe)
+        self.assertEqual(caught.exception.preparation_check, 'probe-marker-read')
+        self.assertEqual(caught.exception.probe_registration_diagnostic['checks'][-1]['result'], 'failed')
+
+    def test_previous_version_receipt_remains_readable_without_recreation(self):
+        plan, _ = self.create()
+        with PrivateStore(self.store_root) as store, \
+             store.locked(hashlib.sha256(plan.record['destination'].encode()).hexdigest()):
+            name = plan.record['probe_id'] + '.json'
+            record, digest = store.read_record('probe-runs', name)
+            record['tool_version'] = '0.14.1'
+            store.write_record('probe-runs', name, record, digest)
+        exe = self.register(plan)
+        before = self.f.snapshot()
+        self.assertTrue(self.verify(exe)['prefix_absent'])
+        self.assertEqual(before, self.f.snapshot())
+
     def test_probe_receipt_cannot_be_replaced_by_shared_marker(self):
         plan, _ = self.create()
         exe = self.register(plan)
@@ -317,6 +362,27 @@ class ProbeWorkflowTests(unittest.TestCase):
         self.assertFalse(report['preparation_complete'])
         self.assertEqual(report['writes'], [])
         self.assertEqual(before, self.f.fixture.snapshot())
+
+    def test_saved_rejection_includes_failed_step_without_shared_marker_data(self):
+        _, name, _ = self.run_workflow('2\n1\n')
+        created = json.loads((self.f.directory / name).read_bytes())
+        data = json.loads(self.f.fixture.game.added.read_bytes())
+        data.append({"appid": 12345, "exe": created["exe"], "name": "Fresh probe"})
+        self.f.fixture.game.write_json(self.f.fixture.game.added, data)
+        marker = Path(created['exe']).parent / probe.MARKER
+        content = json.loads(marker.read_bytes())
+        content['PRIVATE_MARKER_SENTINEL'] = 'DO_NOT_REPORT_MARKER_DATA'
+        marker.write_text(json.dumps(content))
+        before = self.f.fixture.game.snapshot()
+        _, name, output = self.run_workflow('1\n2\n')
+        report = json.loads((self.f.directory / name).read_bytes())
+        self.assertEqual(report['status'], 'input-rejected')
+        self.assertEqual(report['check'], 'probe-marker-receipt-match')
+        self.assertEqual(report['probe_registration_diagnostic']['checks'][-1]['check'], report['check'])
+        self.assertNotIn('PRIVATE_MARKER_SENTINEL', json.dumps(report) + output)
+        self.assertNotIn('DO_NOT_REPORT_MARKER_DATA', json.dumps(report) + output)
+        self.assertEqual(report['writes'], [{'scope': 'report-only', 'filename': name}])
+        self.assertEqual(before, self.f.fixture.game.snapshot())
 
     def test_standalone_script_menu_cancels_without_writes(self):
         import subprocess
