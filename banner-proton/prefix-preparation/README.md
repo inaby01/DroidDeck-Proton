@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.11.0)
+# Prefix preparation: offline planning and local staging (0.12.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -83,6 +83,52 @@ temporary creation is included in `writes` even when cleaned up. Runtime/proc
 scope/registration freshness and prefix/dependency capacity remain separate
 blockers; even all successful probes do not grant installation/launch readiness.
 Exit 2 denotes a preflight report with preparation still blocked.
+
+A short, plan-only user launcher is available through `--emit-selection-script`.
+It can embed a validated local `--selection-config` containing one declared archive
+identity/layout/mode and an earlier live runtime audit reference. Local data is
+not included in the public sources. Without embedded data it reads
+`prepare-plan.json` alongside the launcher. Development mode `--select-plan`
+runs the same selection/report flow directly.
+
+The generated launcher is named `prepare.sh`: run `bash prepare.sh`, select a
+number, and read the displayed plan. No flags, manually typed ID or output
+redirection are required. It reads the file referenced by the current
+`BL_ADDED_GAMES` environment variable (not JSON text in the variable), projects
+known registration fields, and rechecks the source hash and selected EXE before
+publishing the plan. This pins the observed runtime file; it does not prove a
+fresh Android export or the normal launch route. IDs remain distinct from EXE
+basenames and titles. Terminal control characters are escaped.
+
+The selected target is joined to the existing installation/runtime planner,
+including full archive and optional installed-tree verification, expected
+customizations and target-only binding planning. Existing compatdata, including
+empty or signed-ID entries, is preserved. A new registration/test context remains
+unconfirmed until explicitly established. Planned private HOME/work paths are
+separate from game/tool/Steam/settings data and are not created. Prefix template
+allocation is estimated from the shipped `files/share/default_pfx_arm64` subtree;
+initialization/dependency growth and complete capacity are still unmeasured. This
+is distinct from a future dependency-prepared prefix template.
+
+Only a new `plan-<random>.json` is automatically saved alongside the launcher,
+with mode 0600, exclusive creation, bounded size and no overwrite. A launcher
+inside Steam/settings/selected game data cannot save a report there. Unexpected
+write failures may retain a partial new report; there is no deletion/recovery.
+Cancellation saves nothing. Missing/ambiguous archives retain target evidence and
+report the needed filename. Other rejection reports contain only a fixed stage,
+exception class/errno and a closed reason code, not raw exception or environment
+values. Raw registration JSON and unrelated fields are not saved. The selected
+EXE/path/title and planned paths in the report are private user data.
+
+The standalone script embeds trusted distribution modules and the trusted
+installer renderer, never the inspected helper or archive Python. Embedded source
+literals are ASCII escaped to avoid source-decoding differences across shells/
+Python versions. FD 3 preserves menu input while stdin carries the Python heredoc.
+The script works from another CWD without importing its modules or writing
+bytecode. It rejects command-line arguments. Exit 2 means a saved blocked plan;
+0 means cancellation; 1 means the report could not be saved or invocation failed.
+The automatic save is explicit in this user launcher; existing developer
+inspection modes keep their read-only/default no-save behavior.
 
 No CLI mode launches Wine, executes DroidDeck helpers or `user_settings.py`, installs
 dependencies, downloads, extracts archives to disk, registers Proton, synchronizes settings,

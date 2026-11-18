@@ -39,6 +39,7 @@ from preparation_installation import plan_installation
 from preparation_payload import inspect_archive, verify_tree
 from preparation_preflight import inspect_preflight, preflight_script
 from preparation_runtime import inspect_runtime, runtime_audit_command
+from preparation_selection import interactive_selection, selection_script
 from preparation_store import PrivateStore, stage_local
 from preparation_target import registrations
 from preparation_vdf import parse_vdf
@@ -289,11 +290,21 @@ def display(value):
     return rendered
 
 
+def _installer_renderer():
+    parent = Path(__file__).resolve().parent.parent
+    installer = parent / "install-softdenchi.py"
+    if not installer.exists():
+        installer = parent / "banner-proton/install-softdenchi.py"
+    return runpy.run_path(str(installer))["render_installation"]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=VERSION)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--inspect", action="store_true")
+    mode.add_argument("--select-plan", action="store_true", help="select a registration and save a blocked plan only")
+    mode.add_argument("--emit-selection-script", action="store_true", help="emit short plan-only user launcher")
     mode.add_argument("--inspect-preflight", action="store_true", help="inspect paths/runtime; optionally probe private temporary capabilities")
     mode.add_argument("--emit-preflight-script", action="store_true", help="emit a standalone preflight script without running probes")
     mode.add_argument("--emit-runtime-audit", action="store_true", help="print a pasteable read-only runtime audit command")
@@ -325,12 +336,25 @@ def main():
     parser.add_argument("--runtime-audit", type=Path)
     parser.add_argument("--probe-temporary", action="store_true", help="opt into temporary/native/GUI probes in preflight mode only")
     parser.add_argument("--installation-mode", choices=("off", "observe", "cleanup"))
+    parser.add_argument("--selection-config", type=Path)
+    parser.add_argument("--selection-directory", type=Path)
     args = parser.parse_args()
     try:
+        require(args.select_plan or args.emit_selection_script or args.selection_config is None, "selection config requires selection mode")
+        require(args.select_plan or args.selection_directory is None, "selection directory requires selection mode")
         require(args.inspect_preflight or not args.probe_temporary, "temporary probes require preflight mode")
         require(args.plan_preparation or not any((args.runtime_audit, args.installation_mode)),
                 "runtime audit and installation mode require composed planning")
-        if args.emit_preflight_script:
+        if args.select_plan or args.emit_selection_script:
+            allowed = {"select_plan", "emit_selection_script", "selection_config", "selection_directory"}
+            require(not any(value for key, value in vars(args).items() if key not in allowed), "selection is a separate mode")
+            config = load_json(args.selection_config)[0] if args.selection_config is not None else None
+            if args.emit_selection_script:
+                print(selection_script(config), end="")
+                return 0
+            status, _ = interactive_selection(args.selection_directory or Path.cwd(), _installer_renderer(), config)
+            return status
+        elif args.emit_preflight_script:
             require(not any(value for key, value in vars(args).items() if key != "emit_preflight_script"), "preflight emitter accepts no inputs")
             print(preflight_script(), end="")
             return 0
@@ -357,11 +381,7 @@ def main():
             audit, audit_digest = load_json(args.runtime_audit)
             # Only the trusted distributed installer is loaded, never the inspected
             # runtime helper or archive Python. Support the allowlisted test layout.
-            parent = Path(__file__).resolve().parent.parent
-            installer = parent / "install-softdenchi.py"
-            if not installer.exists():
-                installer = parent / "banner-proton/install-softdenchi.py"
-            renderer = runpy.run_path(str(installer))["render_installation"]
+            renderer = _installer_renderer()
             installation = plan_installation(archive=args.payload_archive, sha512=args.payload_sha512,
                 archive_root=args.payload_root, mode=args.installation_mode, runtime_root=args.runtime_root,
                 runtime_audit=audit, registrations=args.registrations, registration_id=args.app_id,

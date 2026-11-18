@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""Numbered target selection, current registration pins and short report launcher."""
+
+import contextlib
+import copy
+import hashlib
+import io
+import json
+import os
+import runpy
+import subprocess
+import tarfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+HERE = Path(__file__).resolve().parent
+FIX = runpy.run_path(str(HERE / "test_preparation_installation.py"))
+import preparation_selection as selection
+from preparation_common import Invalid
+
+
+class SelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = FIX["InstallationTests"]()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp()
+        f = self.fixture
+        self.directory = f.source.root
+        self.home = f.game.root / "private-launch-home"
+        self.home.mkdir()
+        self.environment = {**f.context.environment, "BL_ADDED_GAMES": str(f.game.added)}
+        self.config = {"schema_version": 1, "payload": {"archive": f.source.archive.name, "sha512": f.source.sha,
+                        "root": FIX["CUSTOM"]["ROOT"], "mode": "cleanup"}, "runtime_reference": f.reference}
+        self.renderer = FIX["CUSTOM"]["INSTALLER"]["render_installation"]
+        self.steam, self.settings = f.game.steam, f.game.settings
+        self.key = f.game.args.app_id
+
+    def catalog(self):
+        return selection.registration_catalog(self.environment)
+
+    def plan(self, renderer=None):
+        source, digest, games = self.catalog()
+        return selection.selected_plan(self.directory, self.config, self.key, source, digest, games,
+            self.steam, self.settings, self.home, self.renderer if renderer is None else renderer, self.environment,
+            runtime_root=self.fixture.context.root)
+
+    def run_menu(self, text="1\n", config=True, stream=None):
+        output = io.StringIO()
+        code, name = selection.interactive_selection(self.directory, self.renderer, self.config if config else None,
+            input_stream=io.StringIO(text) if stream is None else stream, output_stream=output,
+            environment=self.environment, steam=self.steam, settings=self.settings, home=self.home,
+            runtime_root=self.fixture.context.root)
+        report = json.loads((self.directory / name).read_bytes()) if name else None
+        return code, report, output.getvalue(), name
+
+    def test_catalog_uses_environment_referenced_file_and_normalizes_id(self):
+        source, digest, games = self.catalog()
+        self.assertEqual(source, self.fixture.game.added)
+        self.assertEqual(digest, hashlib.sha256(source.read_bytes()).hexdigest())
+        self.assertEqual(list(games), [self.key])
+        with self.assertRaises(Invalid):
+            selection.registration_catalog({"BL_ADDED_GAMES": self.fixture.game.added.read_text()})
+
+    def test_menu_selects_exact_id_and_saves_report_without_launch_or_prefix_writes(self):
+        before = self.fixture.game.snapshot()
+        with patch("subprocess.Popen", side_effect=AssertionError("no executable")), \
+             patch("tarfile.TarFile.extractall", side_effect=AssertionError("no extraction")):
+            code, report, output, name = self.run_menu()
+        self.assertEqual(code, 2)
+        self.assertEqual(report["target"]["app_id"], self.key)
+        self.assertTrue(report["registration"]["rechecked"])
+        self.assertEqual(report["registration"]["android_export_freshness"], "unverified")
+        self.assertEqual(report["installation_plan"]["action"], "install-new")
+        self.assertEqual(report["writes"], [{"scope": "report-only", "filename": name}])
+        self.assertIn("結果を保存しました", output)
+        self.assertEqual(before, self.fixture.game.snapshot())
+        self.assertIn("new-test-registration-not-confirmed", report["blockers"])
+        self.assertFalse(report["preparation_complete"])
+
+    def test_direct_plan_is_read_only_and_does_not_save_a_report(self):
+        before = self.fixture.snapshot()
+        plan = self.plan()
+        self.assertEqual(plan["writes"], [])
+        self.assertEqual(before, self.fixture.snapshot())
+        self.assertEqual(list(self.directory.glob("plan-*.json")), [])
+
+    def test_existing_empty_signed_prefix_is_preserved(self):
+        prefix = self.steam / "steamapps/compatdata/-1"
+        prefix.mkdir(parents=True)
+        (prefix / "secret.reg").write_bytes(b"PRIVATE_PREFIX_DATA")
+        report = self.plan()
+        self.assertEqual(report["prefix"]["action"], "preserve-existing")
+        self.assertIn("existing-prefix-preserve", report["blockers"])
+        self.assertNotIn(str(prefix), [item["path"] for item in report["planned_writes"]])
+        self.assertNotIn("PRIVATE_PREFIX_DATA", json.dumps(report))
+        (prefix.parent / self.key).mkdir()
+        with self.assertRaises(Invalid):
+            self.plan()
+
+    def test_reuse_connects_binding_plan_without_changing_settings(self):
+        self.fixture.install_fixture()
+        before = self.fixture.game.snapshot()
+        report = self.plan()
+        self.assertEqual(report["installation_plan"]["action"], "reuse-verified-tree")
+        self.assertEqual(report["binding_plan"]["payload"], "verified-expected-tree")
+        self.assertNotIn("payload-integrity-unverified", report["binding_plan"]["blockers"])
+        self.assertFalse(report["binding_plan"]["other_games_changed"])
+        self.assertFalse(report["binding_plan"]["default_changed"])
+        self.assertEqual(before, self.fixture.game.snapshot())
+
+    def test_registration_change_while_menu_is_open_is_rejected(self):
+        source = self.fixture.game.added
+        def choose(_):
+            source.write_text(source.read_text() + " ")
+            return "1\n"
+        stream = type("Input", (), {"readline": staticmethod(choose)})()
+        code, report, _, _ = self.run_menu(stream=stream)
+        self.assertEqual(code, 2)
+        self.assertEqual(report["status"], "input-rejected")
+        self.assertEqual(report["stage"], "selected-plan")
+
+    def test_executable_change_during_plan_is_rejected(self):
+        def change_exe(*args):
+            self.fixture.game.exe.write_bytes(self.fixture.game.exe.read_bytes() + b"changed")
+            return self.renderer(*args)
+        with self.assertRaises(Invalid):
+            self.plan(change_exe)
+
+    def test_config_file_change_while_menu_is_open_is_rejected(self):
+        path = self.directory / "prepare-plan.json"
+        path.write_text(json.dumps(self.config))
+        def choose(_):
+            path.write_text(path.read_text() + " ")
+            return "1\n"
+        stream = type("Input", (), {"readline": staticmethod(choose)})()
+        _, report, _, _ = self.run_menu(config=False, stream=stream)
+        self.assertEqual(report["status"], "input-rejected")
+
+    def test_missing_archive_keeps_target_evidence_and_requires_material(self):
+        self.fixture.source.archive.unlink()
+        _, report, output, _ = self.run_menu()
+        self.assertEqual(report["target"]["app_id"], self.key)
+        self.assertIn("archive-missing-or-ambiguous", report["blockers"])
+        self.assertNotIn("installation_plan", report)
+        self.assertIn("必要なファイル", output)
+        self.assertFalse(report["preparation_complete"])
+
+    def test_duplicate_archive_locations_are_not_automatically_chosen(self):
+        folder = self.directory / "payload"
+        folder.mkdir()
+        (folder / self.fixture.source.archive.name).write_bytes(self.fixture.source.archive.read_bytes())
+        self.config["payload"]["alternate_relative_path"] = "payload/" + self.fixture.source.archive.name
+        self.assertIn("archive-missing-or-ambiguous", self.plan()["blockers"])
+
+    def test_declared_checksum_and_runtime_changes_are_rejected(self):
+        original = self.config["payload"]["sha512"]
+        self.config["payload"]["sha512"] = "0" * 128
+        with self.assertRaises(Invalid):
+            self.plan()
+        self.config["payload"]["sha512"] = original
+        (self.fixture.context.root / "usr/local/lib/libfakeinput.so").write_bytes(b"changed")
+        with self.assertRaises(Invalid):
+            self.plan()
+
+    def test_partial_capacity_is_never_total_preparation_approval(self):
+        report = self.plan()
+        capacity = report["prefix_capacity"]
+        self.assertIsNone(capacity["template_allocation_estimate_bytes"])
+        self.assertIsNone(capacity["initialization_growth_bytes"])
+        self.assertIsNone(capacity["dependencies_bytes"])
+        self.assertFalse(capacity["complete_preparation_fits"])
+        self.assertIn("prefix-template-baseline-unavailable", report["blockers"])
+
+    def test_shipped_default_template_estimate_is_not_dependency_template(self):
+        archive = self.fixture.source.archive
+        original = []
+        with tarfile.open(archive, "r:gz") as package:
+            for member in package:
+                original.append((member, package.extractfile(member).read() if member.isfile() else None))
+        root = self.config["payload"]["root"]
+        directories = []
+        for name in ("files", "files/share", "files/share/default_pfx_arm64"):
+            directory = tarfile.TarInfo(root + "/" + name)
+            directory.type, directory.mode = tarfile.DIRTYPE, 0o755
+            directories.append((directory, None))
+        file = tarfile.TarInfo(root + "/files/share/default_pfx_arm64/data")
+        file.size, file.mode = 7, 0o644
+        with tarfile.open(archive, "w:gz") as package:
+            for member, raw in original + directories + [(file, b"fixture")]:
+                package.addfile(member, io.BytesIO(raw) if raw is not None else None)
+        self.config["payload"]["sha512"] = hashlib.sha512(archive.read_bytes()).hexdigest()
+        capacity = self.plan()["prefix_capacity"]
+        self.assertEqual(capacity["basis"], "shipped-files/share/default_pfx_arm64-only")
+        self.assertGreaterEqual(capacity["template_allocation_estimate_bytes"], 7)
+        self.assertFalse(capacity["dependency_prepared_template"])
+        self.assertFalse(capacity["complete_preparation_fits"])
+
+    def test_cancel_and_eof_do_not_save_or_prepare_anything(self):
+        for text in ("q\n", ""):
+            with self.subTest(text=text):
+                code, report, _, _ = self.run_menu(text)
+                self.assertEqual(code, 0)
+                self.assertIsNone(report)
+                self.assertEqual(list(self.directory.glob("plan-*.json")), [])
+
+    def test_invalid_choice_and_missing_environment_save_fixed_diagnostics(self):
+        code, report, _, _ = self.run_menu("$(touch injected)\n")
+        self.assertEqual(code, 2)
+        self.assertEqual(report["status"], "input-rejected")
+        self.assertFalse((self.directory / "injected").exists())
+        self.environment.pop("BL_ADDED_GAMES")
+        _, report, _, _ = self.run_menu()
+        self.assertEqual(report["stage"], "registration-catalog")
+        self.assertNotIn("DUMMY_PROTOCOL_SECRET", json.dumps(report))
+
+    def test_duplicate_normalized_ids_are_rejected_before_selection(self):
+        self.fixture.game.added.write_text(json.dumps([{"appid": -1, "exe": str(self.fixture.game.exe)},
+                                                     {"appid": 4294967295, "exe": str(self.fixture.game.exe)}]))
+        _, report, _, _ = self.run_menu()
+        self.assertEqual(report["status"], "input-rejected")
+        self.assertEqual(report["stage"], "registration-catalog")
+
+    def test_terminal_controls_and_ignored_registration_fields_are_not_disclosed(self):
+        self.fixture.game.added.write_text(json.dumps([{"appid": -1, "exe": str(self.fixture.game.exe),
+            "title": "Example\n\u001b[31m\u202e", "secret": "DUMMY_REGISTRATION_SECRET"}]))
+        _, report, output, _ = self.run_menu()
+        self.assertNotIn("\u001b", output)
+        self.assertNotIn("\u202e", output)
+        self.assertNotIn("DUMMY_REGISTRATION_SECRET", output + json.dumps(report))
+
+    def test_report_saving_is_exclusive_private_and_does_not_mutate_input(self):
+        report = {"writes": [], "preparation_complete": False}
+        existing = self.directory / "plan-aaaaaaaa.json"
+        existing.write_bytes(b"KEEP")
+        with patch.object(selection.secrets, "token_hex", side_effect=["aaaaaaaa", "bbbbbbbb"]):
+            filename = selection.save_selection_report(self.directory, report)
+        self.assertEqual(existing.read_bytes(), b"KEEP")
+        self.assertEqual(filename, "plan-bbbbbbbb.json")
+        self.assertEqual((self.directory / filename).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(report["writes"], [])
+
+    def test_report_cannot_be_saved_inside_protected_or_symlink_folder(self):
+        prefix = self.steam / "steamapps/compatdata/42"
+        prefix.mkdir(parents=True)
+        with self.assertRaises(Invalid):
+            selection.save_selection_report(prefix, {}, (self.steam, self.settings))
+        link = self.directory / "linked-report"
+        link.symlink_to(self.home)
+        with self.assertRaises(Invalid):
+            selection.save_selection_report(link, {})
+        self.assertEqual(list(prefix.iterdir()), [])
+
+    def test_unknown_config_keys_layout_traversal_and_archive_root_are_rejected(self):
+        for modification in ({"unknown": True}, {"payload": {**self.config["payload"], "alternate_relative_path": "../payload.tar.gz"}},
+                             {"payload": {**self.config["payload"], "root": "Other"}}):
+            config = {**copy.deepcopy(self.config), **modification}
+            with self.subTest(keys=list(modification)), self.assertRaises(Invalid):
+                selection.validate_selection_config(config)
+
+    def test_standalone_short_launcher_preserves_menu_input_and_saves_next_to_script(self):
+        folder = self.home / "launcher"
+        folder.mkdir()
+        script = folder / "prepare.sh"
+        script.write_text(selection.selection_script(self.config))
+        (self.home / ".local/share/Steam").mkdir(parents=True)
+        (self.home / ".local/share/droiddeck-compat").mkdir(parents=True)
+        fake_cwd = self.home / "untrusted-cwd"
+        fake_cwd.mkdir()
+        (fake_cwd / "preparation_selection.py").write_text("raise RuntimeError('must not import CWD')\n")
+        env = {**os.environ, "HOME": str(self.home), "BL_ADDED_GAMES": str(self.fixture.game.added), "PYTHONPATH": str(fake_cwd)}
+        completed = subprocess.run(["/bin/bash", str(script)], input=b"1\n", cwd=fake_cwd, env=env,
+                                   capture_output=True, timeout=15, check=False)
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        reports = list(folder.glob("plan-*.json"))
+        self.assertEqual(len(reports), 1)
+        report = json.loads(reports[0].read_bytes())
+        self.assertEqual(report["target"]["app_id"], self.key)
+        self.assertIn("archive-missing-or-ambiguous", report["blockers"])
+        self.assertEqual(list(fake_cwd.glob("plan-*.json")), [])
+        self.assertEqual(list(self.home.rglob("__pycache__")), [])
+        self.assertFalse((self.home / ".local/share/Steam/steamapps/compatdata" / self.key).exists())
+        rejected = subprocess.run(["/bin/bash", str(script), "--probe-temporary"], env=env,
+                                  capture_output=True, check=False, timeout=5)
+        self.assertEqual(rejected.returncode, 1)
+        self.assertEqual(len(list(folder.glob("plan-*.json"))), 1)
+
+    def test_rejection_reason_is_closed_and_never_echoes_exception_content(self):
+        with patch.object(selection, "selected_plan", side_effect=Invalid("existing installation differs from approved generated trees")):
+            _, report, _, _ = self.run_menu()
+        self.assertEqual(report["reason"], "installed-tool-differs")
+        with patch.object(selection, "selected_plan", side_effect=ValueError("DUMMY_PRIVATE_EXCEPTION_CONTENT")):
+            _, report, output, _ = self.run_menu()
+        self.assertEqual(report["reason"], "input-rejected")
+        self.assertNotIn("DUMMY_PRIVATE_EXCEPTION_CONTENT", output + json.dumps(report))
+
+    def test_cli_emitter_does_not_run_menu_or_save_reports(self):
+        config_path = self.directory / "bundle.json"
+        config_path.write_text(json.dumps(self.config))
+        with patch("sys.argv", ["prepare_game.py", "--emit-selection-script", "--selection-config", str(config_path)]), \
+             patch.object(selection, "interactive_selection", side_effect=AssertionError("no execution")), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(FIX["ENGINE"]["main"](), 0)
+        self.assertTrue(output.getvalue().startswith("#!/bin/bash"))
+        self.assertEqual(list(self.directory.glob("plan-*.json")), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
