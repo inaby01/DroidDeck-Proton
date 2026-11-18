@@ -6,13 +6,11 @@ Snapshot writes are confined to that snapshot; they never authorize a live launc
 """
 
 import contextlib
-import ctypes
 import gzip
 import hashlib
 import os
 import secrets
 import stat
-import sys
 import tarfile
 
 from preparation_binding import droiddeck_lock
@@ -35,6 +33,7 @@ from preparation_payload import (
     verify_tree,
 )
 from preparation_processes import ProcessStopCheck
+from preparation_publication import _publish, _rename_function
 
 
 @contextlib.contextmanager
@@ -57,24 +56,6 @@ def _owned_directory(fd):
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022,
             "installation directory must be owned and not writable by others")
     return info.st_dev, info.st_ino
-
-
-def _rename_function():
-    require(sys.platform == "linux", "non-replacing publication requires Linux renameat2")
-    library = ctypes.CDLL(None, use_errno=True)
-    rename = getattr(library, "renameat2", None)
-    require(rename is not None, "libc renameat2 unavailable")
-    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
-    rename.restype = ctypes.c_int
-    return rename
-
-
-def _publish(rename, source_fd, destination_fd, name):
-    # Linux RENAME_NOREPLACE=1. Never fall back to rename/replace on unsupported
-    # kernels/filesystems: those can replace an existing empty directory.
-    if rename(source_fd, b"tree", destination_fd, os.fsencode(name), 1) != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, "non-replacing tool publication refused")
 
 
 def _stream_tree(archive, inventory, root_fd, guard):

@@ -37,6 +37,7 @@ from preparation_common import (
 )
 from preparation_installation import plan_installation
 from preparation_payload import inspect_archive, verify_tree
+from preparation_preflight import inspect_preflight, preflight_script
 from preparation_runtime import inspect_runtime, runtime_audit_command
 from preparation_store import PrivateStore, stage_local
 from preparation_target import registrations
@@ -293,6 +294,8 @@ def main():
     parser.add_argument("--version", action="version", version=VERSION)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--inspect", action="store_true")
+    mode.add_argument("--inspect-preflight", action="store_true", help="inspect paths/runtime; optionally probe private temporary capabilities")
+    mode.add_argument("--emit-preflight-script", action="store_true", help="emit a standalone preflight script without running probes")
     mode.add_argument("--emit-runtime-audit", action="store_true", help="print a pasteable read-only runtime audit command")
     mode.add_argument("--inspect-runtime", action="store_true", help="read-only runtime source/library/socket inventory")
     mode.add_argument("--inspect-payload", action="store_true", help="read-only archive and optional installed-tree identity check")
@@ -320,12 +323,23 @@ def main():
     parser.add_argument("--payload-directory", type=Path)
     parser.add_argument("--runtime-root", type=Path)
     parser.add_argument("--runtime-audit", type=Path)
+    parser.add_argument("--probe-temporary", action="store_true", help="opt into temporary/native/GUI probes in preflight mode only")
     parser.add_argument("--installation-mode", choices=("off", "observe", "cleanup"))
     args = parser.parse_args()
     try:
+        require(args.inspect_preflight or not args.probe_temporary, "temporary probes require preflight mode")
         require(args.plan_preparation or not any((args.runtime_audit, args.installation_mode)),
                 "runtime audit and installation mode require composed planning")
-        if args.emit_runtime_audit:
+        if args.emit_preflight_script:
+            require(not any(value for key, value in vars(args).items() if key != "emit_preflight_script"), "preflight emitter accepts no inputs")
+            print(preflight_script(), end="")
+            return 0
+        elif args.inspect_preflight:
+            allowed = {"inspect_preflight", "steam_root", "settings_root", "probe_temporary"}
+            require(not any(value for key, value in vars(args).items() if key not in allowed), "preflight is a separate mode")
+            result = inspect_preflight(args.steam_root or Path.home() / ".local/share/Steam",
+                                       args.settings_root or Path.home() / ".local/share/droiddeck-compat", args.probe_temporary)
+        elif args.emit_runtime_audit:
             require(not any(value for key,value in vars(args).items() if key != "emit_runtime_audit"), "audit emitter accepts no inputs")
             print(runtime_audit_command(),end="")
             return 0
@@ -417,7 +431,7 @@ def main():
         parser.exit(1, "Input rejected; no preparation performed. Check input formats and paths.\n")
     print(report)
     # A readable report is distinct from a usable preparation plan.
-    return 2 if args.plan or args.plan_preparation or args.stage_local else 0
+    return 2 if args.plan or args.plan_preparation or args.stage_local or args.inspect_preflight else 0
 
 
 if __name__ == "__main__":

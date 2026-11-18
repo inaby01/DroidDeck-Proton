@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.10.0)
+# Prefix preparation: offline planning and local staging (0.11.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -52,6 +52,37 @@ This mode returns 2 (blocked plan). It exposes neither an installation writer no
 a prefix executor. It does not call the legacy setup's global synchronization.
 The plan is an observation, not a durable authorization; future writers must
 recompute/recheck it under locks and satisfy independent readiness conditions.
+
+`--inspect-preflight` reports the live runtime and explicit/default Steam/settings
+paths and their existing ancestors/capacity. It does not read prefix or settings
+contents and is read-only unless `--probe-temporary` is explicitly supplied.
+`--emit-preflight-script` emits an inert standalone Bash/Python script for the same
+preflight, so the device needs only one script and one short command.
+
+The opt-in probes create a new mode-0700 directory on the existing tool-parent
+filesystem (or Steam root if the tool parent is absent). They test the same Linux
+no-replacement publication primitive as the installation writer, including an
+existing empty-directory collision. A fixed native Python child with a fictitious
+prefix path tests before/during/after proc observations and direct child stat/
+environ access. It creates no compatdata or pfx. Only the two prefix-related env
+fields are interpreted; PID, raw environments and unrelated values are not output.
+The child normally exits when its input pipe is released; its own alarm provides a
+bounded fallback. No existing process is signaled.
+
+For a local DISPLAY only, another fixed native Python child uses the system Xlib
+[XOpenDisplay/XCloseDisplay API](https://xorg.freedesktop.org/archive/X11R7.5/doc/man/man3/XCloseDisplay.3.html)
+to open/close the display without creating a window. It retains only required GUI
+authentication environment keys, strips loader inputs, never records cookie or env
+values, and has its own three-second alarm. This tests native X11 connection, not
+Wine GUI, rendering, audio or normal game launch equivalence. Missing Xlib, failed
+connection and deadline failure remain explicit results.
+
+Only known unchanged empty probe directories are removed. Unexpected objects or
+changed identities are retained with an inspection status and private path. Actual
+temporary creation is included in `writes` even when cleaned up. Runtime/proc
+scope/registration freshness and prefix/dependency capacity remain separate
+blockers; even all successful probes do not grant installation/launch readiness.
+Exit 2 denotes a preflight report with preparation still blocked.
 
 No CLI mode launches Wine, executes DroidDeck helpers or `user_settings.py`, installs
 dependencies, downloads, extracts archives to disk, registers Proton, synchronizes settings,
