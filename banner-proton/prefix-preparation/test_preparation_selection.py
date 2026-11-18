@@ -294,6 +294,107 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(report["reason"], "input-rejected")
         self.assertNotIn("DUMMY_PRIVATE_EXCEPTION_CONTENT", output + json.dumps(report))
 
+    def test_shared_group_writable_launcher_folder_gets_private_original_and_export(self):
+        before = self.fixture.game.exe.read_bytes()
+        self.directory.chmod(0o2770)
+        before_mode = self.directory.stat().st_mode & 0o7777
+        try:
+            code, report, output, name = self.run_menu()
+            self.assertEqual(code, 2)
+            self.assertEqual(report["report_storage"]["authoritative"], "private-linux-home")
+            private = self.home / ".local/state/droiddeck-prefix-preparation/reports" / name
+            self.assertEqual(private.read_bytes(), (self.directory / name).read_bytes())
+            self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(private.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(self.directory.stat().st_mode & 0o7777, before_mode)
+            self.assertIn("原本", output)
+            self.assertEqual(self.fixture.game.exe.read_bytes(), before)
+        finally:
+            self.directory.chmod(0o700)
+
+    def test_shared_owner_metadata_does_not_require_chown_or_chmod(self):
+        from types import SimpleNamespace
+        original = os.fstat
+        identity = self.directory.stat().st_dev, self.directory.stat().st_ino
+        def emulated(fd):
+            info = original(fd)
+            if (info.st_dev, info.st_ino) == identity:
+                return SimpleNamespace(st_uid=os.getuid()+1234, st_mode=info.st_mode, st_dev=info.st_dev, st_ino=info.st_ino)
+            return info
+        with patch("os.fstat", side_effect=emulated), patch("os.chown", side_effect=AssertionError("no ownership changes")), \
+             patch("os.chmod", side_effect=AssertionError("no directory permission changes")):
+            code, report, _, _ = self.run_menu()
+        self.assertEqual(code, 2)
+        self.assertEqual(report["report_storage"]["authoritative"], "private-linux-home")
+
+    def test_failed_shared_export_still_preserves_private_diagnostics(self):
+        self.directory.chmod(0o2770)
+        try:
+            with patch.object(selection, "_export_report", side_effect=PermissionError("DUMMY_PRIVATE_DETAIL")):
+                code, report, output, name = self.run_menu()
+            self.assertEqual(code, 2)
+            self.assertTrue(Path(name).is_absolute())
+            self.assertEqual(Path(name).parent, self.home / ".local/state/droiddeck-prefix-preparation/reports")
+            self.assertTrue(Path(name).is_file())
+            self.assertIn(str(Path(name)), output)
+            self.assertNotIn("DUMMY_PRIVATE_DETAIL", output + json.dumps(report))
+        finally:
+            self.directory.chmod(0o700)
+
+    def test_protected_directory_uses_private_result_without_export(self):
+        path, original = selection.save_selection_result(self.steam, self.home, {"writes": []}, (self.steam, self.settings))
+        self.assertIsNone(original)
+        self.assertTrue(path.is_relative_to(self.home))
+        self.assertEqual(list(self.steam.glob("plan-*.json")), [])
+
+    def test_private_report_ancestor_symlink_is_not_followed(self):
+        self.directory.chmod(0o2770)
+        local = self.home / ".local"
+        local.mkdir()
+        external = self.home / "external"
+        external.mkdir()
+        (local / "state").symlink_to(external, target_is_directory=True)
+        try:
+            code, report, _, _ = self.run_menu()
+            self.assertEqual(code, 1)
+            self.assertIsNone(report)
+            self.assertEqual(list(external.iterdir()), [])
+        finally:
+            self.directory.chmod(0o700)
+
+    def test_shared_export_collision_never_overwrites_existing_result(self):
+        self.directory.chmod(0o2770)
+        existing = self.directory / "plan-dddddddd.json"
+        existing.write_bytes(b"KEEP")
+        try:
+            with patch.object(selection.secrets, "token_hex", return_value="dddddddd"):
+                path, _ = selection.save_selection_result(self.directory, self.home, {"writes": []}, (self.steam,))
+            self.assertTrue(path.is_relative_to(self.home))
+            self.assertEqual(existing.read_bytes(), b"KEEP")
+            self.assertNotEqual(path.read_bytes(), b"KEEP")
+        finally:
+            self.directory.chmod(0o700)
+
+    def test_strict_exe_link_refusal_includes_metadata_and_console_reason(self):
+        os.link(self.fixture.game.exe, self.fixture.game.exe.with_name("linked-fixture.exe"))
+        _, report, output, _ = self.run_menu()
+        self.assertEqual(report["reason"], "input-link-metadata-rejected")
+        self.assertEqual(report["check"], "target-registration-exe")
+        self.assertEqual(report["selected_exe_metadata"]["fd"]["link_count"], 2)
+        self.assertTrue(report["selected_exe_metadata"]["fd"]["regular"])
+        self.assertIn("target-registration-exe", output)
+        self.assertIn("input-link-metadata-rejected", output)
+        self.assertEqual(report["status"], "input-rejected")
+
+    def test_archive_failure_has_fixed_check_even_if_report_save_fails(self):
+        self.config["payload"]["sha512"] = "0" * 128
+        with patch.object(selection, "save_selection_result", side_effect=PermissionError("DUMMY_SAVE_SECRET")):
+            code, report, output, _ = self.run_menu()
+        self.assertEqual(code, 1)
+        self.assertIsNone(report)
+        self.assertIn("payload-archive", output)
+        self.assertNotIn("DUMMY_SAVE_SECRET", output)
+
     def test_cli_emitter_does_not_run_menu_or_save_reports(self):
         config_path = self.directory / "bundle.json"
         config_path.write_text(json.dumps(self.config))

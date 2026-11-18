@@ -7,7 +7,7 @@ import re
 import stat
 from pathlib import Path
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 MAX_JSON = 1024 * 1024
 MAX_REPORT = 1024 * 1024
 MAX_DEPTH = 16
@@ -26,6 +26,16 @@ class Invalid(ValueError):
 def require(condition, message):
     if not condition:
         raise Invalid(message)
+
+
+def checked(stage, function, *args, **kwargs):
+    """Attach a fixed caller-defined diagnostic stage without echoing input data."""
+    try:
+        return function(*args, **kwargs)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        if not hasattr(error, "preparation_check"):
+            error.preparation_check = stage
+        raise
 
 
 def fields(value, required, optional=()):

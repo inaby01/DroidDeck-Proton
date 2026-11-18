@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.12.0)
+# Prefix preparation: offline planning and local staging (0.12.1)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -110,10 +110,18 @@ allocation is estimated from the shipped `files/share/default_pfx_arm64` subtree
 initialization/dependency growth and complete capacity are still unmeasured. This
 is distinct from a future dependency-prepared prefix template.
 
-Only a new `plan-<random>.json` is automatically saved alongside the launcher,
-with mode 0600, exclusive creation, bounded size and no overwrite. A launcher
-inside Steam/settings/selected game data cannot save a report there. Unexpected
-write failures may retain a partial new report; there is no deletion/recovery.
+A new `plan-<random>.json` is normally saved alongside the launcher with mode
+0600, exclusive creation, bounded size and no overwrite. When shared storage's
+owner/mode metadata prevents private direct saving, an owned Linux HOME fallback
+under `.local/state/droiddeck-prefix-preparation/reports` retains the authoritative
+private result. New fallback directories use mode 0700; existing ancestors are
+checked, never chmod/chown'ed. The result is then exported, with exclusive creation,
+to the explicitly selected launcher folder. Only this report-data export accepts
+shared filesystem ownership/mode emulation; its privacy depends on that filesystem.
+Asset, cache, payload, private record and execution checks are unchanged.
+A launcher inside Steam/settings/selected game data cannot save or export there;
+a private fallback outside those roots may still retain the diagnostic. Unexpected
+write failures can leave a partial new report; there is no automatic deletion.
 Cancellation saves nothing. Missing/ambiguous archives retain target evidence and
 report the needed filename. Other rejection reports contain only a fixed stage,
 exception class/errno and a closed reason code, not raw exception or environment
@@ -127,6 +135,10 @@ Python versions. FD 3 preserves menu input while stdin carries the Python heredo
 The script works from another CWD without importing its modules or writing
 bytecode. It rejects command-line arguments. Exit 2 means a saved blocked plan;
 0 means cancellation; 1 means the report could not be saved or invocation failed.
+A rejection's fixed check stage/reason/class/errno is also printed before saving,
+so a storage failure cannot hide the initial rejection. Selected EXE path/FD type,
+link count and owner-comparison metadata are projected without reading contents
+when diagnosing an input refusal. This does not relax the strict reader.
 The automatic save is explicit in this user launcher; existing developer
 inspection modes keep their read-only/default no-save behavior.
 

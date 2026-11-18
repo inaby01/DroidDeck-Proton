@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass, field
 
 from preparation_assets import digest_json
-from preparation_common import Invalid, require, safe_path
+from preparation_common import Invalid, checked, require, safe_path
 from preparation_customization import plan_customizations
 from preparation_payload import inspect_archive, verify_tree
 from preparation_runtime_context import plan_runtime_environment
@@ -62,12 +62,12 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
                       registrations, registration_id, exe_root, steam, renderer, parent_environment=None):
     require(mode in ("off", "observe", "cleanup"), "unsupported installation mode")
     steam = safe_path(steam)
-    target = pin_registration(registrations, registration_id, exe_root, steam)
-    inventory = inspect_archive(archive, sha512, archive_root, capture=CAPTURE)
+    target = checked("target-registration-exe", pin_registration, registrations, registration_id, exe_root, steam)
+    inventory = checked("payload-archive", inspect_archive, archive, sha512, archive_root, capture=CAPTURE)
     require(inventory.external_links == 0, "external payload links require separate policy")
-    runtime = plan_runtime_environment(runtime_root, runtime_audit, parent_environment)
+    runtime = checked("runtime-context", plan_runtime_environment, runtime_root, runtime_audit, parent_environment)
     helper = runtime.root / "usr/local/bin/steam-compatibility"
-    customization = plan_customizations(inventory, safe_path(archive).name, mode, helper, renderer,
+    customization = checked("expected-customizations", plan_customizations, inventory, safe_path(archive).name, mode, helper, renderer,
                                         label=runtime.label, umask=int(runtime.umask, 8))
     destination = safe_path(steam / "compatibilitytools.d" / customization.directory, steam)
     # A game executable/install directory must never be inside the tool tree,
@@ -81,7 +81,7 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
         # two generator-backed variants; never measure a file into expectations.
         matches = []
         for mask in (0o022, 0o077):
-            candidate = plan_customizations(inventory, safe_path(archive).name, mode, helper, renderer,
+            candidate = checked("expected-customizations", plan_customizations, inventory, safe_path(archive).name, mode, helper, renderer,
                                              label=runtime.label, umask=mask)
             try:
                 verify_tree(destination, inventory, candidate.overlays)

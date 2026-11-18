@@ -5,12 +5,14 @@ short user launcher embeds trusted code/config and preserves input separately
 from its Python heredoc. Reports alone are written, alongside the launcher.
 """
 
+import contextlib
 import copy
 import hashlib
 import json
 import os
 import re
 import secrets
+import stat
 import sys
 import unicodedata
 from pathlib import Path
@@ -20,6 +22,7 @@ from preparation_binding import plan_binding
 from preparation_common import (
     MAX_REPORT,
     VERSION,
+    checked,
     fields,
     load_json,
     read_bytes,
@@ -125,8 +128,8 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
     target = games[key]
     exe = safe_path(target["exe"])
     require(exe.parent != Path("/"), "executable parent too broad")
-    pin = pin_registration(source, key, exe.parent, steam)
-    prefix = _prefix_state(steam, key)
+    pin = checked("target-registration-exe", pin_registration, source, key, exe.parent, steam)
+    prefix = checked("prefix-location", _prefix_state, steam, key)
     work = safe_path(home / ".local/share/droiddeck-preparation-work" / key / "work")
     private_home = safe_path(home / ".local/share/droiddeck-preparation-work" / key / "home")
     report = {"schema_version": 1, "tool_version": VERSION, "mode": "selected-preparation-plan", "status": "blocked",
@@ -147,7 +150,7 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
     except ValueError:
         report["blockers"].append("archive-missing-or-ambiguous")
     if archive is not None:
-        installation = plan_installation(archive=archive, sha512=config["payload"]["sha512"], archive_root=config["payload"]["root"],
+        installation = checked("installation-plan", plan_installation, archive=archive, sha512=config["payload"]["sha512"], archive_root=config["payload"]["root"],
             mode=config["payload"]["mode"], runtime_root=runtime_root, runtime_audit=config["runtime_reference"],
             registrations=source, registration_id=key, exe_root=exe.parent, steam=steam, renderer=renderer, parent_environment=environment)
         report["installation_plan"] = installation.summary()
@@ -216,6 +219,96 @@ def save_selection_report(directory, report, protected_roots=()):
         os.close(fd)
 
 
+def _input_metadata(path):
+    """Inspect a selected EXE's path/FD metadata only, even after strict read refusal."""
+    try:
+        path = safe_path(path)
+        before = path.lstat()
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            opened = os.fstat(fd)
+        finally:
+            os.close(fd)
+        def project(info):
+            return {"regular": stat.S_ISREG(info.st_mode), "link_count": info.st_nlink,
+                    "owner_matches_self": info.st_uid == os.getuid(), "mode": format(stat.S_IMODE(info.st_mode), "04o")}
+        return {"status": "metadata-read", "path": project(before), "fd": project(opened),
+                "same_inode": (before.st_dev, before.st_ino) == (opened.st_dev, opened.st_ino)}
+    except (OSError, ValueError) as error:
+        return {"status": "unavailable", "error_class": type(error).__name__, "errno": getattr(error, "errno", None)}
+
+
+def _private_report_directory(home, protected_roots):
+    home = safe_path(home)
+    destination = safe_path(home / ".local/state/droiddeck-prefix-preparation/reports", home)
+    require(not any(destination == root or destination.is_relative_to(root) for root in map(safe_path, protected_roots)),
+            "private report directory overlaps protected data")
+    with contextlib.ExitStack() as stack:
+        fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stack.callback(os.close, fd)
+        for name in (None, ".local", "state", "droiddeck-prefix-preparation", "reports"):
+            if name is not None:
+                try:
+                    os.mkdir(name, 0o700, dir_fd=fd)
+                    os.fsync(fd)
+                except FileExistsError:
+                    pass
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                stack.callback(os.close, child)
+                fd = child
+            info = os.fstat(fd)
+            require(info.st_uid == os.getuid() and not info.st_mode & 0o022, "private report ancestor unsafe")
+        # Saving reopens and revalidates the resolved path; do not chmod existing ancestors.
+        safe_path(destination)
+    return destination
+
+
+def _export_report(directory, source, protected_roots):
+    """Copy a private result to the explicitly selected launcher folder only.
+
+    Shared filesystem ownership/mode emulation is allowed for this data export,
+    never for assets, caches, source readers, private reports or execution paths.
+    The original private result remains authoritative. No existing file is opened
+    for writing; no existing directory or file permissions are modified.
+    """
+    directory, source = safe_path(directory), safe_path(source)
+    require(not any(directory == root or directory.is_relative_to(root) for root in map(safe_path, protected_roots)),
+            "shared report export overlaps protected data")
+    raw = read_bytes(source, MAX_REPORT)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        current = safe_path(directory).stat()
+        require((before.st_dev, before.st_ino) == (current.st_dev, current.st_ino), "report export folder changed")
+        output_fd = os.open(source.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        with os.fdopen(output_fd, "wb") as output:
+            info = os.fstat(output.fileno())
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "invalid newly created report export")
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def save_selection_result(directory, home, report, protected_roots):
+    try:
+        return Path(directory) / save_selection_report(directory, report, protected_roots), None
+    except (OSError, ValueError):
+        private = _private_report_directory(home, protected_roots)
+        # Failed shared/direct save may have left an incomplete new JSON; keep it.
+        fallback = copy.deepcopy(report)
+        fallback["report_storage"] = {"authoritative": "private-linux-home", "shared_export_privacy": "filesystem-dependent"}
+        name = save_selection_report(private, fallback, protected_roots)
+        source = private / name
+        try:
+            _export_report(directory, source, protected_roots)
+            return Path(directory) / name, source
+        except (OSError, ValueError):
+            return source, None
+
+
 def interactive_selection(directory, renderer, config=None, *, input_stream=None, output_stream=None, environment=None,
                           steam=None, settings=None, home=None, runtime_root=Path("/")):
     stream = sys.stdin if input_stream is None else input_stream
@@ -227,6 +320,7 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
     settings = safe_path(settings if settings is not None else home / ".local/share/droiddeck-compat")
     protected_roots = [steam, settings]
     stage, selected, report = "configuration", None, None
+    selected_exe = None
     try:
         config_path, config_hash = None, None
         if config is None:
@@ -247,7 +341,8 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
             return 0, None
         require(re.fullmatch(r"[1-9][0-9]{0,3}\s*", answer) and int(answer) <= len(keys), "invalid selection")
         selected = keys[int(answer) - 1]
-        protected_roots.append(Path(games[selected]["exe"]).parent)
+        selected_exe = Path(games[selected]["exe"])
+        protected_roots.append(selected_exe.parent)
         print("使用するProton（計画）: " + _text(config["payload"]["root"]), file=output)
         stage = "selected-plan"
         report = selected_plan(directory, config, selected, source, source_digest, games, steam, settings, home, renderer,
@@ -274,7 +369,7 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
         print("必要容量のうち、初期化・依存導入で増える分は未確定です。", file=output)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
         report = {"schema_version": 1, "tool_version": VERSION, "mode": "selected-preparation-plan", "status": "input-rejected",
-                  "stage": stage, "selected_app_id": selected, "error_class": type(error).__name__, "errno": getattr(error, "errno", None),
+                  "stage": stage, "check": getattr(error, "preparation_check", stage), "selected_app_id": selected, "error_class": type(error).__name__, "errno": getattr(error, "errno", None),
                   "reason": {"existing installation differs from approved generated trees": "installed-tool-differs",
                              "payload archive checksum mismatch": "archive-checksum-mismatch",
                              "runtime source/library/label changed since audit": "runtime-identity-changed",
@@ -282,14 +377,23 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
                              "registration or executable changed": "target-changed",
                              "single-link regular file required": "input-link-metadata-rejected"}.get(str(error), "input-rejected"),
                   "preparation_complete": False, "writes": []}
-        print("検査を続行できません。理由の段階を結果JSONへ保存します。", file=output)
+        if selected_exe is not None:
+            report["selected_exe_metadata"] = _input_metadata(selected_exe)
+        print("検査停止: " + _text(report["check"]) + " / " + report["reason"] +
+              " / " + report["error_class"] + " / errno=" + str(report["errno"]), file=output)
+        print("診断結果を保存します。prefixや設定は変更していません。", file=output)
     try:
-        filename = save_selection_report(directory, report, protected_roots)
+        saved_path, private_copy = save_selection_result(directory, home, report, protected_roots)
     except (OSError, ValueError):
-        print("結果を保存できませんでした。prefixや設定は変更していません。", file=output)
+        print("結果を保存できませんでした。画面の検査停止理由を確認してください。prefixや設定は変更していません。", file=output)
         return 1, None
-    print("結果を保存しました: " + filename, file=output)
-    return 2, filename
+    label = saved_path.name if saved_path.parent == directory else str(saved_path)
+    print("結果を保存しました: " + _text(label), file=output)
+    if private_copy is not None:
+        print("Linux側の専用領域にも原本を保存しました。", file=output)
+    elif saved_path.parent != directory:
+        print("共有側へコピーできなかったため、上記のLinux側ファイルを戻してください。", file=output)
+    return 2, str(saved_path) if saved_path.parent != directory else saved_path.name
 
 
 def selection_script(config=None):
