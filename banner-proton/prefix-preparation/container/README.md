@@ -50,10 +50,11 @@ For each UID the harness runs the same tests without replacing assertions:
 | --- | ---: |
 | Offline preparation | 23 |
 | Asset/cache/journal/locks | 36 |
+| Target-only binding / VDF | 30 |
 | Existing installer | 5 |
-| Existing setup | 7 |
+| Existing setup | 9 |
 | Existing observer/cleanup | 74 |
-| Total | 145 |
+| Total | 177 |
 
 The script stops at the first failing suite and preserves the raw console error.
 A zero script exit means both UID runs finished; it is not a device preparation

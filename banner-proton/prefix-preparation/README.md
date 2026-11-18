@@ -1,10 +1,12 @@
-# Prefix preparation: offline planning and local staging (0.2.0)
+# Prefix preparation: offline planning and local staging (0.3.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
 assets and journaling progress inside one explicit private management root;
 `--list-local` reads its inventory. See [local staging](LOCAL-STAGING.md) for its
 asset schema, write boundaries and restart procedure.
+Optional `--tool-directory` adds a [target-only binding plan](BINDING.md); its guarded
+internal writer is not exposed through the CLI.
 
 No mode launches Wine, executes DroidDeck helpers or `user_settings.py`, installs
 dependencies, downloads, extracts archives, registers Proton, synchronizes settings,
@@ -135,6 +137,8 @@ The source contract was checked against DroidDeck commit
 [registration and prefix resolution](https://github.com/Droid-Deck/DroidDeck/blob/cdff94e72c45da50af43bbceff28effaf0179caf/tools/linuxfs/overlay/usr/local/bin/droiddeck-proton-run).
 The stricter ambiguity checks intentionally stop instead of choosing among
 multiple prefix candidates. Asset caching, journal persistence and tool/prefix
-preparation locks are available for local staging. Executable recipes, DroidDeck setting locks, synchronization
-and template cloning require subsequent implementation and dedicated tests. Device
+preparation locks are available for local staging. A target-only binding planner/writer with the DroidDeck setting
+lock is implemented and locally tested; the writer still requires connection to
+real readiness checks. Executable recipes, new-tool registration, final engine
+integration and template cloning remain pending. Device
 validation has not been performed for this tool.

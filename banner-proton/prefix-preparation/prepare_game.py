@@ -13,6 +13,7 @@ from pathlib import Path
 # -I excludes script paths; add only the trusted distribution directory, never CWD.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preparation_assets import exe_identity, inspect_assets
+from preparation_binding import plan_binding
 from preparation_common import (
     HANDLERS,
     MAX_DEPENDENCIES,
@@ -34,6 +35,7 @@ from preparation_common import (
     unchanged,
 )
 from preparation_store import PrivateStore, stage_local
+from preparation_vdf import parse_vdf
 
 __all__ = ["Invalid", "unchanged"]
 
@@ -155,48 +157,6 @@ def prefix_info(steam, key):
             "dependencies": "uninspected", "fonts": "uninspected"}
 
 
-def parse_vdf(raw):
-    """Bounded text KeyValues parser; no executable helper or permissive fallback."""
-    text = raw.decode("utf-8")
-    pattern = re.compile(r'\s+|//[^\n]*|"(?:[^"\\]|\\.)*"|[{}]')
-    tokens = []
-    end = 0
-    for match in pattern.finditer(text):
-        require(match.start() == end, "unsupported VDF token")
-        token = match.group()
-        end = match.end()
-        if not token.isspace() and not token.startswith("//"):
-            tokens.append(token)
-    require(end == len(text), "invalid VDF tail")
-    position = 0
-
-    def quoted(token):
-        require(token.startswith('"'), "expected VDF string")
-        value = re.sub(r'\\(["\\])', r'\1', token[1:-1])
-        require(len(value.encode("utf-8")) <= MAX_STRING, "VDF string too long")
-        return value
-
-    def block(depth=0, nested=False):
-        nonlocal position
-        require(depth <= MAX_DEPTH, "VDF nesting too deep")
-        result = {}
-        while position < len(tokens):
-            key = tokens[position]
-            position += 1
-            if key == "}":
-                require(nested, "unexpected VDF close")
-                return result
-            key = quoted(key)
-            require(key not in result and position < len(tokens), "duplicate or incomplete VDF entry")
-            value = tokens[position]
-            position += 1
-            result[key] = block(depth + 1, True) if value == "{" else quoted(value)
-        require(not nested, "unclosed VDF block")
-        return result
-
-    return block()
-
-
 def selection_info(steam, settings, key):
     result = {"ui_choice": None, "steam_game_tool": None, "steam_default_tool": None,
               "payload": "uninspected", "wrapper": "uninspected", "synchronization": "uninspected"}
@@ -257,6 +217,8 @@ def build_report(args):
             report["blockers"].extend("asset:" + asset["asset_id"] + ":" + reason for reason in asset["blockers"])
     else:
         require(asset_root is None, "--asset-root requires --assets")
+    tool_directory = getattr(args, "tool_directory", None)
+    require(tool_directory is None or args.app_id is not None, "select a registration before a binding tool")
     if args.app_id is None:
         require(args.profile is None and args.recipes is None, "select --app-id before choosing a profile")
         report["blockers"].append("select-registration-id")
@@ -273,7 +235,17 @@ def build_report(args):
     report.pop("games")
     report.update(target={**game, "identity": identity}, prefix=prefix_info(steam, key), selection=selection)
     report["input_hashes"].update(hashes)
-    report["blockers"].append("synchronization-impact-uninspected")
+    if tool_directory is None:
+        report["blockers"].append("synchronization-impact-uninspected")
+    else:
+        binding = plan_binding(steam, settings, key, tool_directory).summary()
+        report["binding_plan"] = binding
+        report["selection"]["synchronization"] = "target-only-planned-not-applied"
+        report["selection"]["wrapper"] = "present-unverified"
+        report["input_hashes"]["binding"] = binding["input_digest"]
+        report["blockers"].extend(binding["blockers"])
+        report["uninspected"].remove("synchronization-impact")
+        report["uninspected"].append("tool-registration-and-normal-launch-verification")
     if report["prefix"]["exists"]:
         report["blockers"].append("existing-prefix-read-only")
     if args.profile is None:
@@ -344,6 +316,7 @@ def main():
     parser.add_argument("--proton-version")
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--asset-root", type=Path)
+    parser.add_argument("--tool-directory", help="plan target-only binding to an already registered custom tool")
     parser.add_argument("--management-root", type=Path)
     parser.add_argument("--resume-run")
     args = parser.parse_args()
@@ -352,7 +325,7 @@ def main():
             require(args.management_root is not None, "--management-root required")
             require(not any((args.registrations, args.steam_root, args.settings_root, args.exe_root, args.app_id,
                              args.profile, args.recipes, args.assets, args.asset_root, args.resume_run,
-                             args.droiddeck_version, args.proton_version)), "inventory accepts only a management root")
+                             args.droiddeck_version, args.proton_version, args.tool_directory)), "inventory accepts only a management root")
             with PrivateStore(args.management_root) as store:
                 result = {"tool_version": VERSION, "mode": "list-local", "writes": [], **store.inventory()}
         else:

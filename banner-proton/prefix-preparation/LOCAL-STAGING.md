@@ -1,4 +1,4 @@
-# Private local staging (0.2.0)
+# Private local staging (0.3.0)
 
 This is preparation infrastructure, validated with synthetic files. It does not
 install a runtime or prepare a prefix. The operator-declared profile, asset
@@ -145,10 +145,11 @@ Removing/replacing a held lock makes later mutation checks fail.
 
 All invocations for a target must share the same management root. These locks do
 not coordinate independent roots and do not block normal DroidDeck/Wine launches.
-DroidDeck's settings lock, process-stop verification and final synchronization are
-not implemented or invoked. No state marker is written into compatdata itself.
+The [target-only binding adapter](BINDING.md) implements the separate DroidDeck
+settings lock and guarded writes as an internal API; local staging does not invoke
+it. Real process-stop verification and end-to-end integration remain pending. No state marker is written into compatdata itself.
 
 Device execution, trusted payload/helper hashes, concrete runtime postconditions,
-asset-to-recipe binding, extraction policies, final binding/synchronization and
+asset-to-recipe binding, extraction policies, end-to-end binding/synchronization and
 prefix/template operations remain future work. Local tests establish behavior of
 the synthetic workflows, not compatibility with an actual device or installer.

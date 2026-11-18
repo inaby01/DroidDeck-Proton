@@ -206,7 +206,7 @@ class InspectionTests(unittest.TestCase):
         script = Path(__file__).with_name("prepare-game.sh").resolve()
         (self.root / "json.py").write_text("raise RuntimeError('CWD import')")
         (self.root / "sitecustomize.py").write_text("raise RuntimeError('PYTHONPATH import')")
-        for module in ("preparation_common", "preparation_assets", "preparation_store"):
+        for module in ("preparation_common", "preparation_assets", "preparation_store", "preparation_vdf", "preparation_binding"):
             (self.root / (module + ".py")).write_text("raise RuntimeError('untrusted sibling import')")
         fake = self.root / "python3"
         fake.write_text("#!/bin/sh\ntouch injected\nexit 99\n")

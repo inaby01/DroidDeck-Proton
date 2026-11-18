@@ -38,6 +38,7 @@ stat -f -c 'TEST_FILESYSTEM=%T' /tmp
 for test in \
     /input/prefix-preparation/test_prepare_game.py \
     /input/prefix-preparation/test_preparation_store.py \
+    /input/prefix-preparation/test_preparation_binding.py \
     /input/banner-proton/test-softdenchi-install.py \
     /input/banner-proton/test-softdenchi-setup.py \
     /input/banner-proton/test-softdenchi-observer.py; do

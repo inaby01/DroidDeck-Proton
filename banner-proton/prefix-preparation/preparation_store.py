@@ -21,6 +21,7 @@ from preparation_assets import (
     source_path,
     validate_manifest,
 )
+from preparation_binding import validate_binding_record
 from preparation_common import (
     MAX_JSON,
     VERSION,
@@ -334,8 +335,8 @@ class PrivateStore:
 
     def inventory(self):
         """Read-only bounded inventory. Incomplete objects remain visible, never deleted."""
-        result = {"assets": [], "runs": [], "temporary_records": []}
-        for directory in ("assets", "runs"):
+        result = {"assets": [], "runs": [], "bindings": [], "backups": [], "temporary_records": []}
+        for directory in ("assets", "runs", "bindings", "backups"):
             try:
                 with self.directory((directory,)) as fd:
                     names = self._names(fd)
@@ -343,7 +344,23 @@ class PrivateStore:
                 continue
             for name in sorted(names):
                 require(COMPONENT.fullmatch(name), "unknown managed object name")
-                if directory == "assets":
+                if directory == "backups":
+                    try:
+                        with self.directory(("backups", name)) as fd:
+                            files = self._names(fd)
+                            require(all(COMPONENT.fullmatch(item) for item in files), "invalid backup name")
+                        result["backups"].append({"backup_id": name, "files": sorted(files), "contents": "private"})
+                    except (OSError, Invalid):
+                        result["backups"].append({"object": name, "status": "invalid"})
+                elif directory == "bindings" and not name.startswith("tmp-"):
+                    try:
+                        record, _ = self.read_record("bindings", name)
+                        validate_binding_record(record)
+                        result["bindings"].append({"binding_id": record["binding_id"], "status": record["status"],
+                                                  "completed_files": record["completed_files"], "preparation_complete": False})
+                    except (OSError, Invalid, TypeError, KeyError):
+                        result["bindings"].append({"object": name, "status": "invalid"})
+                elif directory == "assets":
                     try:
                         with self.directory((directory, name)) as fd:
                             receipt = self._read(fd, "receipt.json", missing=True)
@@ -399,7 +416,7 @@ def validate_run(record):
     sha256(record["input_digest"])
     require(type(record["input_hashes"]) is dict, "invalid input hash map")
     for key, value in record["input_hashes"].items():
-        require(key in ("registrations", "games", "config", "profile", "recipes", "assets"), "unknown input hash")
+        require(key in ("registrations", "games", "config", "profile", "recipes", "assets", "binding"), "unknown input hash")
         sha256(value)
     fields(record["profile"], ("profile_id", "revision"))
     identifier(record["profile"]["profile_id"])
