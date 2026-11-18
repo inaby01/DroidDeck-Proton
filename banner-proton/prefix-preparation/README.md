@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.14.3)
+# Prefix preparation: offline planning and local staging (0.15.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -393,3 +393,45 @@ receipt stability. It does not acquire/create locks, fsync directories, finalize
 receipts or repair files. These are current observations; legacy creation reports
 did not record the original failing condition and cannot replay history.
 Raw private receipts, paths, marker values and exception messages are excluded.
+
+
+## Explicit recovery of a failed registration-material receipt
+
+The common launcher menu adds option 3 for existing probe registrations. This is
+separate from the read-only option 1 and the new-material option 2. It previews
+an exact private history path and receipt update, then requires a separate `1`.
+Canceling writes nothing. No new EXE, marker, Android registration, compatdata or
+Proton installation is created, modified or executed.
+
+Recovery repeats the whole pinned archive checksum/inventory and bounded x86
+member inspection, requires both material and registered EXE/marker to agree,
+and checks the same registration, baseline new ID, uniqueness, absent prefix
+including signed/numeric aliases, source stability and inode/metadata pins.
+It does not authorize a write based on a diagnostic JSON or receipt status.
+All checks are repeated under the existing private global/target locks and again
+immediately before the atomic receipt update. Any mismatch stops the operation.
+
+The original receipt is retained without overwrite under `probe-history`, named
+by its original SHA-256. An identical existing backup may be reused after an
+interruption; conflicting history is refused. The updated ready receipt keeps
+its original creation version and adds a strict `revalidation` evidence object
+with the new tool version, old state/hash/history reference, archive/inventory,
+registration identity/source hash and context digest. Normal verification now
+checks this immutable history and the revalidated registration ID. A previously
+ready receipt is inspected without rewriting it or creating new history.
+
+The historical reason for an old creation failure remains unknown. This is a new
+revalidation, not a claim that the original run succeeded. If publication is
+interrupted, private state may already have changed; preserve it and use the same
+menu again. The report explicitly records the uncertain write outcome. It never
+rolls back blindly or marks the receipt failed after a possibly successful update.
+After recovery, the same target's normal blocked preparation plan is generated
+and saved in the same operation. Prefix initialization, dependency installation,
+template creation and game launch remain unavailable through this entry.
+
+
+New material-creation failures also retain a strict `creation_failure` stage,
+error-kind enum and bounded errno in the private failed receipt where possible.
+The visible creation report uses the same fixed stage. No exception message or
+input data is stored. This evidence is preserved through subsequent revalidation;
+legacy failures that lack it remain explicitly unknown.

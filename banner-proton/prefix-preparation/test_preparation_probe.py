@@ -148,9 +148,27 @@ class ProbeTests(unittest.TestCase):
         with PrivateStore(self.store_root) as store:
             record, _ = store.read_record("probe-runs", plan.record["probe_id"] + ".json")
         self.assertEqual(record["status"], "probe-failed")
+        self.assertEqual(record["creation_failure"], {"stage": "verify-marker", "kind": "os-error", "errno": None})
         exe = self.register(plan)
         with self.assertRaises(Invalid):
             self.verify(exe)
+
+    def test_invalid_creator_postcheck_records_fixed_stage_without_exception_text(self):
+        plan = self.plan()
+        actual = probe.exe_identity
+        def fail_postcheck(path):
+            if Path(path).name == probe.EXE:
+                raise Invalid('PRIVATE_CREATION_FAILURE_SENTINEL')
+            return actual(path)
+        with patch.object(probe, 'exe_identity', side_effect=fail_postcheck), self.assertRaises(Invalid) as caught:
+            self.create(plan)
+        self.assertEqual(caught.exception.preparation_check, 'probe-create-verify-exe')
+        with PrivateStore(self.store_root) as store:
+            record, _ = store.read_record('probe-runs', plan.record['probe_id'] + '.json')
+        probe._record_valid(record)
+        self.assertEqual(record['creation_failure']['stage'], 'verify-exe')
+        self.assertEqual(record['creation_failure']['kind'], 'invalid')
+        self.assertNotIn('PRIVATE_CREATION_FAILURE_SENTINEL', json.dumps(record))
 
     def test_new_registration_verified_read_only(self):
         plan, _ = self.create()

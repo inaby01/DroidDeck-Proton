@@ -46,12 +46,14 @@ EXE = "prefix-probe.exe"
 MARKER = "probe.json"
 MAX_PROBE = 2 * 1024**2
 ID = re.compile(r"probe-[0-9a-f]{32}\Z")
+CREATION_STAGES = frozenset(("open-parent", "mkdir", "open-destination", "directory-guard", "open-exe", "write-exe", "sync-exe",
+                             "open-marker", "write-marker", "sync-marker", "verify-exe", "verify-marker", "sync-directory", "sync-parent", "record-ready"))
 
 
 def _record_valid(record):
     fields(record, ("schema_version", "tool_version", "probe_id", "probe_revision", "status", "destination", "steam",
                     "registration_source", "baseline_ids", "registration_sha256", "archive_sha512", "inventory_digest",
-                    "member", "exe_identity", "preparation_complete"))
+                    "member", "exe_identity", "preparation_complete"), ("revalidation", "creation_failure"))
     require(type(record["schema_version"]) is int and record["schema_version"] == 1 and type(record["probe_revision"]) is int and record["probe_revision"] == 1,
             "unknown probe receipt schema/revision")
     require(type(record["tool_version"]) is str and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", record["tool_version"]), "invalid creation version")
@@ -69,6 +71,47 @@ def _record_valid(record):
     fields(identity, ("sha256", "size", "pe_machine", "provenance"))
     require(type(identity["size"]) is int and 0 < identity["size"] <= MAX_PROBE and identity["pe_machine"] == "x86" and
             identity["provenance"] == "local-measurement-only" and re.fullmatch(r"[0-9a-f]{64}", identity["sha256"]), "invalid probe executable")
+
+
+    if "creation_failure" in record:
+        failure = record["creation_failure"]
+        fields(failure, ("stage", "kind", "errno"))
+        require(type(failure["stage"]) is str and failure["stage"] in CREATION_STAGES and
+                failure["kind"] in ("invalid", "os-error", "interrupted"), "invalid creation failure code")
+        require(failure["errno"] is None or type(failure["errno"]) is int and 0 < failure["errno"] < 4096,
+                "invalid creation failure errno")
+        require(record["status"] == "probe-failed" or record["status"] == "probe-ready" and "revalidation" in record,
+                "invalid creation failure state")
+    if "revalidation" in record:
+        evidence = record["revalidation"]
+        fields(evidence, ("schema_version", "tool_version", "previous_state", "previous_receipt_sha256", "history_record",
+                          "archive_sha512", "inventory_digest", "registration_id", "registration_sha256", "context_digest"))
+        require(type(evidence["schema_version"]) is int and evidence["schema_version"] == 1 and record["status"] == "probe-ready",
+                "invalid revalidation schema/state")
+        require(type(evidence["tool_version"]) is str and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", evidence["tool_version"]) and
+                evidence["previous_state"] in ("creating", "probe-failed"), "invalid revalidation version/state")
+        for name in ("previous_receipt_sha256", "registration_sha256", "context_digest"):
+            require(type(evidence[name]) is str and re.fullmatch(r"[0-9a-f]{64}", evidence[name]), "invalid revalidation digest")
+        require(evidence["archive_sha512"] == record["archive_sha512"] and evidence["inventory_digest"] == record["inventory_digest"],
+                "revalidation archive differs")
+        require(type(evidence["registration_id"]) is str and app_id(evidence["registration_id"]) == evidence["registration_id"] and
+                evidence["registration_id"] not in ids, "invalid revalidation registration ID")
+        require(evidence["history_record"] == record["probe_id"] + "-" + evidence["previous_receipt_sha256"] + ".json",
+                "invalid revalidation history reference")
+
+
+def _verify_revalidation_history(record, store_root):
+    if "revalidation" not in record:
+        return
+    evidence = record["revalidation"]
+    with PrivateStore(store_root) as store:
+        previous, digest = store.read_record("probe-history", evidence["history_record"])
+    _record_valid(previous)
+    require(previous["status"] == evidence["previous_state"] and digest == evidence["previous_receipt_sha256"],
+            "revalidation history hash/state differs")
+    expected = {name: value for name, value in record.items() if name != "revalidation"}
+    expected["status"] = evidence["previous_state"]
+    require(previous == expected, "revalidation history content differs")
 
 
 def _marker(record):
@@ -169,11 +212,14 @@ def create_probe_material(plan, refresh, store):
     filename = record["probe_id"] + ".json"
     record_hash = store.write_record("probe-runs", filename, record)
     parent_fd, fd = None, None
+    phase = "open-parent"
     try:
         parent = safe_path(destination.parent)
         parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         parent_identity = os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino
+        phase = "mkdir"
         os.mkdir(destination.name, 0o700, dir_fd=parent_fd)
+        phase = "open-destination"
         fd = os.open(destination.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
         identity = os.fstat(fd).st_dev, os.fstat(fd).st_ino
         def guard():
@@ -183,19 +229,29 @@ def create_probe_material(plan, refresh, store):
             require((parent_now.st_dev, parent_now.st_ino) == parent_identity and (current.st_dev, current.st_ino) == identity,
                     "probe directory changed")
         for name, raw in ((EXE, plan.raw), (MARKER, (json.dumps(_marker(record), ensure_ascii=True, indent=2) + "\n").encode())):
+            phase = "directory-guard"
             guard()
+            phase = "open-exe" if name == EXE else "open-marker"
             out_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
             with os.fdopen(out_fd, "wb") as output:
                 info = os.fstat(output.fileno())
                 require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "invalid new probe file")
+                phase = "write-exe" if name == EXE else "write-marker"
                 output.write(raw)
                 output.flush()
+                phase = "sync-exe" if name == EXE else "sync-marker"
                 os.fsync(output.fileno())
+        phase = "directory-guard"
         guard()
+        phase = "verify-exe"
         require(exe_identity(destination / EXE) == record["exe_identity"], "copied probe identity changed")
+        phase = "verify-marker"
         require(load_json(destination / MARKER)[0] == _marker(record), "probe marker changed")
+        phase = "sync-directory"
         os.fsync(fd)
+        phase = "sync-parent"
         os.fsync(parent_fd)
+        phase = "record-ready"
         record["status"] = "probe-ready"
         store.write_record("probe-runs", filename, record, record_hash)
         return {"mode": "probe-material-created", "probe_id": record["probe_id"], "destination": str(destination),
@@ -204,8 +260,14 @@ def create_probe_material(plan, refresh, store):
                 "writes": [{"path": str(destination), "scope": "new-registration-probe-files-only"},
                            {"path": str(store.root), "scope": "private-probe-receipt-and-locks"}],
                 "prefix_created": False, "exe_executed": False, "registration_written": False, "preparation_complete": False}
-    except BaseException:
+    except BaseException as error:
+        if not hasattr(error, "preparation_check"):
+            error.preparation_check = "probe-create-" + phase
+        code = getattr(error, "errno", None)
         record["status"] = "probe-failed"
+        record["creation_failure"] = {"stage": phase,
+            "kind": "invalid" if isinstance(error, ValueError) else "os-error" if isinstance(error, OSError) else "interrupted",
+            "errno": code if type(code) is int and 0 < code < 4096 else None}
         try:
             store.write_record("probe-runs", filename, record, record_hash)
         except (OSError, ValueError):
@@ -332,7 +394,9 @@ def inspect_incomplete_material(record, exe, key, source, steam, store_root, rec
     observe("prefix-current-state", prefix_state)
     observe("private-lock-files-now", locks)
     observe("private-receipt-stable", private_state)
-    return {"receipt_state": record["status"], "original_failure_detail": "not-recorded-by-creator",
+    return {"receipt_state": record["status"],
+            "original_failure_detail": "recorded-in-private-receipt" if "creation_failure" in record else "not-recorded-by-creator",
+            "creation_failure": record.get("creation_failure"),
             "scope": "current-read-only-observations-not-historical-replay", "checks": observations,
             "directory_fsync": "not-retested-read-only", "locks_acquired": False,
             "material_modified": False, "receipt_finalized": False, "preparation_complete": False}
@@ -363,6 +427,7 @@ def verify_probe_registration(exe, key, source, steam, store_root):
          type(marker) is dict and type(marker.get("probe_id")) is str and ID.fullmatch(marker["probe_id"]), "invalid probe marker")
     record, receipt_digest = step("probe-private-receipt-read", receipt)
     step("probe-private-receipt-schema", _record_valid, record)
+    step("probe-revalidation-history", _verify_revalidation_history, record, store_root)
     if record["status"] != "probe-ready":
         observation = inspect_incomplete_material(record, exe, key, source, steam, store_root, receipt_digest)
         try:
@@ -371,6 +436,11 @@ def verify_probe_registration(exe, key, source, steam, store_root):
             error.incomplete_probe_material = observation
             raise
     step("probe-private-receipt-ready", require, True, "probe receipt not ready")
+    return _verify_registered_context(record, marker, exe, key, source, steam, receipt_digest, step)
+
+
+def _verify_registered_context(record, marker, exe, key, source, steam, receipt_digest, step=checked):
+    """Shared read-only conditions; readiness is enforced separately by each caller."""
     step("probe-steam-context", require, record["steam"] == str(steam), "probe Steam context differs")
     step("probe-registration-source-context", require, record["registration_source"] == str(source), "probe registration source context differs")
     step("probe-marker-receipt-match", require, marker == _marker(record), "probe marker differs from private receipt")
@@ -386,6 +456,9 @@ def verify_probe_registration(exe, key, source, steam, store_root):
     key = step("probe-selected-id", app_id, key)
     step("probe-selected-id-present", require, key in games, "selected registration absent")
     step("probe-new-id-baseline", require, key not in record["baseline_ids"], "registration is not new relative to staging baseline")
+    if "revalidation" in record:
+        step("probe-revalidated-registration-id", require, record["revalidation"]["registration_id"] == key,
+             "revalidated registration ID differs")
 
     def matching_ids():
         matches = []
@@ -437,10 +510,13 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
     if config is None or not config.get("probe_material", False):
         return selection.interactive_selection(directory, renderer, config, **options)
     selection.validate_selection_config(config)
-    print("1. 登録済み対象の読み取り検査・計画\n2. 新規登録用の検証ファイルを用意\nq. 取消", file=output)
+    print("1. 登録済み対象の読み取り検査・計画\n2. 新規登録用の検証ファイルを用意\n3. 未完了の検証用記録を全照合して復帰\nq. 取消", file=output)
     answer = stream.readline(32).strip()
     if answer == "1":
         return selection.interactive_selection(directory, renderer, config, **options)
+    if answer == "3":
+        from preparation_probe_recovery import interactive_recovery
+        return interactive_recovery(directory, renderer, config, **options)
     if answer != "2":
         print("取り消しました。", file=output)
         return 0, None
