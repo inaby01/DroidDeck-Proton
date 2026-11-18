@@ -7,7 +7,14 @@ import re
 import stat
 from pathlib import Path
 
-from preparation_common import read_bytes, regular_open, require, safe_path, unchanged
+from preparation_common import (
+    Invalid,
+    read_bytes,
+    regular_open,
+    require,
+    safe_path,
+    unchanged,
+)
 
 SOURCES = {
     "usr/local/bin/steam-compatibility": "9728f4c8c6646335e3f28297e3cae0ea4f8c44c7da83c02a0c2cd46b682bf61e",
@@ -84,22 +91,9 @@ def inspect_runtime(root, environment=None):
         pass
     except (OSError, ValueError):
         label = {"status": "unreadable-or-linked", "sha256": None}
-    process_basis = {"self_proc_readable":False, "proc_uid_matches_getuid":None,
-                     "proc_owner_matches_getuid":None, "umask":None, "device_namespace_verified":False}
-    if root == Path("/"):
-        try:
-            directory = root / "proc" / str(os.getpid())
-            status = read_bytes(directory / "status",65536).decode("utf-8")
-            for line in status.splitlines():
-                key,sep,value = line.partition(":")
-                if sep and key == "Umask" and re.fullmatch(r"[0-7]{4}",value.strip()):
-                    process_basis["umask"] = value.strip()
-                elif sep and key == "Uid" and value.split() and value.split()[0].isdecimal():
-                    process_basis["proc_uid_matches_getuid"] = int(value.split()[0]) == os.getuid()
-            process_basis["proc_owner_matches_getuid"] = directory.stat().st_uid == os.getuid()
-            process_basis["self_proc_readable"] = True
-        except (OSError, ValueError):
-            pass
+    process_basis = inspect_process_basis(root / "proc", env) if root == Path("/") else {
+        "self_proc_readable":False,"proc_uid_matches_getuid":None,"proc_owner_matches_getuid":None,
+        "umask":None,"device_namespace_verified":False,"status":"root-snapshot-not-live"}
     display = env.get("DISPLAY","")
     match = re.fullmatch(r":([0-9]{1,5})(?:\.[0-9]{1,3})?",display)
     display_socket = _socket(root,"tmp/.X11-unix/X"+match[1]) if match else "unset-or-unsupported-format"
@@ -115,6 +109,88 @@ def inspect_runtime(root, environment=None):
             "label":label,"process_observation_basis":process_basis,"environment_presence":{name:bool(env.get(name)) for name in ENV_NAMES},
             "display_socket":display_socket,"connections_attempted":False,"helpers_executed":False,
             "blockers":blockers,"preparation_complete":False,"writes":[]}
+
+
+def _probe_error(error, stage):
+    result = {"status":"failed","stage":stage,"error_type":type(error).__name__}
+    if isinstance(error, OSError):
+        result["errno"] = error.errno
+    elif isinstance(error, Invalid):
+        # Invalid from the shared reader contains fixed validation messages only.
+        result["validation"] = str(error)
+    return result
+
+
+def _status_projection(raw):
+    values = {"uid_matches_getuid":None,"umask":None}
+    for line in raw.decode("utf-8").splitlines():
+        key,sep,value = line.partition(":")
+        if sep and key == "Umask" and re.fullmatch(r"[0-7]{4}",value.strip()):
+            values["umask"] = value.strip()
+        elif sep and key == "Uid" and value.split() and value.split()[0].isdecimal():
+            values["uid_matches_getuid"] = int(value.split()[0]) == os.getuid()
+    return values
+
+
+def _status_via_directory_fd(proc, name):
+    stage, parent, directory = "open-proc-root", None, None
+    try:
+        safe_path(proc)
+        parent = os.open(proc,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        stage = "open-pid-directory"
+        require(name.isascii() and name.isdecimal(), "non-numeric proc target")
+        directory = os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+        owner_matches = os.fstat(directory).st_uid == os.getuid()
+        stage = "open-status-no-follow"
+        fd = os.open("status",os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+        with os.fdopen(fd,"rb") as stream:
+            info = os.fstat(stream.fileno())
+            require(stat.S_ISREG(info.st_mode), "non-regular proc status")
+            stage = "bounded-status-read"
+            raw = stream.read(65537)
+            require(len(raw) <= 65536, "proc status too large")
+        stage = "parse-selected-status-fields"
+        return {"status":"read","owner_matches_getuid":owner_matches,"link_count":info.st_nlink,
+                **_status_projection(raw)}
+    except (OSError,ValueError) as error:
+        return _probe_error(error,stage)
+    finally:
+        if directory is not None:
+            os.close(directory)
+        if parent is not None:
+            os.close(parent)
+
+
+def inspect_process_basis(proc, environment):
+    result = {"self_proc_readable":False,"proc_uid_matches_getuid":None,"proc_owner_matches_getuid":None,
+              "umask":None,"device_namespace_verified":False}
+    pid = str(os.getpid())
+    stage = "shared-reader"
+    try:
+        raw = read_bytes(proc / pid / "status",65536)
+        stage = "parse-selected-status-fields"
+        values = _status_projection(raw)
+        stage = "pid-directory-owner"
+        result.update(self_proc_readable=True,proc_uid_matches_getuid=values["uid_matches_getuid"],
+                      proc_owner_matches_getuid=(proc / pid).stat().st_uid == os.getuid(),umask=values["umask"])
+        result["shared_reader"] = {"status":"read"}
+    except (OSError,ValueError) as error:
+        result["shared_reader"] = _probe_error(error,stage)
+    result["numeric_pid_fd_reader"] = _status_via_directory_fd(proc,pid)
+    try:
+        safe_path(proc)
+        target = os.readlink(proc / "self")
+        match = re.fullmatch(r"(?:/proc/)?([0-9]{1,20})",target)
+        result["proc_self_link"] = {"status":"numeric" if match else "unsupported-target",
+                                    "matches_python_pid":bool(match and match[1] == pid)}
+        if match:
+            result["proc_self_fd_reader"] = _status_via_directory_fd(proc,match[1])
+    except (OSError,ValueError) as error:
+        result["proc_self_link"] = _probe_error(error,"read-proc-self-link")
+    shell_umask = environment.get("DROIDDECK_AUDIT_SHELL_UMASK","")
+    result["shell_umask"] = shell_umask if re.fullmatch(r"[0-7]{4}",shell_umask) else None
+    result["reader_diagnostics_only"] = True
+    return result
 
 
 def runtime_audit_command():
@@ -137,4 +213,4 @@ def runtime_audit_command():
     compile(code,"runtime-audit-command","exec")
     delimiter = "DROIDDECK_RUNTIME_AUDIT_"+hashlib.sha256(code.encode()).hexdigest()[:16]
     require(delimiter not in code.splitlines(), "invalid audit delimiter")
-    return "/usr/bin/python3 -I -B - <<'"+delimiter+"'\n"+code+delimiter+"\n"
+    return "DROIDDECK_AUDIT_SHELL_UMASK=$(umask) /usr/bin/python3 -I -B - <<'"+delimiter+"'\n"+code+delimiter+"\n"

@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import os
 import runpy
 import socket
 import subprocess
@@ -137,15 +138,99 @@ class RuntimeTests(unittest.TestCase):
 
     def test_standalone_audit_runs_without_installing_modules_or_writing(self):
         command = runtime.runtime_audit_command()
-        self.assertTrue(command.startswith("/usr/bin/python3 -I -B - <<"))
+        self.assertTrue(command.startswith("DROIDDECK_AUDIT_SHELL_UMASK=$(umask) /usr/bin/python3 -I -B - <<"))
         result = subprocess.run(["/bin/bash"],input=command,capture_output=True,text=True,check=False,
                                 env={"PATH":"/usr/bin:/bin","PROOT_FP_KEY":"DUMMY_COMMAND_SECRET"})
         self.assertEqual(result.returncode,0,result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual(report["view"],"current-root")
+        self.assertRegex(report["process_observation_basis"]["shell_umask"],r"[0-7]{4}")
         self.assertEqual(report["writes"],[])
         self.assertFalse(report["helpers_executed"])
         self.assertNotIn("DUMMY_COMMAND_SECRET",result.stdout)
+
+    def proc_fixture(self, *, links=1, raw=None):
+        proc = self.root / "proc"
+        pid = str(os.getpid())
+        folder = proc / pid
+        folder.mkdir(parents=True)
+        status = folder / "status"
+        status.write_bytes(raw if raw is not None else ("Name:\tfixture\nUid:\t"+str(os.getuid())+" 0 0 0\nUmask:\t0022\n").encode())
+        (proc / "self").symlink_to(pid)
+        if links==2:
+            os.link(status,self.root / "status-alias")
+        return proc
+
+    def test_proc_diagnostics_preserve_reader_failures_without_promoting_namespace(self):
+        proc = self.proc_fixture(links=2)
+        result = runtime.inspect_process_basis(proc,{"DROIDDECK_AUDIT_SHELL_UMASK":"0077"})
+        self.assertFalse(result["self_proc_readable"])
+        self.assertEqual(result["shared_reader"]["validation"],"single-link regular file required")
+        self.assertEqual(result["numeric_pid_fd_reader"]["status"],"read")
+        self.assertEqual(result["numeric_pid_fd_reader"]["link_count"],2)
+        self.assertEqual(result["shell_umask"],"0077")
+        self.assertFalse(result["device_namespace_verified"])
+
+    def test_proc_self_and_python_pid_difference_is_visible_without_pid_values(self):
+        proc = self.proc_fixture()
+        other = 2147483000
+        with patch.object(runtime.os,"getpid",return_value=other):
+            result = runtime.inspect_process_basis(proc,{})
+        self.assertEqual(result["numeric_pid_fd_reader"]["status"],"failed")
+        self.assertFalse(result["proc_self_link"]["matches_python_pid"])
+        self.assertEqual(result["proc_self_fd_reader"]["status"],"read")
+        self.assertNotIn(str(other),json.dumps(result))
+
+    def test_proc_status_symlink_is_never_followed(self):
+        proc = self.proc_fixture()
+        status = proc / str(os.getpid()) / "status"
+        status.unlink()
+        target = self.root / "private-status"
+        target.write_text("DUMMY_PRIVATE_STATUS")
+        status.symlink_to(target)
+        result = runtime.inspect_process_basis(proc,{})
+        self.assertEqual(result["numeric_pid_fd_reader"]["stage"],"open-status-no-follow")
+        self.assertEqual(result["numeric_pid_fd_reader"]["status"],"failed")
+        self.assertNotIn("DUMMY_PRIVATE_STATUS",json.dumps(result))
+        self.assertNotIn(str(self.root),json.dumps(result))
+
+    def test_proc_permission_error_exposes_only_errno_and_stage(self):
+        proc = self.proc_fixture()
+        with patch.object(runtime,"read_bytes",side_effect=PermissionError(13,"DUMMY_PRIVATE_ERROR")):
+            result = runtime.inspect_process_basis(proc,{})
+        self.assertEqual(result["shared_reader"]["errno"],13)
+        self.assertEqual(result["shared_reader"]["stage"],"shared-reader")
+        self.assertNotIn("DUMMY_PRIVATE_ERROR",json.dumps(result))
+
+    def test_invalid_status_encoding_never_echoes_status_bytes(self):
+        proc = self.proc_fixture(raw=b"DUMMY_PRIVATE_STATUS\xff")
+        result = runtime.inspect_process_basis(proc,{})
+        self.assertEqual(result["shared_reader"]["error_type"],"UnicodeDecodeError")
+        self.assertNotIn("DUMMY_PRIVATE_STATUS",json.dumps(result))
+
+    def test_proc_status_reads_are_bounded(self):
+        proc = self.proc_fixture(raw=b"x"*65537)
+        result = runtime.inspect_process_basis(proc,{})
+        self.assertEqual(result["numeric_pid_fd_reader"]["status"],"failed")
+        self.assertFalse(result["self_proc_readable"])
+
+    def test_non_numeric_proc_self_target_is_not_followed_or_echoed(self):
+        proc = self.proc_fixture()
+        (proc / "self").unlink()
+        (proc / "self").symlink_to("../private-target")
+        result = runtime.inspect_process_basis(proc,{})
+        self.assertEqual(result["proc_self_link"]["status"],"unsupported-target")
+        self.assertNotIn("proc_self_fd_reader",result)
+        self.assertNotIn("private-target",json.dumps(result))
+
+    def test_proc_diagnostics_return_only_selected_fields_and_validated_shell_umask(self):
+        proc = self.proc_fixture()
+        result = runtime.inspect_process_basis(proc,{"DROIDDECK_AUDIT_SHELL_UMASK":"private-not-a-mask"})
+        self.assertTrue(result["proc_self_link"]["matches_python_pid"])
+        self.assertEqual(result["umask"],"0022")
+        self.assertIsNone(result["shell_umask"])
+        self.assertNotIn("private-not-a-mask",json.dumps(result))
+        self.assertNotIn("Name",json.dumps(result))
 
     def test_runtime_cli_is_separate_read_only_mode(self):
         before = self.snapshot()

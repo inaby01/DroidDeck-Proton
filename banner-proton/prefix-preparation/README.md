@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.7.0)
+# Prefix preparation: offline planning and local staging (0.7.1)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -20,7 +20,9 @@ selected library hashes/ELF headers, label hash, environment presence, display
 socket metadata and the auditor's proc/umask basis. It does not connect to sockets
 or print environment values. `--emit-runtime-audit` emits a self-contained command
 that can be pasted into the target terminal without installing files. Neither mode
-enables prefix preparation or claims runtime compatibility.
+enables prefix preparation or claims runtime compatibility. Proc failures include
+stage/error diagnostics and separate numeric-PID/`proc/self` FD probes, without
+printing PID values or status contents. Alternative reads never relax launch checks.
 
 No CLI mode launches Wine, executes DroidDeck helpers or `user_settings.py`, installs
 dependencies, downloads, extracts archives to disk, registers Proton, synchronizes settings,
