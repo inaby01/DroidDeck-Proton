@@ -35,6 +35,7 @@ from preparation_common import (
     unchanged,
 )
 from preparation_payload import inspect_archive, verify_tree
+from preparation_runtime import inspect_runtime, runtime_audit_command
 from preparation_store import PrivateStore, stage_local
 from preparation_target import registrations
 from preparation_vdf import parse_vdf
@@ -290,6 +291,8 @@ def main():
     parser.add_argument("--version", action="version", version=VERSION)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--inspect", action="store_true")
+    mode.add_argument("--emit-runtime-audit", action="store_true", help="print a pasteable read-only runtime audit command")
+    mode.add_argument("--inspect-runtime", action="store_true", help="read-only runtime source/library/socket inventory")
     mode.add_argument("--inspect-payload", action="store_true", help="read-only archive and optional installed-tree identity check")
     mode.add_argument("--plan", action="store_true")
     mode.add_argument("--stage-local", action="store_true", help="cache assets and pause private state; never prepare a prefix")
@@ -312,9 +315,19 @@ def main():
     parser.add_argument("--payload-sha512")
     parser.add_argument("--payload-root")
     parser.add_argument("--payload-directory", type=Path)
+    parser.add_argument("--runtime-root", type=Path)
     args = parser.parse_args()
     try:
-        if args.inspect_payload:
+        if args.emit_runtime_audit:
+            require(not any(value for key,value in vars(args).items() if key != "emit_runtime_audit"), "audit emitter accepts no inputs")
+            print(runtime_audit_command(),end="")
+            return 0
+        elif args.inspect_runtime:
+            allowed = {"inspect_runtime","runtime_root"}
+            require(args.runtime_root is not None and not any(value for key,value in vars(args).items() if key not in allowed),
+                    "runtime inspection requires only an explicit root")
+            result = {"tool_version":VERSION, **inspect_runtime(args.runtime_root)}
+        elif args.inspect_payload:
             allowed = {"inspect_payload", "payload_archive", "payload_sha512", "payload_root", "payload_directory"}
             require(not any(value for key, value in vars(args).items() if key not in allowed), "payload inspection is a separate mode")
             inventory = inspect_archive(args.payload_archive, args.payload_sha512, args.payload_root)
@@ -322,6 +335,7 @@ def main():
             if args.payload_directory is not None:
                 result["installed_payload"] = verify_tree(args.payload_directory, inventory)
         elif args.list_local:
+            require(args.runtime_root is None, "runtime options require --inspect-runtime")
             require(not any((args.payload_archive, args.payload_sha512, args.payload_root, args.payload_directory)),
                     "payload options require --inspect-payload")
             require(args.management_root is not None, "--management-root required")
@@ -331,6 +345,7 @@ def main():
             with PrivateStore(args.management_root) as store:
                 result = {"tool_version": VERSION, "mode": "list-local", "writes": [], **store.inventory()}
         else:
+            require(args.runtime_root is None, "runtime options require --inspect-runtime")
             require(not any((args.payload_archive, args.payload_sha512, args.payload_root, args.payload_directory)),
                     "payload options require --inspect-payload")
             require(args.registrations is not None and args.steam_root is not None and args.settings_root is not None,

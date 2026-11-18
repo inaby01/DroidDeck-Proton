@@ -95,6 +95,7 @@ class PayloadInventory:
     digest: str
     expanded_bytes: int
     external_links: int
+    captured: dict = field(default_factory=dict, repr=False)
 
     def summary(self):
         kinds = {kind: sum(item["kind"] == kind for item in self.entries.values())
@@ -108,11 +109,15 @@ class PayloadInventory:
                 "blockers": blockers, "preparation_complete": False, "writes": []}
 
 
-def inspect_archive(path, expected_sha512, root):
+def inspect_archive(path, expected_sha512, root, capture=()):
     require(type(expected_sha512) is str and len(expected_sha512) == 128 and
             all(c in "0123456789abcdef" for c in expected_sha512), "expected SHA-512 required")
     require(path is not None, "payload archive required")
     require(_relative(root) == root and "/" not in root, "single archive root required")
+    require(type(capture) in (tuple, list) and len(capture) <= 16 and len(set(capture)) == len(capture), "invalid capture selection")
+    for name in capture:
+        require(_relative(name) == name, "invalid capture path")
+    captured, capture_bytes = {}, 0
     entries, expanded, root_seen, root_mode = {}, 0, False, None
     digest = hashlib.sha512()
     try:
@@ -142,7 +147,16 @@ def inspect_archive(path, expected_sha512, root):
                             require(expanded <= MAX_EXPANDED, "expanded payload too large")
                             stream = package.extractfile(member)
                             with stream:
-                                entry.update(kind="file", size=member.size, sha256=_hash(stream, member.size))
+                                if name in capture:
+                                    capture_bytes += member.size
+                                    require(capture_bytes <= CHUNK, "captured metadata too large")
+                                    raw = stream.read(member.size + 1)
+                                    require(len(raw) == member.size, "truncated captured member")
+                                    captured[name] = raw
+                                    measured = hashlib.sha256(raw).hexdigest()
+                                else:
+                                    measured = _hash(stream, member.size)
+                                entry.update(kind="file", size=member.size, sha256=measured)
                         elif member.issym() or member.islnk():
                             require(member.size == 0, "nonempty payload link")
                             target = member.linkname
@@ -177,7 +191,7 @@ def inspect_archive(path, expected_sha512, root):
     external = sum(entry["kind"] == "symlink" and _link(name, entry["target"]) is None
                    for name, entry in entries.items())
     return PayloadInventory(root, expected_sha512, root_mode, entries,
-                            digest_json({"root_mode": root_mode, "entries": entries}), expanded, external)
+                            digest_json({"root_mode": root_mode, "entries": entries}), expanded, external, captured)
 
 
 def verify_tree(root, inventory, overlays=None):

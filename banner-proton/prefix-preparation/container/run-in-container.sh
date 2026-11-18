@@ -42,6 +42,8 @@ for test in \
     /input/prefix-preparation/test_preparation_execution.py \
     /input/prefix-preparation/test_preparation_processes.py \
     /input/prefix-preparation/test_preparation_payload.py \
+    /input/prefix-preparation/test_preparation_customization.py \
+    /input/prefix-preparation/test_preparation_runtime.py \
     /input/banner-proton/test-softdenchi-install.py \
     /input/banner-proton/test-softdenchi-setup.py \
     /input/banner-proton/test-softdenchi-observer.py; do

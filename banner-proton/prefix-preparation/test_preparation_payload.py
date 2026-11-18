@@ -329,6 +329,23 @@ class PayloadTests(unittest.TestCase):
         with self.assertRaises(Invalid):
             payload.verify_tree(self.installed,inventory)
 
+    def test_selected_metadata_capture_remains_private_and_hash_bound(self):
+        inventory = payload.inspect_archive(self.archive,self.sha,ROOT,capture=("proton",))
+        self.assertEqual(inventory.captured["proton"],MEMBERS[2][2])
+        self.assertEqual(inventory.digest,self.inspect().digest)
+        self.assertNotIn("#!/bin/sh",repr(inventory))
+        self.assertNotIn("#!/bin/sh",json.dumps(inventory.summary()))
+
+    def test_metadata_capture_has_fixed_memory_limit(self):
+        self.make_archive(MEMBERS+[("large","file",b"x"*(payload.CHUNK+1),0o644)])
+        with self.assertRaises(Invalid):
+            payload.inspect_archive(self.archive,self.sha,ROOT,capture=("large",))
+
+    def test_invalid_capture_selector_is_refused(self):
+        for capture in (("../outside",),("proton","proton")):
+            with self.assertRaises(Invalid):
+                payload.inspect_archive(self.archive,self.sha,ROOT,capture=capture)
+
     def test_inventory_repr_omits_full_member_contents(self):
         inventory = self.inspect()
         self.assertNotIn("files/bin-arm64/wine",repr(inventory))

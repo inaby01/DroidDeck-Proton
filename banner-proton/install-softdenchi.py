@@ -31,6 +31,44 @@ def verify(archive):
     return digest
 
 
+def render_installation(archive_name, digest, mode, source_version, source_settings=None):
+    """Render expected local customizations from archive inputs, without writing."""
+    match = ARCHIVE_NAME.fullmatch(archive_name)
+    if not match or mode not in ("off", "observe", "cleanup"):
+        raise ValueError("配布物名または導入モードが不明です。")
+    if not re.fullmatch(r"[0-9a-f]{128}", digest):
+        raise ValueError("正しいSHA-512を指定してください。")
+    version = match[1]
+    if mode == "cleanup" and not version.startswith("11-12.8-softdenchi3-"):
+        raise ValueError("自動回収モードはsoftdenchi3系列でのみ指定できます。")
+    if mode == "observe" and version == "11-12.8-softdenchi1":
+        raise ValueError("この配布物には観測処理がありません。")
+    if type(source_version) is not bytes or len(source_version) > 4096:
+        raise ValueError("配布物内のversionが不明です。")
+    fields = source_version.decode("utf-8").split()
+    if len(fields) != 2 or fields[1] != "DroidDeck-Proton-" + version:
+        raise ValueError("配布物内のversionがファイル名と一致しません。")
+    if source_settings is not None and (type(source_settings) is not bytes or len(source_settings) > 1024*1024):
+        raise ValueError("設定ファイルが大きすぎます。")
+    folder = "SoftDenchi-Proton " + version
+    catalog = ('"compatibilitytools"\n{\n  "compat_tools"\n  {\n'
+               f'    "SoftDenchi-Proton-{version}"\n    {{\n'
+               '      "install_path" "."\n'
+               f'      "display_name" "{folder}"\n'
+               '      "from_oslist" "windows"\n'
+               '      "to_oslist" "linux"\n    }\n  }\n}\n')
+    text = source_settings.decode("utf-8").replace("\r\n","\n").replace("\r","\n") if source_settings is not None else "user_settings = {}\n"
+    configuration = {"PROTON_SOFTDENCHI_OBSERVE": "1" if mode in {"observe", "cleanup"} else "0",
+                     "PROTON_SOFTDENCHI_CLEANUP": "1" if mode == "cleanup" else "0",
+                     "PROTON_LOG": "1" if mode in {"observe", "cleanup"} else "0"}
+    text += "\nuser_settings.update(" + repr(configuration) + ")\n"
+    compile(text, "user_settings.py", "exec")
+    receipt = json.dumps({"source_archive": archive_name, "sha512": digest, "source_build": fields[1],
+                          "installed_dir": folder, "mode": mode}, indent=2) + "\n"
+    return {"compatibilitytool.vdf": catalog.encode("utf-8"), "user_settings.py": text.encode("utf-8"),
+            "softdenchi-install.json": receipt.encode("utf-8")}
+
+
 def install(archive, tools, mode):
     match = ARCHIVE_NAME.fullmatch(archive.name)
     if not match:
@@ -67,27 +105,10 @@ def install(archive, tools, mode):
         if not os.access(source / "proton", os.X_OK):
             raise ValueError("protonに実行権限がありません。")
         # Change both identifiers. Keep version and all Wine binaries as shipped.
-        manifest = source / "compatibilitytool.vdf"
-        manifest.write_text('"compatibilitytools"\n{\n  "compat_tools"\n  {\n'
-                            f'    "SoftDenchi-Proton-{version}"\n    {{\n'
-                            '      "install_path" "."\n'
-                            f'      "display_name" "{folder}"\n'
-                            '      "from_oslist" "windows"\n'
-                            '      "to_oslist" "linux"\n    }\n  }\n}\n')
-        settings = source / "user_settings.py"
-        text = settings.read_text() if settings.exists() else "user_settings = {}\n"
-        configuration = {
-            "PROTON_SOFTDENCHI_OBSERVE": "1" if mode in {"observe", "cleanup"} else "0",
-            "PROTON_SOFTDENCHI_CLEANUP": "1" if mode == "cleanup" else "0",
-            "PROTON_LOG": "1" if mode in {"observe", "cleanup"} else "0",
-        }
-        text += "\nuser_settings.update(" + repr(configuration) + ")\n"
-        compile(text, "user_settings.py", "exec")
-        settings.write_text(text)
-        (source / "softdenchi-install.json").write_text(json.dumps({
-            "source_archive": archive.name, "sha512": digest,
-            "source_build": fields[1], "installed_dir": folder, "mode": mode,
-        }, indent=2) + "\n")
+        rendered = render_installation(archive.name, digest, mode, (source / "version").read_bytes(),
+                                       (source / "user_settings.py").read_bytes() if (source / "user_settings.py").exists() else None)
+        for name, raw in rendered.items():
+            (source / name).write_bytes(raw)
         # Do not replace an existing installation, including a concurrent install.
         destination.mkdir()
         try:
