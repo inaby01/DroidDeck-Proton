@@ -1,0 +1,130 @@
+"""Read-only composition of payload, expected adoption, runtime and target plans.
+
+No extractor, installer, helper or launch is called here. This plan cannot grant
+readiness to the internal writers. Filesystem capacity is an installation-only
+estimate, not a bound on Wine/prefix/installer growth.
+"""
+
+import os
+from dataclasses import dataclass, field
+
+from preparation_assets import digest_json
+from preparation_common import Invalid, require, safe_path
+from preparation_customization import plan_customizations
+from preparation_payload import inspect_archive, verify_tree
+from preparation_runtime_context import plan_runtime_environment
+from preparation_target import pin_registration
+
+CAPTURE = ("version", "toolmanifest.vdf", "user_settings.py")
+RESERVE = 64 * 1024**2
+
+
+def _capacity(destination, inventory, customization, action):
+    parent = destination.parent
+    while not parent.exists():
+        parent = parent.parent
+    parent = safe_path(parent)
+    require(parent.is_dir(), "installation ancestor must be a directory")
+    fs = os.statvfs(parent)
+    block = fs.f_frsize or fs.f_bsize
+    require(block > 0, "unknown filesystem allocation size")
+    rounded = lambda size: ((size + block - 1) // block) * block
+    # One staged tree renamed on the same filesystem; count metadata overhead
+    # conservatively, plus a fixed reserve. No extraction takes place in planning.
+    estimated = (sum(rounded(entry["size"]) if entry["kind"] == "file" else block
+                     for entry in inventory.entries.values()) + block +
+                 sum(rounded(len(raw)) for raw in customization.files.values()) + RESERVE) if action == "install-new" else 0
+    available = fs.f_bavail * block
+    return {"scope": "tool-installation-only", "estimated_additional_bytes": estimated,
+            "reserve_bytes": RESERVE if estimated else 0, "available_bytes": available,
+            "estimate_fits": available >= estimated,
+            "prefix_and_dependencies_bytes": None, "total_preparation_capacity_verified": False,
+            "write_permission": "unverified"}
+
+
+@dataclass(frozen=True)
+class InstallationPlan:
+    digest: str
+    report: dict = field(repr=False)
+    inventory: object = field(repr=False)
+    customization: object = field(repr=False)
+    runtime: object = field(repr=False)
+    target: object = field(repr=False)
+
+    def summary(self):
+        # No renderer bytes, runtime values, label contents or raw settings.
+        import copy
+        return copy.deepcopy(self.report)
+
+
+def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runtime_audit,
+                      registrations, registration_id, exe_root, steam, renderer, parent_environment=None):
+    require(mode in ("off", "observe", "cleanup"), "unsupported installation mode")
+    steam = safe_path(steam)
+    target = pin_registration(registrations, registration_id, exe_root, steam)
+    inventory = inspect_archive(archive, sha512, archive_root, capture=CAPTURE)
+    require(inventory.external_links == 0, "external payload links require separate policy")
+    runtime = plan_runtime_environment(runtime_root, runtime_audit, parent_environment)
+    helper = runtime.root / "usr/local/bin/steam-compatibility"
+    customization = plan_customizations(inventory, safe_path(archive).name, mode, helper, renderer,
+                                        label=runtime.label, umask=int(runtime.umask, 8))
+    destination = safe_path(steam / "compatibilitytools.d" / customization.directory, steam)
+    # A game executable/install directory must never be inside the tool tree,
+    # and the tree must never be installed inside that game's directory.
+    require(not target.exe.is_relative_to(destination) and not destination.is_relative_to(target.exe.parent),
+            "tool and game paths overlap")
+    action, reused_mask = "install-new", None
+    if destination.exists():
+        require(destination.is_dir(), "installation destination must be a directory")
+        # The old installer did not record its creation mask. Accept only these
+        # two generator-backed variants; never measure a file into expectations.
+        matches = []
+        for mask in (0o022, 0o077):
+            candidate = plan_customizations(inventory, safe_path(archive).name, mode, helper, renderer,
+                                             label=runtime.label, umask=mask)
+            try:
+                verify_tree(destination, inventory, candidate.overlays)
+            except Invalid:
+                continue
+            matches.append((mask, candidate))
+        require(len(matches) == 1, "existing installation differs from approved generated trees")
+        mask, customization = matches[0]
+        reused_mask, action = format(mask, "04o"), "reuse-verified-tree"
+    base = safe_path(steam / "steamapps/compatdata", steam)
+    require(not base.exists() or base.is_dir(), "compatdata parent must be a directory")
+    key = int(target.registration_id)
+    names = [str(key)] + ([str(key - 2**32)] if key >= 2**31 else [])
+    # Any existing entry, including a partial prefix, blocks initialization.
+    existing = [name for name in names if os.path.lexists(base / name)]
+    require(len(existing) <= 1, "ambiguous signed/unsigned prefix candidates")
+    for name in existing:
+        require(safe_path(base / name, steam).is_dir(), "existing prefix entry is not a directory")
+    prefix = {"compatdata": str(base / (existing[0] if existing else names[0])),
+              "exists": bool(existing), "action": "preserve-existing" if existing else "initialize-new-blocked"}
+    capacity = _capacity(destination, inventory, customization, action)
+    blockers = ["payload-provenance-unreviewed", "registration-export-freshness-unverified",
+                "process-stop-scope-unverified", "gui-connection-unverified", "runtime-equivalence-unverified",
+                "prefix-and-dependencies-capacity-unverified", "dependencies-not-executable", "installation-writer-not-exposed"]
+    if existing:
+        blockers.append("existing-prefix-preserve")
+    if runtime.view != "current-root":
+        blockers.append("runtime-snapshot-cannot-authorize-execution")
+    if not capacity["estimate_fits"]:
+        blockers.append("insufficient-estimated-installation-capacity")
+    signature = {"inventory": inventory.digest, "archive_sha512": sha512, "customization": customization.digest,
+                 "runtime": runtime.identity_digest, "target": target.digest, "destination": str(destination),
+                 "action": action, "prefix": prefix, "mode": mode}
+    digest = digest_json(signature)
+    # Recheck mutable identity inputs before publishing a composed report.
+    target.verify()
+    runtime.verify(parent_environment)
+    report = {"input_digest": digest, "action": action, "destination": str(destination), "mode": mode,
+              "reused_creation_umask": reused_mask, "payload": inventory.summary(),
+              "customization": customization.summary(), "runtime": runtime.summary(),
+              "target_pin_digest": target.digest, "prefix": prefix, "capacity": capacity,
+              "planned_writes": [] if action == "reuse-verified-tree" else [
+                  {"path": str(destination.parent / ".prefix-preparation-staging-<random>"), "action": "create-private-staged-tree"},
+                  {"path": str(destination), "action": "publish-new-tree-without-replacement"}],
+              "binding": "deferred-until-dependencies-verified", "blockers": blockers,
+              "preparation_complete": False, "writes": []}
+    return InstallationPlan(digest, report, inventory, customization, runtime, target)

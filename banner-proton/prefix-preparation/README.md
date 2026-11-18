@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.8.0)
+# Prefix preparation: offline planning and local staging (0.9.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -25,6 +25,33 @@ stage/error diagnostics and separate numeric-PID/`proc/self` FD probes, without
 printing PID values or status contents. Self-status fields use the successful
 `proc/self` directory-FD reader while retaining shared-reader diagnostics. This
 does not establish namespace visibility or relax launch checks.
+
+`--plan-preparation` composes the selected registration/EXE and optional profile/
+asset inspection with archive identity, pinned runtime, expected installation/
+adoption metadata, installation or strict reuse, and a target-only binding plan
+for an already installed matching tree. It requires the ordinary target paths,
+`--payload-archive`, `--payload-sha512`, `--payload-root`, `--installation-mode`,
+`--runtime-root`, and `--runtime-audit` (the prior live arm64 audit JSON). The
+runtime root is re-inspected, and its private live label and supported umask are
+used to generate expectations. An offline root snapshot remains planning-only;
+the presence of an audit report never authorizes execution.
+
+The composed report separates actual `writes: []` from `planned_writes`, lists
+the new installation/staging paths, preserves any existing compatdata (including
+partial or signed-ID directories), and estimates tool installation space from
+filesystem allocation size plus a 64-MiB reserve. Prefix/dependency growth and write
+permissions remain unverified. Existing installations must match the entire
+archive plus the six generated metadata files, including modes and link topology.
+Only generator-backed metadata modes for creation umask 0022 or 0077 are accepted;
+unknown or mixed variants are rejected without repair. Archive directory modes
+remain exact: the legacy installer's `data_filter` extraction under umask 0077
+creates directories with mode 0700 rather than archive mode 0755, so such a tree
+is refused by strict reuse. No automatic chmod or reinstall is performed.
+
+This mode returns 2 (blocked plan). It exposes neither an installation writer nor
+a prefix executor. It does not call the legacy setup's global synchronization.
+The plan is an observation, not a durable authorization; future writers must
+recompute/recheck it under locks and satisfy independent readiness conditions.
 
 No CLI mode launches Wine, executes DroidDeck helpers or `user_settings.py`, installs
 dependencies, downloads, extracts archives to disk, registers Proton, synchronizes settings,
@@ -165,6 +192,6 @@ The stricter ambiguity checks intentionally stop instead of choosing among
 multiple prefix candidates. Asset caching, journal persistence and tool/prefix
 preparation locks are available for local staging. A target-only binding planner/writer with the DroidDeck setting
 lock is implemented and locally tested; the writer still requires connection to
-real readiness checks. Executable recipes, new-tool registration, final engine
+real readiness checks. Executable recipes, new-tool installation/registration writers, final engine
 integration and template cloning remain pending. Device
 validation has not been performed for this tool.

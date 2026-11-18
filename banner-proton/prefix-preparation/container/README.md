@@ -57,10 +57,11 @@ For each UID the harness runs the same tests without replacing assertions:
 | Expected installation/adoption metadata | 13 |
 | Read-only runtime audit/emitted command | 22 |
 | Pinned minimum runtime environment | 10 |
+| Composed installation/reuse plans | 15 |
 | Existing installer | 5 |
 | Existing setup | 9 |
 | Existing observer/cleanup | 74 |
-| Total | 319 |
+| Total | 334 |
 
 The script stops at the first failing suite and preserves the raw console error.
 A zero script exit means both UID runs finished; it is not a device preparation

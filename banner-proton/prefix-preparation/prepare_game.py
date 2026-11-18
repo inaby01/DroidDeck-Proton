@@ -6,6 +6,7 @@ import hashlib
 import itertools
 import json
 import re
+import runpy
 import sys
 import unicodedata
 from pathlib import Path
@@ -34,6 +35,7 @@ from preparation_common import (
     string,
     unchanged,
 )
+from preparation_installation import plan_installation
 from preparation_payload import inspect_archive, verify_tree
 from preparation_runtime import inspect_runtime, runtime_audit_command
 from preparation_store import PrivateStore, stage_local
@@ -295,6 +297,7 @@ def main():
     mode.add_argument("--inspect-runtime", action="store_true", help="read-only runtime source/library/socket inventory")
     mode.add_argument("--inspect-payload", action="store_true", help="read-only archive and optional installed-tree identity check")
     mode.add_argument("--plan", action="store_true")
+    mode.add_argument("--plan-preparation", action="store_true", help="compose read-only installation/reuse, runtime and target plans")
     mode.add_argument("--stage-local", action="store_true", help="cache assets and pause private state; never prepare a prefix")
     mode.add_argument("--list-local", action="store_true", help="read private cache/run inventory")
     parser.add_argument("--registrations", type=Path, help="DroidDeck added-games JSON, explicit input only")
@@ -316,8 +319,12 @@ def main():
     parser.add_argument("--payload-root")
     parser.add_argument("--payload-directory", type=Path)
     parser.add_argument("--runtime-root", type=Path)
+    parser.add_argument("--runtime-audit", type=Path)
+    parser.add_argument("--installation-mode", choices=("off", "observe", "cleanup"))
     args = parser.parse_args()
     try:
+        require(args.plan_preparation or not any((args.runtime_audit, args.installation_mode)),
+                "runtime audit and installation mode require composed planning")
         if args.emit_runtime_audit:
             require(not any(value for key,value in vars(args).items() if key != "emit_runtime_audit"), "audit emitter accepts no inputs")
             print(runtime_audit_command(),end="")
@@ -327,6 +334,51 @@ def main():
             require(args.runtime_root is not None and not any(value for key,value in vars(args).items() if key not in allowed),
                     "runtime inspection requires only an explicit root")
             result = {"tool_version":VERSION, **inspect_runtime(args.runtime_root)}
+        elif args.plan_preparation:
+            require(not any((args.management_root, args.resume_run, args.payload_directory, args.tool_directory)),
+                    "composed planning cannot use store or installed-tree overrides")
+            require(all(value is not None for value in (args.payload_archive, args.payload_sha512, args.payload_root,
+                        args.runtime_root, args.runtime_audit, args.installation_mode, args.registrations,
+                        args.steam_root, args.settings_root, args.exe_root, args.app_id)), "composed planning inputs required")
+            audit, audit_digest = load_json(args.runtime_audit)
+            # Only the trusted distributed installer is loaded, never the inspected
+            # runtime helper or archive Python. Support the allowlisted test layout.
+            parent = Path(__file__).resolve().parent.parent
+            installer = parent / "install-softdenchi.py"
+            if not installer.exists():
+                installer = parent / "banner-proton/install-softdenchi.py"
+            renderer = runpy.run_path(str(installer))["render_installation"]
+            installation = plan_installation(archive=args.payload_archive, sha512=args.payload_sha512,
+                archive_root=args.payload_root, mode=args.installation_mode, runtime_root=args.runtime_root,
+                runtime_audit=audit, registrations=args.registrations, registration_id=args.app_id,
+                exe_root=args.exe_root, steam=args.steam_root, renderer=renderer)
+            summary = installation.summary()
+            if summary["action"] == "reuse-verified-tree":
+                args.tool_directory = installation.customization.directory
+            result = build_report(args)
+            installation.target.verify()
+            installation.runtime.verify()
+            result.update(mode="plan-preparation", installation_plan=summary)
+            result["uninspected"].remove("payload-integrity")
+            result["uninspected"].remove("free-space")
+            result["uninspected"].append("prefix-and-dependencies-capacity")
+            reused = summary["action"] == "reuse-verified-tree"
+            result["selection"]["payload"] = "verified-expected-tree" if reused else "not-installed-archive-inspected"
+            if reused:
+                result["binding_plan"]["payload"] = "verified-expected-tree"
+                result["binding_plan"]["blockers"].remove("payload-integrity-unverified")
+                result["blockers"].remove("payload-integrity-unverified")
+            result["proposed_steps"] = [
+                {"step": "proton-add-or-reuse", "status": summary["action"]},
+                {"step": "prefix", "status": summary["prefix"]["action"]},
+                {"step": "dependencies", "status": "blocked"},
+                {"step": "binding-and-sync", "status": "target-only-planned" if reused else "deferred-until-installed"},
+                {"step": "template-create-or-copy", "status": "not-implemented"}]
+            result["input_hashes"].update(installation=installation.digest, runtime_audit=audit_digest)
+            result["input_digest"] = hashlib.sha256(json.dumps(
+                {"target_report": result["input_digest"], "installation": installation.digest,
+                 "audit": audit_digest}, sort_keys=True).encode()).hexdigest()
+            result["blockers"].extend(summary["blockers"])
         elif args.inspect_payload:
             allowed = {"inspect_payload", "payload_archive", "payload_sha512", "payload_root", "payload_directory"}
             require(not any(value for key, value in vars(args).items() if key not in allowed), "payload inspection is a separate mode")
@@ -357,7 +409,7 @@ def main():
                 require(args.management_root is None and args.resume_run is None, "store options require a local management mode")
                 result = build_report(args)
         report = display(result)
-    except (OSError, ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+    except (OSError, ValueError, TypeError, UnicodeError, RecursionError, OverflowError, KeyError):
         # Do not echo exception text, filesystem paths or unknown input content.
         if args.stage_local:
             parser.exit(1, "Local staging stopped; private cache/run files may remain. "
@@ -365,7 +417,7 @@ def main():
         parser.exit(1, "Input rejected; no preparation performed. Check input formats and paths.\n")
     print(report)
     # A readable report is distinct from a usable preparation plan.
-    return 2 if args.plan or args.stage_local else 0
+    return 2 if args.plan or args.plan_preparation or args.stage_local else 0
 
 
 if __name__ == "__main__":
