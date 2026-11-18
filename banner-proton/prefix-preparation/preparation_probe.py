@@ -200,6 +200,7 @@ def create_probe_material(plan, refresh, store):
         store.write_record("probe-runs", filename, record, record_hash)
         return {"mode": "probe-material-created", "probe_id": record["probe_id"], "destination": str(destination),
                 "exe": str(destination / EXE), "exe_identity": record["exe_identity"],
+                "selection_hint": {"base": "same-folder-as-prepare.sh", "relative_exe": destination.name + "/" + EXE},
                 "writes": [{"path": str(destination), "scope": "new-registration-probe-files-only"},
                            {"path": str(store.root), "scope": "private-probe-receipt-and-locks"}],
                 "prefix_created": False, "exe_executed": False, "registration_written": False, "preparation_complete": False}
@@ -295,9 +296,10 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
         protected.extend(Path(game["exe"]).parent for game in games.values())
         archive = selection._archive(directory, config["payload"])
         payload = config["payload"]
-        plan = plan_probe_material(archive, payload["sha512"], payload["root"], source, steam, home / "Games")
+        plan = plan_probe_material(archive, payload["sha512"], payload["root"], source, steam, directory)
         print("新しく作るフォルダー: " + selection._text(plan.record["destination"]), file=output)
         print(f"内容: {EXE}（{len(plan.raw):,} bytes）と {MARKER}", file=output)
+        print("Androidではprepare.shを置いたフォルダー内から、この新しいフォルダーを選びます。", file=output)
         print("元ファイル: 配布物内 " + MEMBER, file=output)
         print("私有記録: " + selection._text(home / ".local/state/droiddeck-prefix-preparation/probe-store"), file=output)
         print("私有記録・ロック・結果JSONも新規作成します。既存ファイルは上書きしません。", file=output)
@@ -313,8 +315,9 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
             key = hashlib.sha256(plan.record["destination"].encode()).hexdigest()
             with store.locked(key):
                 report = create_probe_material(plan, lambda: plan_probe_material(
-                    archive, payload["sha512"], payload["root"], source, steam, home / "Games", probe_id=plan.record["probe_id"]), store)
-        print("検証ファイルを作成しました。DroidDeckで一覧を更新、または新しいprefix-probe.exeを追加してください。", file=output)
+                    archive, payload["sha512"], payload["root"], source, steam, directory, probe_id=plan.record["probe_id"]), store)
+        print("検証ファイルを作成しました。DroidDeckのEXE追加で、prepare.shを置いたフォルダーを開いてください。", file=output)
+        print("選ぶファイル: " + selection._text(report["selection_hint"]["relative_exe"]), file=output)
         print("追加後も起動せず、このprepare.shの「1」で新しい登録を検査してください。", file=output)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
         report = {"mode": "probe-material-stopped", "stage": stage, "check": getattr(error, "preparation_check", stage), "error_class": type(error).__name__,

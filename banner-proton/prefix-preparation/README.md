@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.14.0)
+# Prefix preparation: offline planning and local staging (0.14.1)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -339,8 +339,8 @@ validation has not been performed for this tool.
 
 An emitted `prepare.sh` with the explicit boolean bundle option
 `"probe_material": true` adds a numbered common menu. Option 1 retains the
-read-only target plan. Option 2 previews a **new** randomly named folder under
-`HOME/Games`, then requires a separate `1` confirmation before writing anything.
+read-only target plan. Option 2 previews a **new** randomly named folder beside
+`prepare.sh`, then requires a separate `1` confirmation before writing anything.
 Canceling the preview writes nothing. There are no additional user flags.
 
 Creation validates the entire pinned archive, captures only the regular x86
@@ -352,8 +352,12 @@ saved/exported with the existing report rules. Only these new material and priva
 record/report paths are written. No existing destination is reused, replaced or
 repaired. Failures preserve partial material and a creating/failed receipt.
 
-The user must refresh the Android library or add the newly created EXE without
-launching it, then choose the new registration in the same common entry. This
+Place the launcher in an Android-accessible shared folder. In the Android EXE
+picker, open that same folder, the new `DroidDeck Prefix Test-…` subfolder,
+and `prefix-probe.exe` without launching it. The creation JSON includes the full
+`exe` path and a `selection_hint.relative_exe` relative to the launcher folder.
+Previously created private probes remain untouched; they are not moved or reused.
+Then choose the new registration in the same common entry. This
 Android UI path has not yet been verified on a device. The plan requires the
 private ready receipt, exact marker and executable identity, the same directory
 and EXE inode (allowing real bind aliases), one unambiguous new registration ID

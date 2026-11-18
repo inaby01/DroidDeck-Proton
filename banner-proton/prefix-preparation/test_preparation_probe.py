@@ -264,9 +264,39 @@ class ProbeWorkflowTests(unittest.TestCase):
         self.assertEqual(len(report['writes']), 3)
         self.assertFalse(report['exe_executed'])
         self.assertIn('追加後も起動せず', output)
-        self.assertEqual(len(list((self.home / 'Games').iterdir())), 1)
+        self.assertEqual(list((self.home / 'Games').iterdir()), [])
+        self.assertEqual(Path(report['destination']).parent, self.f.directory)
+        self.assertEqual(self.f.directory / report['selection_hint']['relative_exe'], Path(report['exe']))
+        self.assertIn('prepare.shを置いたフォルダー', output)
         # Adding the probe is an Android action; this script has not added it.
         self.assertEqual(len(json.loads(self.f.fixture.game.added.read_bytes())), 1)
+
+    def test_old_private_probe_is_preserved_without_moving_or_reusing(self):
+        old = self.home / 'Games' / 'DroidDeck Prefix Test-previous'
+        old.mkdir()
+        old_exe = old / probe.EXE
+        old_exe.write_bytes(b'PRIVATE_OLD_PROBE')
+        before = old_exe.stat()
+        _, name, _ = self.run_workflow('2\n1\n')
+        report = json.loads((self.f.directory / name).read_bytes())
+        self.assertEqual(Path(report['destination']).parent, self.f.directory)
+        self.assertEqual(old_exe.read_bytes(), b'PRIVATE_OLD_PROBE')
+        self.assertEqual(old_exe.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertEqual(list(old.iterdir()), [old_exe])
+
+    def test_creation_does_not_require_home_games_and_reports_shared_path(self):
+        (self.home / 'Games').rmdir()
+        self.f.directory.chmod(0o770)
+        _, name, _ = self.run_workflow('2\n1\n')
+        path = Path(name)
+        if not path.is_absolute():
+            path = self.f.directory / name
+        report = json.loads(path.read_bytes())
+        self.assertEqual(report['mode'], 'probe-material-created')
+        self.assertEqual(Path(report['exe']).parent.parent, self.f.directory)
+        self.assertFalse((self.home / 'Games').exists())
+        self.assertTrue(Path(report['exe']).is_file())
+        self.assertFalse(report['exe_executed'])
 
     def test_registered_probe_connects_to_plan_without_unlocking_execution(self):
         _, name, _ = self.run_workflow('2\n1\n')
