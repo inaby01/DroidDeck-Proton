@@ -218,6 +218,126 @@ def create_probe_material(plan, refresh, store):
             os.close(parent_fd)
 
 
+def inspect_incomplete_material(record, exe, key, source, steam, store_root, receipt_digest):
+    """Observe every bounded postcondition; never finalize or repair failed material."""
+    _record_valid(record)
+    destination = safe_path(record["destination"])
+    observations = []
+
+    def observe(name, function):
+        try:
+            value = function()
+            item = {"check": name, "result": "mismatch" if value is False else "passed"}
+            if type(value) is dict:
+                item["result"] = "observed"
+                item["metadata"] = value
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            item = {"check": name, "result": "unavailable", "error_class": type(error).__name__,
+                    "errno": getattr(error, "errno", None)}
+        observations.append(item)
+
+    def metadata(path, directory=False):
+        path = safe_path(path)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_DIRECTORY if directory else 0)
+        fd = os.open(path, flags)
+        try:
+            info, current = os.fstat(fd), path.stat()
+            return {"regular": stat.S_ISREG(info.st_mode), "directory": stat.S_ISDIR(info.st_mode),
+                    "single_link": info.st_nlink == 1, "owner_matches_self": info.st_uid == os.getuid(),
+                    "mode": f"{stat.S_IMODE(info.st_mode):04o}", "size_bytes": info.st_size,
+                    "fd_path_same_inode": (info.st_dev, info.st_ino) == (current.st_dev, current.st_ino)}
+        finally:
+            os.close(fd)
+
+    def directory_guards():
+        parent_fd = os.open(safe_path(destination.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(destination.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                parent_info, parent_path = os.fstat(parent_fd), destination.parent.stat()
+                current, descriptor = os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False), os.fstat(fd)
+                path_info = destination.stat()
+                return {"parent_fd_path_match": (parent_info.st_dev, parent_info.st_ino) == (parent_path.st_dev, parent_path.st_ino),
+                        "child_dirfd_fd_match": (current.st_dev, current.st_ino) == (descriptor.st_dev, descriptor.st_ino),
+                        "child_path_fd_match": (path_info.st_dev, path_info.st_ino) == (descriptor.st_dev, descriptor.st_ino)}
+            finally:
+                os.close(fd)
+        finally:
+            os.close(parent_fd)
+
+    def private_state():
+        with PrivateStore(store_root) as store:
+            current, digest = store.read_record("probe-runs", record["probe_id"] + ".json")
+            return {"receipt_unchanged": current == record and digest == receipt_digest}
+
+    def locks():
+        from preparation_store import private
+        with PrivateStore(store_root) as store, store.directory(("locks",)) as fd:
+            result = {}
+            names = {"global": "global.lock", "target": "prefix-" + hashlib.sha256(str(destination).encode()).hexdigest() + ".lock"}
+            for label, name in names.items():
+                descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    info = os.fstat(descriptor)
+                    private(info)
+                    current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    private(current)
+                    result[label + "_fd_path_match"] = (info.st_dev, info.st_ino) == (current.st_dev, current.st_ino)
+                finally:
+                    os.close(descriptor)
+            return result
+
+    def registration_state():
+        document, digest = load_json(source)
+        games = registrations(document)
+        selected = app_id(key)
+        matches = []
+        for game in games.values():
+            try:
+                if os.path.samefile(safe_path(game["exe"]), exe):
+                    matches.append(game["app_id"])
+            except FileNotFoundError:
+                pass
+        return {"selected_id_present": selected in games, "matching_exe_count": len(matches),
+                "unique_match_is_selected": matches == [selected], "source_stable": load_json(source)[1] == digest}
+
+    def prefix_state():
+        base = safe_path(steam / "steamapps/compatdata", steam)
+        require(not base.exists() or base.is_dir(), "invalid compatdata base")
+        selected = app_id(key)
+        count_aliases = 0
+        if base.exists():
+            with os.scandir(base) as children:
+                for count, child in enumerate(children):
+                    require(count < 4096, "too many prefix entries")
+                    if re.fullmatch(r"-?[0-9]+", child.name) and int(child.name) % 2**32 == int(selected):
+                        count_aliases += 1
+        return {"canonical_exists": os.path.lexists(base / selected), "numeric_alias_count": count_aliases,
+                "all_numeric_aliases_absent": count_aliases == 0}
+
+    observe("created-parent-metadata", lambda: metadata(destination.parent, True))
+    observe("created-folder-metadata", lambda: metadata(destination, True))
+    observe("created-directory-guards-now", directory_guards)
+    observe("created-exe-metadata", lambda: metadata(destination / EXE))
+    observe("created-marker-metadata", lambda: metadata(destination / MARKER))
+    observe("created-exe-matches-receipt", lambda: exe_identity(destination / EXE) == record["exe_identity"])
+    observe("created-marker-matches-receipt", lambda: load_json(destination / MARKER)[0] == _marker(record))
+    observe("registered-exe-samefile", lambda: os.path.samefile(exe, destination / EXE))
+    observe("registered-folder-samefile", lambda: os.path.samefile(exe.parent, destination))
+    observe("registered-exe-matches-receipt", lambda: exe_identity(exe) == record["exe_identity"])
+    observe("steam-context-matches", lambda: record["steam"] == str(steam))
+    observe("registration-source-context-matches", lambda: record["registration_source"] == str(source))
+    observe("new-id-relative-to-baseline", lambda: app_id(key) not in record["baseline_ids"])
+    observe("registration-current-state", registration_state)
+    observe("prefix-current-state", prefix_state)
+    observe("private-lock-files-now", locks)
+    observe("private-receipt-stable", private_state)
+    return {"receipt_state": record["status"], "original_failure_detail": "not-recorded-by-creator",
+            "scope": "current-read-only-observations-not-historical-replay", "checks": observations,
+            "directory_fsync": "not-retested-read-only", "locks_acquired": False,
+            "material_modified": False, "receipt_finalized": False, "preparation_complete": False}
+
+
 def verify_probe_registration(exe, key, source, steam, store_root):
     """Read only. Fixed step diagnostics never include raw receipts/paths/data."""
     history = []
@@ -243,7 +363,14 @@ def verify_probe_registration(exe, key, source, steam, store_root):
          type(marker) is dict and type(marker.get("probe_id")) is str and ID.fullmatch(marker["probe_id"]), "invalid probe marker")
     record, receipt_digest = step("probe-private-receipt-read", receipt)
     step("probe-private-receipt-schema", _record_valid, record)
-    step("probe-private-receipt-ready", require, record["status"] == "probe-ready", "probe receipt not ready")
+    if record["status"] != "probe-ready":
+        observation = inspect_incomplete_material(record, exe, key, source, steam, store_root, receipt_digest)
+        try:
+            step("probe-private-receipt-ready", require, False, "probe receipt not ready")
+        except ValueError as error:
+            error.incomplete_probe_material = observation
+            raise
+    step("probe-private-receipt-ready", require, True, "probe receipt not ready")
     step("probe-steam-context", require, record["steam"] == str(steam), "probe Steam context differs")
     step("probe-registration-source-context", require, record["registration_source"] == str(source), "probe registration source context differs")
     step("probe-marker-receipt-match", require, marker == _marker(record), "probe marker differs from private receipt")

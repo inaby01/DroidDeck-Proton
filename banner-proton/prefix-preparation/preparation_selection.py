@@ -391,6 +391,8 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
             report["installed_tree_diagnostic"] = error.installed_tree_diagnostic
         if hasattr(error, "probe_registration_diagnostic"):
             report["probe_registration_diagnostic"] = error.probe_registration_diagnostic
+        if hasattr(error, "incomplete_probe_material"):
+            report["incomplete_probe_material"] = error.incomplete_probe_material
         if selected_exe is not None:
             report["selected_exe_metadata"] = _input_metadata(selected_exe)
         print("検査停止: " + _text(report["check"]) + " / " + report["reason"] +

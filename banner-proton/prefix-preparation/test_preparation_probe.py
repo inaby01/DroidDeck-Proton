@@ -253,6 +253,94 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(self.verify(exe)['prefix_absent'])
         self.assertEqual(before, self.f.snapshot())
 
+    def incomplete(self):
+        plan, _ = self.create()
+        exe = self.register(plan)
+        self.set_receipt_state(plan, 'probe-failed')
+        return plan, exe
+
+    def set_receipt_state(self, plan, state):
+        with PrivateStore(self.store_root) as store, \
+             store.locked(hashlib.sha256(plan.record['destination'].encode()).hexdigest()):
+            name = plan.record['probe_id'] + '.json'
+            record, digest = store.read_record('probe-runs', name)
+            record['status'] = state
+            store.write_record('probe-runs', name, record, digest)
+
+    def test_incomplete_observation_never_writes_finalizes_or_executes(self):
+        plan, exe = self.incomplete()
+        for state in ('creating', 'probe-failed'):
+            self.set_receipt_state(plan, state)
+            before = self.f.snapshot()
+            with patch.object(PrivateStore, 'write_record', side_effect=AssertionError('no writes')), \
+                 patch('subprocess.Popen', side_effect=AssertionError('no process')), \
+                 patch.object(probe.os, 'fsync', side_effect=AssertionError('no fsync')), \
+                 self.assertRaises(Invalid) as caught:
+                self.verify(exe)
+            self.assertEqual(caught.exception.preparation_check, 'probe-private-receipt-ready')
+            diagnostic = caught.exception.incomplete_probe_material
+            self.assertEqual(diagnostic['receipt_state'], state)
+            self.assertFalse(diagnostic['receipt_finalized'])
+            checks = {x['check']: x for x in diagnostic['checks']}
+            self.assertEqual(checks['created-exe-matches-receipt']['result'], 'passed')
+            self.assertEqual(checks['created-directory-guards-now']['result'], 'observed')
+            self.assertTrue(checks['prefix-current-state']['metadata']['all_numeric_aliases_absent'])
+            self.assertEqual(before, self.f.snapshot())
+
+    def test_incomplete_observation_collects_multiple_mismatches_without_raw_data(self):
+        _, exe = self.incomplete()
+        exe.write_bytes(self.data + b'PRIVATE_EXE_SENTINEL')
+        marker = exe.parent / probe.MARKER
+        document = json.loads(marker.read_bytes())
+        document['PRIVATE_MARKER_SENTINEL'] = 'PRIVATE_VALUE_SENTINEL'
+        marker.write_text(json.dumps(document))
+        before = self.f.snapshot()
+        with self.assertRaises(Invalid) as caught:
+            self.verify(exe)
+        diagnostic = caught.exception.incomplete_probe_material
+        checks = {x['check']: x for x in diagnostic['checks']}
+        self.assertEqual(checks['created-exe-matches-receipt']['result'], 'mismatch')
+        self.assertEqual(checks['created-marker-matches-receipt']['result'], 'mismatch')
+        self.assertIn('private-receipt-stable', checks)
+        for secret in ('PRIVATE_EXE_SENTINEL', 'PRIVATE_MARKER_SENTINEL', 'PRIVATE_VALUE_SENTINEL', str(self.f.root)):
+            self.assertNotIn(secret, json.dumps(diagnostic))
+        self.assertEqual(before, self.f.snapshot())
+
+    def test_incomplete_observation_continues_when_created_path_is_missing(self):
+        _, exe = self.incomplete()
+        other = self.base / 'registered-copy'
+        other.mkdir()
+        copied = other / probe.EXE
+        copied.write_bytes(exe.read_bytes())
+        (other / probe.MARKER).write_bytes((exe.parent / probe.MARKER).read_bytes())
+        exe.unlink()
+        data = json.loads(self.f.added.read_bytes())
+        data[-1]['exe'] = str(copied)
+        self.f.write_json(self.f.added, data)
+        before = self.f.snapshot()
+        with self.assertRaises(Invalid) as caught:
+            self.verify(copied)
+        checks = {x['check']: x for x in caught.exception.incomplete_probe_material['checks']}
+        self.assertEqual(checks['created-exe-matches-receipt']['result'], 'unavailable')
+        self.assertEqual(checks['registered-exe-matches-receipt']['result'], 'passed')
+        self.assertEqual(checks['private-receipt-stable']['result'], 'observed')
+        self.assertEqual(before, self.f.snapshot())
+
+    def test_incomplete_observation_reports_existing_prefix_without_reading_contents(self):
+        _, exe = self.incomplete()
+        prefix = self.f.steam / 'steamapps/compatdata/12345'
+        prefix.mkdir(parents=True)
+        (prefix / 'private.reg').write_text('PRIVATE_PREFIX_SENTINEL')
+        before = self.f.snapshot()
+        with self.assertRaises(Invalid) as caught:
+            self.verify(exe)
+        diagnostic = caught.exception.incomplete_probe_material
+        checks = {x['check']: x for x in diagnostic['checks']}
+        self.assertTrue(checks['prefix-current-state']['metadata']['canonical_exists'])
+        self.assertFalse(checks['prefix-current-state']['metadata']['all_numeric_aliases_absent'])
+        self.assertNotIn('PRIVATE_PREFIX_SENTINEL', json.dumps(diagnostic))
+        self.assertEqual(before, self.f.snapshot())
+
     def test_probe_receipt_cannot_be_replaced_by_shared_marker(self):
         plan, _ = self.create()
         exe = self.register(plan)
@@ -383,6 +471,27 @@ class ProbeWorkflowTests(unittest.TestCase):
         self.assertNotIn('DO_NOT_REPORT_MARKER_DATA', json.dumps(report) + output)
         self.assertEqual(report['writes'], [{'scope': 'report-only', 'filename': name}])
         self.assertEqual(before, self.f.fixture.game.snapshot())
+
+    def test_not_ready_saved_report_contains_read_only_material_observations(self):
+        _, name, _ = self.run_workflow('2\n1\n')
+        created = json.loads((self.f.directory / name).read_bytes())
+        data = json.loads(self.f.fixture.game.added.read_bytes())
+        data.append({"appid": 12345, "exe": created["exe"], "name": "Fresh probe"})
+        self.f.fixture.game.write_json(self.f.fixture.game.added, data)
+        root = self.home / '.local/state/droiddeck-prefix-preparation/probe-store'
+        key = hashlib.sha256(created['destination'].encode()).hexdigest()
+        with PrivateStore(root) as store, store.locked(key):
+            filename = created['probe_id'] + '.json'
+            record, digest = store.read_record('probe-runs', filename)
+            record['status'] = 'probe-failed'
+            store.write_record('probe-runs', filename, record, digest)
+        _, name, _ = self.run_workflow('1\n2\n')
+        report = json.loads((self.f.directory / name).read_bytes())
+        self.assertEqual(report['check'], 'probe-private-receipt-ready')
+        self.assertEqual(report['incomplete_probe_material']['receipt_state'], 'probe-failed')
+        self.assertFalse(report['incomplete_probe_material']['material_modified'])
+        self.assertEqual(report['writes'], [{'scope': 'report-only', 'filename': name}])
+        self.assertNotIn('baseline_ids', json.dumps(report))
 
     def test_standalone_script_menu_cancels_without_writes(self):
         import subprocess

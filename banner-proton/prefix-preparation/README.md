@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.14.2)
+# Prefix preparation: offline planning and local staging (0.14.3)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -383,3 +383,13 @@ paths, registry and environment values are never included. A diagnostic failure
 does not repair, recreate, move or execute the probe. Existing 0.14.x receipts
 remain readable; users can select the same registration again without creating
 new material.
+
+
+A non-ready private receipt remains rejected. Before stopping, the plan additionally
+records `incomplete_probe_material` with the whitelisted receipt state and
+independent read-only observations of both created and registered paths, byte and
+marker agreement, directory path/FD guards, existing private lock metadata and
+receipt stability. It does not acquire/create locks, fsync directories, finalize
+receipts or repair files. These are current observations; legacy creation reports
+did not record the original failing condition and cannot replay history.
+Raw private receipts, paths, marker values and exception messages are excluded.
