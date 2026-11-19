@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and dedicated initialization trial (0.19.0)
+# Prefix preparation: offline planning and dedicated initialization trial (0.20.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -597,3 +597,25 @@ directories and registry headers. Result `initialized-unverified` does not estab
 GUI, dependencies, templates or game compatibility. Trial records have their own
 schema under `trials/` and appear in read-only management inventory with mandatory
 reinspection. All partial prefixes, private directories and journals are preserved.
+
+## Post-trial read-only audit (0.20.0)
+
+Menu 6 reads an existing private trial record, then independently inspects the
+current registration, prefix aliases, minimum prefix structure, metadata-only
+prefix size, visible target process view and runtime context. It reconstructs the
+expected tool from the pinned archive and trusted renderer, so a changed installed
+tree does not prevent diagnosis. Strict verification remains unchanged.
+
+The diagnostic comparison records bounded differences across known source members
+and unexpected object boundaries, including modes, missing objects, content identity
+and hardlink topology. Unknown names are hashed, their contents are never read and
+unexpected directory subtrees are not traversed. The list is capped at128 entries
+with explicit truncation. This comparison is diagnostic and cannot authorize a
+writer or replace strict validation. Prefix sizing never follows Wine drive links.
+
+If archive/runtime prerequisites are unavailable, independent prefix/process checks
+still appear and dependent checks are explicitly marked not run. The private trial
+record is read again to detect replacement and is never updated, adopted, retried
+or promoted. Only a new result report is written. Future trial failures retain
+fixed TreeMismatch metadata instead of only the exception class. An exit code zero
+with a post-check failure does not become verified initialization automatically.

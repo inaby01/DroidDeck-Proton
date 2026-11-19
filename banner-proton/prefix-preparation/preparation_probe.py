@@ -517,11 +517,15 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
         print("4. 準備用Protonを別の新規フォルダーへ配置（起動しない）", file=output)
     if config.get("initialization_trial") is True and "placement_review" in config:
         print("5. 専用の新規prefixを初期化試験（実Proton/Wineを起動）", file=output)
+        print("6. 既存の初期化試験を読み取り検査（再実行・修復しない）", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
     if answer == "4" and "placement_review" in config:
         from preparation_static_placement import interactive_static_placement
         return interactive_static_placement(directory, renderer, config, **options)
+    if answer == "6" and config.get("initialization_trial") is True and "placement_review" in config:
+        from preparation_trial_audit import interactive_trial_audit
+        return interactive_trial_audit(directory, renderer, config, **options)
     if answer == "5" and config.get("initialization_trial") is True and "placement_review" in config:
         from preparation_trial import interactive_trial
         return interactive_trial(directory, renderer, config, **options)

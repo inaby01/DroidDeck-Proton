@@ -289,6 +289,8 @@ class TrialSession:
         except (OSError, ValueError, TypeError, KeyError) as error:
             self.record.update(status="failed", error={"check": "trial-post-checks", "error_class": type(error).__name__,
                                                      "errno": getattr(error, "errno", None)})
+            if hasattr(error, "tree_diagnostic"):
+                self.record["error"]["tree_diagnostic"] = error.tree_diagnostic
         return self._save()
 
 

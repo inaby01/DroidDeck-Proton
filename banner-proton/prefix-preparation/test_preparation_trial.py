@@ -17,6 +17,7 @@ HERE = Path(__file__).resolve().parent
 BASE = runpy.run_path(str(HERE / 'test_preparation_static_placement.py'))
 import preparation_execution as execution
 import preparation_trial as trial
+import preparation_trial_audit as audit
 from preparation_common import Invalid
 from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore
@@ -217,6 +218,61 @@ class TrialTests(BASE['StaticFixture']):
             self.assertEqual(session.wait(1)['status'], 'failed')
         self.assertTrue(plan.compatdata.exists())
         self.assertTrue(plan.work.exists())
+
+    def test_post_audit_reports_tree_changes_and_prefix_together_without_execution(self):
+        self.config['initialization_trial'] = True
+        plan = self.trial_plan()
+        with self.f.store() as store, patch.object(trial, 'plan_launch', side_effect=self.launch_fixture):
+            session = self.session(plan, store).start()
+            session.process.wait(timeout=10)
+            cache = session.launch.spec['tool'] / '__pycache__'
+            cache.mkdir()
+            (cache / 'DUMMY_PRIVATE').write_bytes(b'DUMMY_SECRET')
+            original = session.wait(1)
+        self.assertEqual(original['status'], 'failed')
+        self.assertEqual(original['error']['tree_diagnostic']['check'], 'unexpected-object')
+        record_file = self.f.store_root / 'trials' / (original['trial_id'] + '.json')
+        before = record_file.read_bytes()
+        with patch('subprocess.Popen', side_effect=AssertionError('audit never executes')):
+            _, report, _ = self.menu('6\n1\n')
+        self.assertEqual(report['origin_status'], 'failed')
+        self.assertTrue(report['trial_record_unchanged'])
+        self.assertFalse(report['status_promoted'])
+        self.assertEqual(report['checks']['prefix-structure']['status'], 'accepted')
+        self.assertEqual(report['checks']['strict-tool-identity']['status'], 'rejected')
+        self.assertEqual(report['checks']['tool-differences']['difference_count'], 1)
+        self.assertEqual(before, record_file.read_bytes())
+        self.assertNotIn('DUMMY_SECRET', json.dumps(report))
+        self.assertTrue(cache.exists())
+
+    def test_post_audit_keeps_independent_checks_when_source_archive_is_missing(self):
+        self.config['initialization_trial'] = True
+        plan = self.trial_plan()
+        with self.f.store() as store, patch.object(trial, 'plan_launch', side_effect=self.launch_fixture):
+            session = self.session(plan, store).start()
+            session.wait(10)
+        archive = self.f.fixture.source.archive
+        archive.rename(archive.with_suffix('.preserved'))
+        with patch('subprocess.Popen', side_effect=AssertionError('no retry')):
+            _, report, _ = self.menu('6\n1\n')
+        self.assertEqual(report['checks']['source-archive']['status'], 'rejected')
+        self.assertEqual(report['checks']['prefix-structure']['status'], 'accepted')
+        self.assertEqual(report['checks']['process-observation']['status'], 'accepted')
+        self.assertTrue(report['dependent_checks_not_run'])
+        self.assertFalse(report['status_promoted'])
+
+    def test_prefix_measurement_does_not_follow_drive_links_or_read_values(self):
+        root = self.home / 'measure-fixture'
+        root.mkdir()
+        external = self.home / 'DUMMY_PRIVATE_AUTH'
+        external.write_bytes(b'DUMMY_SECRET')
+        (root / 'drive-link').symlink_to(external)
+        with patch('builtins.open', side_effect=AssertionError('metadata only')):
+            result = audit.measure_prefix(root)
+        self.assertEqual(result['symlinks_not_followed'], 1)
+        self.assertEqual(result['logical_file_bytes'], 0)
+        self.assertFalse(result['contents_read'])
+        self.assertNotIn('DUMMY', json.dumps(result))
 
     def test_failure_before_spawn_is_journaled_and_preserved(self):
         plan = self.trial_plan()

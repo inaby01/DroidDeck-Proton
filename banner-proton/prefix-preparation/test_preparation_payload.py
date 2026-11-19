@@ -74,6 +74,63 @@ class PayloadTests(unittest.TestCase):
                                "--payload-archive",str(self.archive),"--payload-sha512",self.sha,
                                "--payload-root",ROOT,*extra],capture_output=True,text=True,check=False)
 
+    def test_difference_audit_aggregates_changes_extras_and_missing_without_adoption(self):
+        self.installed.chmod(0o755)
+        (self.installed / "proton").write_bytes(b"changed-content")
+        (self.installed / "proton").chmod(0o600)
+        (self.installed / "files/bin-arm64/wine").unlink()
+        extra = self.installed / "DUMMY_PRIVATE_NAME"
+        extra.write_bytes(b"DUMMY_PRIVATE_CONTENT")
+        result = payload.inspect_tree_differences(self.installed, self.inspect())
+        checks = [item["check"] for item in result["differences"]]
+        self.assertIn("entry-differs", checks)
+        self.assertIn("missing-object", checks)
+        self.assertIn("unexpected-object", checks)
+        self.assertFalse(result["observed_tree_matches"])
+        self.assertFalse(result["unknown_contents_read"])
+        self.assertFalse(result["execution_authorized"])
+        self.assertNotIn("DUMMY_PRIVATE", json.dumps(result))
+        with self.assertRaises(Invalid):
+            payload.verify_tree(self.installed, self.inspect())
+        self.assertEqual(extra.read_bytes(), b"DUMMY_PRIVATE_CONTENT")
+
+    def test_difference_audit_does_not_traverse_unknown_directories_or_links(self):
+        self.installed.chmod(0o755)
+        cache = self.installed / "__pycache__"
+        cache.mkdir()
+        (cache / "DUMMY_PRIVATE_FILE").write_bytes(b"DUMMY_PRIVATE_BYTES")
+        (self.installed / "DUMMY_PRIVATE_LINK").symlink_to(cache)
+        result = payload.inspect_tree_differences(self.installed, self.inspect())
+        self.assertFalse(result["unexpected_subtrees_traversed"])
+        self.assertEqual(result["difference_count"], 2)
+        self.assertIn("python-bytecode-cache", json.dumps(result))
+        self.assertNotIn("DUMMY_PRIVATE", json.dumps(result))
+
+    def test_difference_audit_marks_bounded_output_truncation(self):
+        self.installed.chmod(0o755)
+        for index in range(4):
+            (self.installed / f"DUMMY_UNKNOWN_{index}").write_bytes(b"x")
+        result = payload.inspect_tree_differences(self.installed, self.inspect(), limit=2)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["differences"]), 2)
+        self.assertEqual(result["difference_count"], 4)
+        self.assertFalse(result["observed_tree_matches"])
+
+    def test_difference_audit_matching_tree_remains_diagnostic_only(self):
+        self.installed.chmod(0o755)
+        result = payload.inspect_tree_differences(self.installed, self.inspect())
+        self.assertEqual(result["difference_count"], 0)
+        self.assertTrue(result["observed_tree_matches"])
+        self.assertFalse(result["execution_authorized"])
+        self.assertEqual(result["writes"], [])
+
+    def test_difference_audit_dist_lock_is_identified_without_reading_contents(self):
+        self.installed.chmod(0o755)
+        (self.installed / "dist.lock").write_bytes(b"DUMMY_PRIVATE_CONTENT")
+        result = payload.inspect_tree_differences(self.installed, self.inspect())
+        self.assertEqual(result["differences"][0]["category"], "distribution-lock")
+        self.assertNotIn("DUMMY_PRIVATE_CONTENT", json.dumps(result))
+
     def test_inspection_no_write_extract_or_process(self):
         before = self.snapshot()
         with patch("subprocess.Popen",side_effect=AssertionError("no process")), patch("tarfile.TarFile.extractall",side_effect=AssertionError("no extraction")):
