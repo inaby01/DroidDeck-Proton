@@ -4,6 +4,7 @@
 import copy
 import json
 import runpy
+import shutil
 import sys
 import unittest
 from pathlib import Path
@@ -216,6 +217,94 @@ class GamePrefixTests(DEP['InstallTests']):
                 games=games, steam=self.f.steam, settings=self.f.settings, home=self.home, environment=self.environment,
                 runtime_root=self.f.root, recipe=self.recipe)
         self.assertIn(caught.exception.preparation_check, ('recheck-registration-pin', 'recheck-game-executable'))
+
+    def plan_install(self, record, digest):
+        source, _, games = DEP['TRIAL']['BASE']['selection'].registration_catalog(self.environment)
+        return dep.plan_dependency_install(record=record, record_sha256=digest, config=self.config,
+            directory=self.f.fixture.source.root, renderer=self.f.fixture.options['renderer'], source=source,
+            games=games, steam=self.f.steam, settings=self.f.settings, home=self.home, environment=self.environment,
+            runtime_root=self.f.root, recipe=self.recipe)
+
+    def test_record_binds_the_created_prefix_directory_and_registration(self):
+        record, _ = self.initialize()
+        self.assertEqual(record['prefix_identity'], game.prefix_identity(self.game_compat))
+        self.assertEqual({name: record['profile'][name] for name in ('exe_path_sha256', 'title_sha256')},
+                         game.registration_identity(self.f.exe, self.registration('42')['title']))
+        for broken in ({k: v for k, v in record.items() if k != 'prefix_identity'},
+                       {**record, 'prefix_identity': {'device': -1, 'inode': 1}},
+                       {**record, 'profile': {k: v for k, v in record['profile'].items() if k != 'title_sha256'}}):
+            with self.subTest(broken=sorted(broken)), self.assertRaises(Invalid):
+                trial.validate_trial_record(broken, game.SCOPE, game.ID_PREFIX)
+        with self.assertRaises(Invalid):
+            trial.validate_trial_record({**record, 'scope': trial.SCOPE, 'trial_id': 'trial-' + record['trial_id'][8:]})
+
+    def registration(self, key):
+        _source, _, games = DEP['TRIAL']['BASE']['selection'].registration_catalog(self.environment)
+        return games[key]
+
+    def test_replaced_or_changed_prefix_at_the_same_path_is_refused(self):
+        record, digest = self.initialize()
+        self.assertEqual(self.plan_install(record, digest).blockers, ())
+        moved = self.home / 'moved-prefix'
+        shutil.copytree(self.game_compat, moved, symlinks=True)
+        self.game_compat.rename(self.home / 'original-prefix')
+        moved.rename(self.game_compat)
+        with self.assertRaisesRegex(Invalid, 'game prefix replaced') as caught:
+            self.plan_install(record, digest)
+        self.assertEqual(caught.exception.preparation_check, 'recheck-prefix')
+        self.game_compat.rename(moved)
+        (self.home / 'original-prefix').rename(self.game_compat)
+        self.assertEqual(self.plan_install(record, digest).blockers, ())
+        version = self.game_compat / 'version'
+        version.write_text(version.read_text() + 'other\n')
+        with self.assertRaisesRegex(Invalid, 'game prefix version differs'):
+            self.plan_install(record, digest)
+
+    def test_registration_title_or_path_change_after_initialization_is_refused(self):
+        record, digest = self.initialize()
+        added = Path(self.environment['BL_ADDED_GAMES'])
+        original = added.read_text()
+        document = json.loads(original)
+        entry = next(item for item in document if str(item.get('appid')) == '42')
+        entry['name'] = 'Another synthetic title'
+        added.write_text(json.dumps(document))
+        with self.assertRaisesRegex(Invalid, 'registration path or title changed') as caught:
+            self.plan_install(record, digest)
+        self.assertEqual(caught.exception.preparation_check, 'recheck-game-registration')
+        added.write_text(original)
+        # Same EXE content in another folder: the measured hash matches, the registration does not.
+        copy_root = self.f.exe.parent.parent / 'same-content-elsewhere'
+        shutil.copytree(self.f.exe.parent, copy_root)
+        entry = next(item for item in json.loads(original) if str(item.get('appid')) == '42')
+        document = [item if str(item.get('appid')) != '42' else {**entry, 'exe': str(copy_root / self.f.exe.name)}
+                    for item in json.loads(original)]
+        added.write_text(json.dumps(document))
+        with self.assertRaisesRegex(Invalid, 'registration path or title changed'):
+            self.plan_install(record, digest)
+        added.write_text(original)
+        self.assertEqual(self.plan_install(record, digest).blockers, ())
+
+    def test_binding_readiness_requires_a_clear_view_after_dependency_inspection(self):
+        self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime']
+        record, digest = self.initialize()
+        self.install_dependency(record, digest)
+        plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ())
+        before = self.protected()
+
+        class AppearsDuringInspection:
+            calls = 0
+
+            def check(self):
+                self.calls += 1
+                return {'clear_in_view': self.calls == 1}
+        stop = AppearsDuringInspection()
+        lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
+        with PrivateStore(self.f.store_root) as store, store.locked(lock), \
+                self.assertRaisesRegex(Invalid, 'dependency postconditions changed'):
+            game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest, stop, self.recipe)
+        self.assertEqual(stop.calls, 2)
+        self.assertEqual(before, self.protected())
 
     def test_dependency_menu_lists_game_prefixes_beside_probe_trials(self):
         self.initialize()

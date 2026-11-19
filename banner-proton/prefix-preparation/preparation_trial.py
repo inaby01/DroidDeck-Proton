@@ -138,15 +138,26 @@ def _new_private(path, anchor):
 def validate_trial_record(record, scope=SCOPE, id_prefix="trial-"):
     fields(record, ("schema_version", "tool_version", "scope", "trial_id", "app_id", "input_digest", "status", "phase",
                     "exit_code", "prefix_version_sha256", "runtime_execution_verified", "device_namespace_verified",
-                    "preparation_complete"), ("error", "stop_observation", "settings_identity_unchanged", "profile"))
+                    "preparation_complete"),
+           ("error", "stop_observation", "settings_identity_unchanged", "profile", "prefix_identity"))
+    require(("profile" in record) == (scope != SCOPE), "game records require a profile; probe trials carry none")
     if "profile" in record:
-        require(scope != SCOPE, "probe trials carry no game profile")
-        fields(record["profile"], ("profile_id", "revision", "profile_digest", "exe_sha256", "exe_size", "selection"))
-        require(type(record["profile"]["exe_sha256"]) is str and SHA256.fullmatch(record["profile"]["exe_sha256"]) and
+        fields(record["profile"], ("profile_id", "revision", "profile_digest", "exe_sha256", "exe_size", "selection",
+                                   "exe_path_sha256", "title_sha256"))
+        require(all(type(record["profile"][name]) is str and SHA256.fullmatch(record["profile"][name]) for name in
+                    ("exe_sha256", "profile_digest", "exe_path_sha256", "title_sha256")) and
                 type(record["profile"]["exe_size"]) is int and record["profile"]["exe_size"] > 0 and
-                type(record["profile"]["profile_digest"]) is str and SHA256.fullmatch(record["profile"]["profile_digest"]) and
                 record["profile"]["selection"] in ("operator-selected-unverified", "profile-hash-matched"),
                 "invalid game profile binding")
+        # The created prefix directory is recorded before spawn and is required from then on.
+        require(("prefix_identity" in record) == (record["phase"] in ("spawn", "waiting", "deadline-child-not-killed",
+                                                                      "post-checks")), "game prefix identity inconsistent")
+    else:
+        require("prefix_identity" not in record, "probe trials carry no prefix identity")
+    if "prefix_identity" in record:
+        fields(record["prefix_identity"], ("device", "inode"))
+        require(all(type(record["prefix_identity"][name]) is int and record["prefix_identity"][name] >= 0
+                    for name in ("device", "inode")), "invalid game prefix identity")
     require(type(record["schema_version"]) is int and record["schema_version"] == 1 and record["scope"] == scope,
             "unsupported trial record")
     require(type(record["tool_version"]) is str and len(record["tool_version"]) <= 64, "invalid trial version")
@@ -187,6 +198,9 @@ class TrialSession:
             "input_digest": plan.digest, "status": "preparing", "phase": "before-writes", "exit_code": None,
             "prefix_version_sha256": None, "runtime_execution_verified": False, "device_namespace_verified": False,
             "preparation_complete": False}
+
+    def _prefix_created(self):
+        """Hook for scopes that bind later steps to the created prefix directory."""
 
     def _save(self):
         validate_trial_record(self.record, self.scope, self.id_prefix)
@@ -251,6 +265,7 @@ class TrialSession:
             self.record["phase"] = "prefix-create"
             self._save()
             p.compatdata.mkdir(mode=0o700)
+            self._prefix_created()
             self.record.update(status="running", phase="spawn")
             self._save()
             self._guard()

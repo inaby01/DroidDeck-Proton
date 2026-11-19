@@ -65,6 +65,13 @@ def _private_existing(path, anchor):
     require(False, "managed anchor not reached")
 
 
+def _initialized_prefix(compatdata, record, version):
+    """A registered-game record vouches only for the directory and version it initialized."""
+    from preparation_game_prefix import prefix_identity
+    require(version == record["prefix_version_sha256"], "game prefix version differs from initialization")
+    require(prefix_identity(compatdata) == record["prefix_identity"], "game prefix replaced since initialization")
+
+
 @dataclass(frozen=True)
 class RecheckPlan:
     digest: str
@@ -137,6 +144,11 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
     else:
         # The game EXE must still be the one measured when the prefix was initialized.
         from preparation_assets import exe_identity
+        from preparation_game_prefix import registration_identity
+        progress.append("recheck-game-registration")
+        require(registration_identity(exe, games[key]["title"]) ==
+                {name: record["profile"][name] for name in ("exe_path_sha256", "title_sha256")},
+                "game registration path or title changed since initialization")
         progress.append("recheck-game-executable")
         identity = exe_identity(exe)
         require({"sha256": identity["sha256"], "size": identity["size"]} ==
@@ -169,6 +181,8 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
     _private_existing(compatdata, steam)
     _aliases(steam, key)
     version = _prefix(compatdata)
+    if records != "trials":
+        _initialized_prefix(compatdata, record, version)
     progress.append("recheck-private-paths")
     work = safe_path(home / ".local/share/droiddeck-preparation-work" / key / "work", home)
     private_home = safe_path(work.parent / "home", home)
@@ -245,6 +259,8 @@ class RecheckSession:
         _private_existing(p.compatdata, p.target.steam)
         _aliases(p.target.steam, p.record["app_id"])
         require(_prefix(p.compatdata) == p.prefix_version, "managed prefix version changed")
+        if p.records != "trials":
+            _initialized_prefix(p.compatdata, p.record, p.prefix_version)
         require(_settings(p.target.steam, p.settings) == self.settings_identity, "settings changed during recheck")
         require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
         for path in (p.work, p.private_home):

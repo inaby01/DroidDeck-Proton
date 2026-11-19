@@ -769,3 +769,16 @@ registration, the tool tree under the FEX contract, the prefix version, the stop
 view and the dependency state are checked again. No game is launched and no
 authentication is performed; `preparation_complete` stays false until a normal launch
 is verified separately.
+
+## Binding later steps to the initialized prefix and registration (0.26.1)
+
+A registered-game record now stores the created prefix root's directory identity
+(device and inode, saved right after creation and before spawn) and digests of the
+normalized registered EXE path and title. Dependency planning and installation,
+binding plans, and the binding writer's readiness check require the live prefix to be
+the same directory with the recorded version, and the registration to keep the same
+path and title, so a restored or swapped prefix at the same path, or the same EXE
+content registered from another folder, is refused. The readiness check before each
+binding write uses the planning inspection itself, so a process observed during the
+dependency inspection stops the write. A device-number change across reboots would
+also refuse; that has not been measured on the device.

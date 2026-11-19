@@ -35,6 +35,22 @@ ID_PREFIX = "gprefix-"
 HANDLERS = ("softdenchi-interactive", "mfc-local")
 
 
+def prefix_identity(compatdata):
+    """Directory identity of the created prefix root; a restored or replaced prefix never matches."""
+    fd = os.open(safe_path(compatdata), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    return {"device": info.st_dev, "inode": info.st_ino}
+
+
+def registration_identity(exe, title):
+    """Digests of the normalized registered EXE path and title; the record keeps no plain title."""
+    return {"exe_path_sha256": hashlib.sha256(str(safe_path(exe)).encode()).hexdigest(),
+            "title_sha256": hashlib.sha256(string(title).encode()).hexdigest()}
+
+
 def validate_game_config(value):
     """Operator-declared profiles and recipes. Declarations never authorize execution by themselves."""
     fields(value, ("profiles", "recipes"))
@@ -86,6 +102,7 @@ class GamePrefixPlan:
     exe: dict = field(repr=False)
     selection: str
     dependencies: tuple
+    registration: dict = field(repr=False)
 
     @property
     def digest(self):
@@ -164,11 +181,12 @@ def plan_game_prefix(*, config, directory, renderer, source, games, key, profile
     profile_digest = digest_json(profile)
     placement_digest = digest_json({"installation": installation.digest, "review": review, "key": key})
     placement = GamePlacement(placement_digest, installation, review, store_root, settings)
+    registration = registration_identity(exe, games[key]["title"])
     signature = {"scope": SCOPE, "version": VERSION, "placement": placement_digest, "home": str(home), "work": str(work),
                  "compatdata": str(compatdata), "baseline": baseline, "profile": profile_digest, "exe": identity["sha256"],
-                 "dependencies": list(dependencies)}
+                 "registration": registration, "dependencies": list(dependencies)}
     plan = trial.TrialPlan(digest_json(signature), placement, home, work, private_home, compatdata, baseline)
-    return GamePrefixPlan(plan, profile, profile_digest, identity, selection, dependencies)
+    return GamePrefixPlan(plan, profile, profile_digest, identity, selection, dependencies, registration)
 
 
 class GamePrefixSession(trial.TrialSession):
@@ -179,7 +197,16 @@ class GamePrefixSession(trial.TrialSession):
         super().__init__(plan.trial, store, refresh, confirmed_digest, stop_check)
         self.record["profile"] = {"profile_id": plan.profile["profile_id"], "revision": plan.profile["revision"],
                                   "profile_digest": plan.profile_digest, "exe_sha256": plan.exe["sha256"],
-                                  "exe_size": plan.exe["size"], "selection": plan.selection}
+                                  "exe_size": plan.exe["size"], "selection": plan.selection, **plan.registration}
+
+    def _prefix_created(self):
+        # Saved before spawn: later steps accept only this directory, never a replacement at the same path.
+        self.record["prefix_identity"] = prefix_identity(self.plan.compatdata)
+
+    def _guard(self):
+        super()._guard()
+        if "prefix_identity" in self.record:
+            require(prefix_identity(self.plan.compatdata) == self.record["prefix_identity"], "game prefix replaced during initialization")
 
 
 def interactive_game_prefix(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
@@ -302,6 +329,7 @@ class GameBindingPlan:
     dependencies: tuple
     binding: object = field(repr=False)
     blockers: tuple
+    recipes: dict = field(repr=False)
 
     def summary(self):
         return {"scope": "registered-game-target-only-binding", "input_digest": self.digest, "app_id": self.base.record["app_id"],
@@ -351,17 +379,17 @@ def plan_game_binding(*, record, record_sha256, config, directory, renderer, sou
     binding = plan_binding(steam, settings, record["app_id"], base.customization.directory)
     signature = {"version": VERSION, "base": base.digest, "profile": record["profile"]["profile_digest"],
                  "dependencies": list(dependencies), "binding": binding.digest, "blockers": blockers}
-    return GameBindingPlan(digest_json(signature), base, profile, dependencies, binding, tuple(blockers))
+    return GameBindingPlan(digest_json(signature), base, profile, dependencies, binding, tuple(blockers), recipes)
 
 
 def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=None):
     """Operator-confirmed target-only binding through the guarded internal writer.
 
     The readiness callback rechecks the registration, the FEX-contract tool tree, the
-    prefix version, the stopped view and every dependency before each file write.
+    prefix identity and version, and every dependency with the stopped view observed
+    before and after the inspection, before each file write.
     """
     from preparation_binding import apply_binding
-    from preparation_dependency_state import inspect_dependency_state
     from preparation_execution import _prefix
     from preparation_payload import verify_fex_runtime_tree
     from preparation_softdenchi_recipe import softdenchi_recipe, validate_recipe
@@ -379,10 +407,11 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
         base.target.verify()
         base.runtime.verify()
         verify_fex_runtime_tree(tool, base.inventory, base.customization.overlays)
+        require(prefix_identity(base.compatdata) == base.record["prefix_identity"], "game prefix replaced")
         require(_prefix(base.compatdata) == base.prefix_version, "game prefix version changed")
-        require(stop_check.check()["clear_in_view"], "target process view not clear")
-        require(inspect_dependency_state(base.compatdata, recipe)["state"] == "present-verified",
-                "dependency postconditions changed")
+        # Same check as planning: an unclear view before or after inspection is never verified.
+        states = _dependency_states(plan.profile, plan.recipes, base.compatdata, recipe, stop_check)
+        require(all(item["state"] == "present-verified" for item in states), "dependency postconditions changed")
         return {"target": True, "dependencies": True, "payload": True, "stopped": True}
     return apply_binding(plan.binding, base.target.steam, base.settings, store, ready)
 
