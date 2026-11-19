@@ -337,8 +337,9 @@ class PrivateStore:
 
     def inventory(self):
         """Read-only bounded inventory. Incomplete objects remain visible, never deleted."""
-        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "trials": [], "rechecks": [], "installations": [], "dependency_installs": [], "backups": [], "temporary_records": []}
-        for directory in ("assets", "runs", "bindings", "launches", "trials", "rechecks", "installations", "dependency-installs", "backups"):
+        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "trials": [], "rechecks": [], "installations": [], "dependency_installs": [], "game_prefixes": [], "backups": [], "temporary_records": []}
+        for directory in ("assets", "runs", "bindings", "launches", "trials", "rechecks", "installations", "dependency-installs", "game-prefixes",
+                          "backups"):
             try:
                 with self.directory((directory,)) as fd:
                     names = self._names(fd)
@@ -391,6 +392,19 @@ class PrivateStore:
                         result["launches"][-1]["reinspection_required"] = True
                     except (OSError, Invalid, TypeError, KeyError):
                         result["launches"].append({"object": name, "status": "invalid"})
+                elif directory == "game-prefixes" and not name.startswith("tmp-"):
+                    try:
+                        from preparation_game_prefix import ID_PREFIX
+                        from preparation_game_prefix import SCOPE as GAME_SCOPE
+                        from preparation_trial import validate_trial_record
+                        record, _ = self.read_record("game-prefixes", name)
+                        validate_trial_record(record, GAME_SCOPE, ID_PREFIX)
+                        result["game_prefixes"].append({key: record[key] for key in
+                            ("trial_id", "app_id", "scope", "status", "phase", "exit_code", "preparation_complete")})
+                        result["game_prefixes"][-1]["profile_id"] = record.get("profile", {}).get("profile_id")
+                        result["game_prefixes"][-1]["reinspection_required"] = True
+                    except (OSError, Invalid, TypeError, KeyError):
+                        result["game_prefixes"].append({"object": name, "status": "invalid"})
                 elif directory == "dependency-installs" and not name.startswith("tmp-"):
                     try:
                         from preparation_dependency_install import (

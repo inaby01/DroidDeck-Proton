@@ -300,8 +300,13 @@ class LaunchPlan:
 
 def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_environment,
                 expected_hashes, payload_inventory=None, payload_overlays=None, target_pin=None, runtime_plan=None, operation="initialize",
-                prefix_version_sha256=None, origin_launch_id=None, trial_recheck_id=None):
-    """Read-only plan. Hashes/runtime inputs come from trusted adapters, never profile JSON."""
+                prefix_version_sha256=None, origin_launch_id=None, trial_recheck_id=None, fex_runtime_contract=False):
+    """Read-only plan. Hashes/runtime inputs come from trusted adapters, never profile JSON.
+
+    ``fex_runtime_contract`` is for the managed initialization scopes only: the reviewed
+    preparation slot may then hold FEX's one empty AppConfig directory. Plans made with it
+    (or with a trial origin) are refused by the ordinary LaunchSession readiness path.
+    """
     require(operation in OPERATIONS, "unsupported preparation operation")
     require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
     tool, steam, install, work, home = map(safe_path, (tool, steam, install, work, home))
@@ -323,14 +328,16 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
         if trial_recheck_id is None:
             _launch_id(origin_launch_id)
         else:
-            require(origin_launch_id is None and type(trial_recheck_id) is str and trial_recheck_id.startswith("trial-") and
-                    len(trial_recheck_id) == 38 and all(c in "0123456789abcdef" for c in trial_recheck_id[6:]),
+            prefix = next((p for p in ("trial-", "gprefix-") if type(trial_recheck_id) is str and trial_recheck_id.startswith(p)), None)
+            require(origin_launch_id is None and prefix is not None and len(trial_recheck_id) == len(prefix) + 32 and
+                    all(c in "0123456789abcdef" for c in trial_recheck_id[len(prefix):]),
                     "managed trial origin required")
         require(type(prefix_version_sha256) is str and SHA256.fullmatch(prefix_version_sha256)
                 and _prefix(compatdata) == prefix_version_sha256, "unverified or changed prefix version")
     overlays = {} if payload_overlays is None else copy.deepcopy(payload_overlays)
     payload_digest = _payload_digest(payload_inventory, overlays)
-    if trial_recheck_id is None:
+    require(type(fex_runtime_contract) is bool, "invalid runtime contract flag")
+    if trial_recheck_id is None and not fex_runtime_contract:
         verify_tree(tool, payload_inventory, overlays)
     else:
         verify_fex_runtime_tree(tool, payload_inventory, overlays)
@@ -367,7 +374,8 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
     spec = {"tool": tool, "steam": steam, "registration_id": key, "install": install, "work": work,
             "home": home, "runtime_environment": dict(runtime_environment), "expected_hashes": hashes,
             "payload_inventory": payload_inventory, "payload_overlays": overlays, "target_pin": target_pin, "runtime_plan": runtime_plan,
-            "operation": operation, "prefix_version_sha256": prefix_version_sha256, "origin_launch_id": origin_launch_id, "trial_recheck_id": trial_recheck_id}
+            "operation": operation, "prefix_version_sha256": prefix_version_sha256, "origin_launch_id": origin_launch_id, "trial_recheck_id": trial_recheck_id,
+            "fex_runtime_contract": fex_runtime_contract}
     signature = {k: str(v) if hasattr(v, "parts") else v for k, v in spec.items()}
     signature["payload_inventory"] = payload_digest
     signature["target_pin"] = target_pin.digest
@@ -446,7 +454,8 @@ class LaunchSession:
 
     def _guard(self):
         self.store._guard()
-        require(self.plan.spec.get("trial_recheck_id") is None, "trial recheck cannot use ordinary launch readiness")
+        require(self.plan.spec.get("trial_recheck_id") is None and not self.plan.spec.get("fex_runtime_contract"),
+                "managed trial plans cannot use ordinary launch readiness")
         require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
         compatdata = self.plan.spec["steam"] / "steamapps/compatdata" / self.plan.registration_id
         require(self.store._held_target == hashlib.sha256(str(compatdata).encode()).hexdigest(), "target launch lock required")

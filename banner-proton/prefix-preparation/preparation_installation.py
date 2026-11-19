@@ -11,7 +11,13 @@ from dataclasses import dataclass, field
 from preparation_assets import digest_json
 from preparation_common import Invalid, checked, require, safe_path
 from preparation_customization import plan_customizations
-from preparation_payload import inspect_archive, verify_tree
+from preparation_payload import (
+    FEX_RUNTIME_CONTRACT,
+    FEX_RUNTIME_DIRECTORY,
+    inspect_archive,
+    verify_fex_runtime_tree,
+    verify_tree,
+)
 from preparation_runtime_context import plan_runtime_environment
 from preparation_target import pin_registration
 
@@ -59,11 +65,18 @@ class InstallationPlan:
 
 
 def _tree_variants(directory, inventory, archive_name, mode, helper, renderer, label, tool_slot):
+    """Strict tree match. Only the dedicated preparation slot also accepts the
+    source-reviewed FEX runtime contract (one owned, empty, 0700 AppConfig directory)."""
     matches, observations = [], []
+    def verifier(root, tree, overlays):
+        # Without the FEX directory the ordinary strict check applies unchanged.
+        if tool_slot == "preparation" and os.path.lexists(root / FEX_RUNTIME_DIRECTORY):
+            return verify_fex_runtime_tree(root, tree, overlays)
+        return verify_tree(root, tree, overlays)
     for mask in (0o022, 0o077):
         candidate = plan_customizations(inventory, archive_name, mode, helper, renderer, label=label, umask=mask, tool_slot=tool_slot)
         try:
-            verify_tree(directory, inventory, candidate.overlays)
+            verifier(directory, inventory, candidate.overlays)
         except (OSError, Invalid) as error:
             diagnostic = getattr(error, "tree_diagnostic", {"check": "tree-validation-rejected", "error_class": type(error).__name__,
                                                           "errno": getattr(error, "errno", None)})
@@ -72,6 +85,7 @@ def _tree_variants(directory, inventory, archive_name, mode, helper, renderer, l
         observations.append({"creation_umask": format(mask, "04o"), "tree_matches": True})
         matches.append((mask, candidate))
     return matches, {"directory": directory.name, "strict_match": len(matches) == 1, "variants": observations,
+                     "runtime_contract": FEX_RUNTIME_CONTRACT if tool_slot == "preparation" else None,
                      "modified_by_tool": False, "contents_recorded": False, "first_mismatch_only": True}
 
 

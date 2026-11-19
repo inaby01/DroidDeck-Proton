@@ -536,11 +536,17 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
     if config.get("initialization_trial") is True and "placement_review" in config and "dependency_installation" in config:
         print("8. 管理済みprefixへソフト電池を対話導入（winver確認→正規インストーラ、実Wineを起動）", file=output)
         print("9. 管理済みprefixのソフト電池導入状態を読み取り検査（Wineを起動しない）", file=output)
+    if config.get("initialization_trial") is True and "placement_review" in config and "game_preparation" in config:
+        print("10. 実ゲーム登録の新規prefixを初期化（実Proton/Wineを起動。ゲームは起動しない）", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
     if answer == "4" and "placement_review" in config:
         from preparation_static_placement import interactive_static_placement
         return interactive_static_placement(directory, renderer, config, **options)
+    if answer == "10" and config.get("initialization_trial") is True and "placement_review" in config \
+            and "game_preparation" in config:
+        from preparation_game_prefix import interactive_game_prefix
+        return interactive_game_prefix(directory, renderer, config, **options)
     if answer in ("8", "9") and config.get("initialization_trial") is True and "placement_review" in config \
             and "dependency_installation" in config:
         import preparation_dependency_install as dependency

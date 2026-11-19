@@ -50,7 +50,7 @@ def _text(value):
 
 def validate_selection_config(config):
     fields(config, ("schema_version", "payload", "runtime_reference"),
-           ("probe_material", "placement_review", "initialization_trial", "dependency_installation"))
+           ("probe_material", "placement_review", "initialization_trial", "dependency_installation", "game_preparation"))
     require(type(config.get("probe_material", False)) is bool, "invalid probe menu option")
     require(type(config.get("initialization_trial", False)) is bool, "invalid initialization trial menu option")
     require(type(config["schema_version"]) is int and config["schema_version"] == 1, "unknown selection config")
@@ -80,6 +80,11 @@ def validate_selection_config(config):
         require(config.get("initialization_trial") is True and "placement_review" in config,
                 "dependency installation requires the managed trial configuration")
         validate_dependency_config(config["dependency_installation"])
+    if "game_preparation" in config:
+        from preparation_game_prefix import validate_game_config
+        require(config.get("initialization_trial") is True and "placement_review" in config,
+                "game preparation requires the managed trial configuration")
+        validate_game_config(config["game_preparation"])
     return config
 
 
@@ -548,7 +553,8 @@ def selection_script(config=None):
              "preparation_payload", "preparation_runtime", "preparation_customization", "preparation_runtime_context",
              "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
              "preparation_tool_writer", "preparation_store", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_trial", "preparation_trial_audit", "preparation_recheck", "preparation_softdenchi_recipe",
-             "preparation_dependency_state", "preparation_dependency_install", "preparation_selection")
+             "preparation_dependency_state", "preparation_dependency_install", "preparation_game_prefix",
+             "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}
     installer = parent.parent / "install-softdenchi.py"
     if not installer.exists():

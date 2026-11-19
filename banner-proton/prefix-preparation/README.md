@@ -735,3 +735,22 @@ no `wineserver -k` and no other process, prefix or game is signalled. If the vie
 does not clear within a bounded wait, the state stays `needs-user`. After a clear
 view the installation continues with the offline post-inspection; menu 9 then
 reinspects as before.
+
+## Registered-game new prefixes (0.25.0)
+
+With `game_preparation` (operator-declared profiles and recipes; only the SoftDenchi
+recipe can be `ready`, MFC stays `blocked`), menu 10 initializes a new prefix for a
+registered game that has no compatdata yet. Probe registrations keep the dedicated
+trial scope and existing prefixes stay read-only. The same guarded session as the
+probe trial runs the fixed builtin initialization with the reviewed preparation slot;
+records go to the private `game-prefixes` journal and bind the selected profile and
+the measured game EXE (an undeclared EXE hash is recorded as an operator selection,
+not as a verified edition). Dependency installation (menus 8 and 9) accepts these
+records as well as probe trials; a changed game EXE refuses planning. Binding is not
+written by these steps.
+
+The preparation slot may hold FEX's one empty, owned, 0700 `AppConfig` directory:
+when it exists, the reuse plan and the managed initialization/recheck launch plans
+accept it under the source-reviewed FEX contract. Without it, or for the legacy slot,
+the strict tree check is unchanged, and plans made under the contract are refused by
+the ordinary launch readiness path.

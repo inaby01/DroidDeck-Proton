@@ -135,16 +135,24 @@ def _new_private(path, anchor):
         os.close(fd)
 
 
-def validate_trial_record(record):
+def validate_trial_record(record, scope=SCOPE, id_prefix="trial-"):
     fields(record, ("schema_version", "tool_version", "scope", "trial_id", "app_id", "input_digest", "status", "phase",
                     "exit_code", "prefix_version_sha256", "runtime_execution_verified", "device_namespace_verified",
-                    "preparation_complete"), ("error", "stop_observation", "settings_identity_unchanged"))
-    require(type(record["schema_version"]) is int and record["schema_version"] == 1 and record["scope"] == SCOPE,
+                    "preparation_complete"), ("error", "stop_observation", "settings_identity_unchanged", "profile"))
+    if "profile" in record:
+        require(scope != SCOPE, "probe trials carry no game profile")
+        fields(record["profile"], ("profile_id", "revision", "profile_digest", "exe_sha256", "exe_size", "selection"))
+        require(type(record["profile"]["exe_sha256"]) is str and SHA256.fullmatch(record["profile"]["exe_sha256"]) and
+                type(record["profile"]["exe_size"]) is int and record["profile"]["exe_size"] > 0 and
+                type(record["profile"]["profile_digest"]) is str and SHA256.fullmatch(record["profile"]["profile_digest"]) and
+                record["profile"]["selection"] in ("operator-selected-unverified", "profile-hash-matched"),
+                "invalid game profile binding")
+    require(type(record["schema_version"]) is int and record["schema_version"] == 1 and record["scope"] == scope,
             "unsupported trial record")
     require(type(record["tool_version"]) is str and len(record["tool_version"]) <= 64, "invalid trial version")
     key = record["trial_id"]
-    require(type(key) is str and key.startswith("trial-") and len(key) == 38 and
-            all(c in "0123456789abcdef" for c in key[6:]), "invalid trial ID")
+    require(type(key) is str and key.startswith(id_prefix) and len(key) == len(id_prefix) + 32 and
+            all(c in "0123456789abcdef" for c in key[len(id_prefix):]), "invalid trial ID")
     require(app_id(record["app_id"]) == record["app_id"], "invalid trial app ID")
     require(type(record["input_digest"]) is str and SHA256.fullmatch(record["input_digest"]), "invalid trial digest")
     require(record["status"] in ("preparing", "running", "needs-user", "failed", "initialized-unverified"), "invalid trial status")
@@ -165,21 +173,24 @@ class TrialSession:
     all created paths. Existing trials are never adopted or automatically retried.
     """
 
+    # Subclasses reuse the same guarded flow for another explicit scope and journal.
+    scope, records, id_prefix = SCOPE, "trials", "trial-"
+
     def __init__(self, plan, store, refresh, confirmed_digest, stop_check):
         self.plan, self.store, self.refresh = plan, store, refresh
         self.confirmed_digest, self.stop_check = confirmed_digest, stop_check
         self.process = None
         self.hash = None
         self.settings_identity = None
-        self.record = {"schema_version": 1, "tool_version": VERSION, "scope": SCOPE,
-            "trial_id": "trial-" + secrets.token_hex(16), "app_id": plan.placement.installation.target.registration_id,
+        self.record = {"schema_version": 1, "tool_version": VERSION, "scope": self.scope,
+            "trial_id": self.id_prefix + secrets.token_hex(16), "app_id": plan.placement.installation.target.registration_id,
             "input_digest": plan.digest, "status": "preparing", "phase": "before-writes", "exit_code": None,
             "prefix_version_sha256": None, "runtime_execution_verified": False, "device_namespace_verified": False,
             "preparation_complete": False}
 
     def _save(self):
-        validate_trial_record(self.record)
-        self.hash = self.store.write_record("trials", self.record["trial_id"] + ".json", self.record, expected_hash=self.hash)
+        validate_trial_record(self.record, self.scope, self.id_prefix)
+        self.hash = self.store.write_record(self.records, self.record["trial_id"] + ".json", self.record, expected_hash=self.hash)
         return dict(self.record)
 
     def _settings_identity(self):
@@ -233,7 +244,7 @@ class TrialSession:
                 steam=installation.target.steam, registration_id=installation.target.registration_id, install=installation.target.exe.parent,
                 work=p.work, home=p.private_home, runtime_environment=installation.runtime.environment, expected_hashes=hashes,
                 payload_inventory=installation.inventory, payload_overlays=installation.customization.overlays,
-                target_pin=installation.target, runtime_plan=installation.runtime)
+                target_pin=installation.target, runtime_plan=installation.runtime, fex_runtime_contract=True)
             self._guard()
             require(self.stop_check.check()["clear_in_view"], "target process view changed")
             require(not os.path.lexists(p.compatdata), "trial prefix appeared")

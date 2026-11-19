@@ -259,6 +259,12 @@ def _capacity(needs):
             "reserve_bytes": RESERVE, "growth_upper_bound_known": False}
 
 
+def _records_of(record):
+    """Journal of a managed origin record: probe trials or registered-game new prefixes."""
+    from preparation_game_prefix import SCOPE as GAME_SCOPE
+    return "game-prefixes" if record.get("scope") == GAME_SCOPE else "trials"
+
+
 def _recheck_evidence(store_root, record, prefix_version):
     with PrivateStore(store_root) as store:
         candidates = []
@@ -347,11 +353,17 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
     dependency = validate_dependency_config(config.get("dependency_installation"))
     require(dependency["recipe_revision"] == recipe["revision"], "configured recipe revision differs")
     progress.append("managed-recheck-plan")
+    records = _records_of(record)
     base = plan_recheck(record=record, record_sha256=record_sha256, config=config, directory=directory, renderer=renderer,
                         source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
-                        runtime_root=runtime_root)
+                        runtime_root=runtime_root, records=records)
     progress.append("recheck-evidence")
-    recheck_id, recheck_sha256 = _recheck_evidence(base.store_root, record, base.prefix_version)
+    if records == "trials":
+        recheck_id, recheck_sha256 = _recheck_evidence(base.store_root, record, base.prefix_version)
+    else:
+        # A registered-game prefix carries its own initialization evidence (initialized-unverified,
+        # exit 0, unchanged settings), revalidated by the managed plan above.
+        recheck_id, recheck_sha256 = record["trial_id"], record_sha256
     progress.append("asset-inspection")
     spec = dependency["asset"]
     directory = safe_path(directory)
@@ -413,7 +425,8 @@ class DependencyInstallSession:
 
     def _guard(self):
         self.base_guard._guard()
-        require(self.store.read_record("rechecks", self.plan.recheck_id + ".json")[1] == self.plan.recheck_sha256,
+        evidence = "rechecks" if self.plan.recheck.records == "trials" else self.plan.recheck.records
+        require(self.store.read_record(evidence, self.plan.recheck_id + ".json")[1] == self.plan.recheck_sha256,
                 "managed recheck evidence changed")
 
     def _fail(self, check, error):
@@ -752,8 +765,8 @@ def collect_diagnostics(*, record, config, directory, renderer, environment, ste
     def recheck_plan():
         source, _, games = selection.registration_catalog(environment)
         with PrivateStore(store_root) as store:
-            digest = store.read_record("trials", record["trial_id"] + ".json")[1]
-        plan_recheck(record=record, record_sha256=digest, config=config, directory=directory, renderer=renderer,
+            digest = store.read_record(_records_of(record), record["trial_id"] + ".json")[1]
+        plan_recheck(record=record, record_sha256=digest, config=config, directory=directory, renderer=renderer, records=_records_of(record),
                      source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
                      runtime_root=runtime_root)
         return {}
@@ -807,16 +820,20 @@ def collect_diagnostics(*, record, config, directory, renderer, environment, ste
 
 
 def _select_trial(store, stream, output, prompt):
-    records = [item for item in store.inventory()["trials"] if item["status"] != "invalid"]
-    require(records, "no private trial records")
-    for index, item in enumerate(records, 1):
-        print(f"{index}. ID {item['app_id']} / {item['status']} / {item['trial_id']}", file=output)
+    listed = store.inventory()
+    records = [("trials", item) for item in listed["trials"] if item["status"] != "invalid"]
+    records += [("game-prefixes", item) for item in listed["game_prefixes"] if item["status"] != "invalid"]
+    require(records, "no managed prefix records")
+    for index, (kind, item) in enumerate(records, 1):
+        label = "検証用" if kind == "trials" else "実ゲーム " + str(item.get("profile_id"))
+        print(f"{index}. {label} / ID {item['app_id']} / {item['status']} / {item['trial_id']}", file=output)
     print(prompt, end="", file=output, flush=True)
     answer = stream.readline(32).strip()
     if answer == "q":
         return None, None
     require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(records), "invalid trial selection")
-    return store.read_record("trials", records[int(answer) - 1]["trial_id"] + ".json")
+    kind, item = records[int(answer) - 1]
+    return store.read_record(kind, item["trial_id"] + ".json")
 
 
 def _context(directory, environment, steam, settings, home):
@@ -1052,6 +1069,7 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
         protected.extend(Path(game["exe"]).parent for game in games.values())
         print("Wineを起動せず、決まった登録キーとファイルだけを読み取ります。", file=output, flush=True)
         base = plan_recheck(record=record, record_sha256=digest, config=config, directory=directory, renderer=renderer,
+                            records=_records_of(record),
                             source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
                             runtime_root=runtime_root)
         selection._private_report_directory(home, protected)

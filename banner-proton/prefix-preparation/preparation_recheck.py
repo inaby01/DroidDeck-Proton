@@ -82,6 +82,8 @@ class RecheckPlan:
     private_home: object = field(repr=False)
     compatdata: object = field(repr=False)
     prefix_version: str
+    # Journal of the origin record: probe trials, or registered-game new prefixes.
+    records: str = "trials"
 
     def summary(self):
         return {"scope": SCOPE, "input_digest": self.digest, "trial_id": self.record["trial_id"],
@@ -104,12 +106,18 @@ def plan_recheck(**kwargs):
 
 
 def _plan_recheck(progress, *, record, record_sha256, config, directory, renderer, source, games, steam, settings, home,
-                  environment, runtime_root):
-    validate_trial_record(record)
+                  environment, runtime_root, records="trials"):
+    require(records in ("trials", "game-prefixes"), "unknown managed prefix journal")
+    if records == "trials":
+        validate_trial_record(record)
+    else:
+        from preparation_game_prefix import ID_PREFIX
+        from preparation_game_prefix import SCOPE as GAME_SCOPE
+        validate_trial_record(record, GAME_SCOPE, ID_PREFIX)
     require(record["exit_code"] == 0 and record.get("settings_identity_unchanged") is True,
             "prior fixed-command exit and unchanged settings required")
     require(record["phase"] == "post-checks", "completed command phase required")
-    require(record["status"] == "initialized-unverified" or record["status"] == "failed" and
+    require(record["status"] == "initialized-unverified" or records == "trials" and record["status"] == "failed" and
             record.get("error", {}).get("error_class") == "TreeMismatch" and record["phase"] == "post-checks",
             "only initialized or tree-mismatch trial can be rechecked")
     key = record["app_id"]
@@ -118,21 +126,31 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
     store_root = safe_path(home / ".local/state/droiddeck-prefix-preparation/tool-store", home)
     probe_store = safe_path(store_root.parent / "probe-store", home)
     with PrivateStore(store_root) as store:
-        require(store.read_record("trials", record["trial_id"] + ".json")[1] == record_sha256, "trial record changed")
+        require(store.read_record(records, record["trial_id"] + ".json")[1] == record_sha256, "trial record changed")
     progress.append("recheck-registration-pin")
     exe = safe_path(games[key]["exe"])
     target = pin_registration(source, key, exe.parent, steam)
-    progress.append("recheck-probe-registration")
-    proof = inspect_existing_probe_registration(exe, key, source, steam, probe_store)
+    proof = None
+    if records == "trials":
+        progress.append("recheck-probe-registration")
+        proof = inspect_existing_probe_registration(exe, key, source, steam, probe_store)
+    else:
+        # The game EXE must still be the one measured when the prefix was initialized.
+        from preparation_assets import exe_identity
+        progress.append("recheck-game-executable")
+        identity = exe_identity(exe)
+        require({"sha256": identity["sha256"], "size": identity["size"]} ==
+                {key_: record["profile"]["exe_" + key_] for key_ in ("sha256", "size")}, "game executable changed")
     progress.append("recheck-build-review")
     payload = config["payload"]
     require(payload.get("tool_slot") == "preparation", "reviewed preparation slot required")
     review = validate_build_review(config["placement_review"])
-    require(review["archive_sha512"] == payload["sha512"] == proof["source_archive_sha512"], "recheck source identity differs")
+    require(review["archive_sha512"] == payload["sha512"] and
+            (proof is None or proof["source_archive_sha512"] == payload["sha512"]), "recheck source identity differs")
     progress.append("recheck-payload-archive")
     from preparation_selection import _archive
     inventory = inspect_archive(_archive(directory, payload), payload["sha512"], payload["root"], capture=CAPTURE)
-    require(proof["source_inventory_digest"] == inventory.digest, "probe source inventory differs")
+    require(proof is None or proof["source_inventory_digest"] == inventory.digest, "probe source inventory differs")
     progress.append("recheck-runtime-environment")
     runtime = plan_runtime_environment(runtime_root, config["runtime_reference"], environment)
     _require_live(runtime)
@@ -161,12 +179,12 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
                     "recheck paths overlap protected data")
     require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
     progress.append("recheck-settings")
-    signature = {"version": VERSION, "scope": SCOPE, "record": record_sha256, "archive": inventory.archive_sha512,
+    signature = {"version": VERSION, "scope": SCOPE, "records": records, "record": record_sha256, "archive": inventory.archive_sha512,
                  "inventory": inventory.digest, "customization": custom.digest, "runtime": runtime.identity_digest,
                  "target": target.digest, "prefix_version": version, "work": str(work), "home": str(private_home),
                  "contract": FEX_RUNTIME_CONTRACT, "settings": _settings(steam, settings)}
     return RecheckPlan(digest_json(signature), record, record_sha256, store_root, probe_store, inventory, custom,
-                      runtime, target, review, settings, work, private_home, compatdata, version)
+                      runtime, target, review, settings, work, private_home, compatdata, version, records)
 
 
 def validate_recheck_record(record):
@@ -216,7 +234,7 @@ class RecheckSession:
         require(self.store.root == p.store_root and self.store._held_target == hashlib.sha256(str(p.compatdata).encode()).hexdigest(),
                 "matching recheck locks required")
         require(isinstance(self.stop, ProcessStopCheck) and self.stop.compatdata == p.compatdata, "matching process observation required")
-        require(self.store.read_record("trials", p.record["trial_id"] + ".json")[1] == p.record_sha256, "original trial changed")
+        require(self.store.read_record(p.records, p.record["trial_id"] + ".json")[1] == p.record_sha256, "original trial changed")
         _require_live(p.runtime)
         p.target.verify()
         p.runtime.verify()
