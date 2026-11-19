@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.18.0)
+# Prefix preparation: offline planning and dedicated initialization trial (0.19.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -164,10 +164,11 @@ first-mismatch observation, not a complete diff or a corruption diagnosis. Exist
 strict tree validation is retained. Legacy-mode rejection reports retain these
 same structured diagnostics when available.
 
-No CLI mode launches Wine, executes DroidDeck helpers or `user_settings.py`, installs
-dependencies, downloads, extracts archives to disk, registers Proton, synchronizes settings,
-or creates/modifies a game prefix. An internal initialization/probe launcher exists,
-but is not connected to the CLI or executable recipes. It requires a complete pinned payload inventory, pinned registration/EXE and
+Ordinary inspection/planning never launches Wine, executes DroidDeck helpers or
+`user_settings.py`, installs dependencies or synchronizes settings. Separately confirmed
+material/placement operations and the dedicated initialization trial below are explicit
+write operations. The normal readiness-gated initialization/probe launcher remains
+internal and is not connected to executable recipes. It requires a complete pinned payload inventory, pinned registration/EXE and
 scoped proc observations, plus caller checks for provenance and runtime/stop scope.
 Local tests use a harmless substitute, not Wine. Launch records now use schema 2;
 schema-1 launch records are incompatible and are not migrated.
@@ -564,3 +565,35 @@ steps and unverified runtime limits. A legacy parser-limit refusal that the boun
 preservation parser handles is informational, not a new failure. The existing
 blocked execution status is retained and is separate from the inspection summary.
 This batch replaces the unrun 0.17.0 inspection; there is no need to run both.
+
+## Dedicated first initialization trial (0.19.0)
+
+A trusted distributed bundle can enable `initialization_trial: true` alongside its
+reviewed build configuration. Menu 5 previews the new dedicated probe prefix,
+private work/home, baseline plus 1 GiB reserve, journal and cooperative lock scope,
+then requires a separate explicit confirmation. It runs only the reviewed preparation
+tool's fixed `run cmd.exe /d /c exit 0`. It cannot execute a game, install assets,
+change bindings or claim normal execution readiness. The default menu action remains
+read-only. A reserve is an admission check, not a growth limit or filesystem sandbox.
+
+The trial requires a matching private probe receipt, absent prefix and aliases,
+absent trial paths, verified installed tree, reviewed source, shipped arm64 prefix,
+live pinned runtime and two clear same-owner process views. Mutable legacy dist and
+SteamPipe maintenance inputs are rejected. Reviewed Xalia modes remain subject to
+the private 0700 tool-parent guard before and after launch. Snapshot runtimes are
+refused. No readiness flags are fabricated for the ordinary LaunchSession API.
+
+After confirmation the caller holds private global/target and cooperative settings
+locks, refreshes the complete plan, creates private work/home and the new prefix,
+and launches with the existing minimal environment/disabled observer and fixes.
+Settings input hashes are compared before/after without exporting contents. Standard
+input/output/error are DEVNULL. There is no raw registry or process-environment dump.
+Waits are bounded, with up to five seconds of grace for lingering visible Wine
+services. Timeout or residual processes retain `needs-user`; the operator can wait
+again or hand off without a signal, deletion, automatic restart or adoption.
+
+A zero command exit still requires the same payload/runtime/target and prefix version,
+directories and registry headers. Result `initialized-unverified` does not establish
+GUI, dependencies, templates or game compatibility. Trial records have their own
+schema under `trials/` and appear in read-only management inventory with mandatory
+reinspection. All partial prefixes, private directories and journals are preserved.

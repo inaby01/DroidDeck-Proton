@@ -337,8 +337,8 @@ class PrivateStore:
 
     def inventory(self):
         """Read-only bounded inventory. Incomplete objects remain visible, never deleted."""
-        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "installations": [], "backups": [], "temporary_records": []}
-        for directory in ("assets", "runs", "bindings", "launches", "installations", "backups"):
+        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "trials": [], "installations": [], "backups": [], "temporary_records": []}
+        for directory in ("assets", "runs", "bindings", "launches", "trials", "installations", "backups"):
             try:
                 with self.directory((directory,)) as fd:
                     names = self._names(fd)
@@ -362,6 +362,16 @@ class PrivateStore:
                                                   "completed_files": record["completed_files"], "preparation_complete": False})
                     except (OSError, Invalid, TypeError, KeyError):
                         result["bindings"].append({"object": name, "status": "invalid"})
+                elif directory == "trials" and not name.startswith("tmp-"):
+                    try:
+                        from preparation_trial import validate_trial_record
+                        record, _ = self.read_record("trials", name)
+                        validate_trial_record(record)
+                        result["trials"].append({key: record[key] for key in
+                            ("trial_id", "app_id", "scope", "status", "phase", "exit_code", "preparation_complete")})
+                        result["trials"][-1]["reinspection_required"] = True
+                    except (OSError, Invalid, TypeError, KeyError):
+                        result["trials"].append({"object": name, "status": "invalid"})
                 elif directory == "launches" and not name.startswith("tmp-"):
                     try:
                         record, _ = self.read_record("launches", name)

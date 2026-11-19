@@ -60,6 +60,8 @@ class StaticFixture(unittest.TestCase):
                     raw = b'SYNTHETIC_XALIA_NOT_EXECUTED'
                     member.size, member.mode = len(raw), 0o666
                     package.addfile(member, io.BytesIO(raw))
+        if hasattr(self, "customize_trial_source"):
+            self.customize_trial_source(source.archive, root)
         source.sha = hashlib.sha512(source.archive.read_bytes()).hexdigest()
         f.fixture.options['sha512'] = source.sha
         f.fixture.options['tool_slot'] = 'preparation'

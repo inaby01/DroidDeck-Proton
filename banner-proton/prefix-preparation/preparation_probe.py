@@ -1,7 +1,8 @@
 """Create registration-only probe material from one pinned Wine archive member.
 
-Never runs the Windows executable, writes Android registration/preferences, or
-creates/initializes compatdata. Private receipts distinguish staged material from
+Material creation never runs the Windows executable, writes Android registration/
+preferences, or initializes compatdata. The workflow dispatches a separately
+confirmed dedicated initialization trial when enabled. Private receipts distinguish staged material from
 a genuinely new registration observed later. No existing destination is reused.
 """
 
@@ -514,11 +515,16 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
     print("1. 登録済み対象の読み取り検査・計画\n2. 新規登録用の検証ファイルを用意\n3. 未完了の検証用記録を全照合して復帰", file=output)
     if "placement_review" in config:
         print("4. 準備用Protonを別の新規フォルダーへ配置（起動しない）", file=output)
+    if config.get("initialization_trial") is True and "placement_review" in config:
+        print("5. 専用の新規prefixを初期化試験（実Proton/Wineを起動）", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
     if answer == "4" and "placement_review" in config:
         from preparation_static_placement import interactive_static_placement
         return interactive_static_placement(directory, renderer, config, **options)
+    if answer == "5" and config.get("initialization_trial") is True and "placement_review" in config:
+        from preparation_trial import interactive_trial
+        return interactive_trial(directory, renderer, config, **options)
     if answer == "1":
         return selection.interactive_selection(directory, renderer, config, **options)
     if answer == "3":

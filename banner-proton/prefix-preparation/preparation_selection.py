@@ -49,8 +49,9 @@ def _text(value):
 
 
 def validate_selection_config(config):
-    fields(config, ("schema_version", "payload", "runtime_reference"), ("probe_material", "placement_review"))
+    fields(config, ("schema_version", "payload", "runtime_reference"), ("probe_material", "placement_review", "initialization_trial"))
     require(type(config.get("probe_material", False)) is bool, "invalid probe menu option")
+    require(type(config.get("initialization_trial", False)) is bool, "invalid initialization trial menu option")
     require(type(config["schema_version"]) is int and config["schema_version"] == 1, "unknown selection config")
     payload = config["payload"]
     fields(payload, ("archive", "sha512", "root", "mode"), ("alternate_relative_path", "tool_slot"))
@@ -540,7 +541,7 @@ def selection_script(config=None):
     names = ("preparation_common", "preparation_assets", "preparation_vdf", "preparation_binding", "preparation_target",
              "preparation_payload", "preparation_runtime", "preparation_customization", "preparation_runtime_context",
              "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
-             "preparation_tool_writer", "preparation_store", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_selection")
+             "preparation_tool_writer", "preparation_store", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_trial", "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}
     installer = parent.parent / "install-softdenchi.py"
     if not installer.exists():
@@ -559,7 +560,7 @@ def selection_script(config=None):
             "raise SystemExit(status)\n")
     compile(code, "selection-launcher", "exec")
     delimiter = "DROIDDECK_SELECTION_" + hashlib.sha256(code.encode()).hexdigest()[:16]
-    return ("#!/bin/bash\n# Numbered plans and explicitly confirmed registration material; no prefix execution.\n"
+    return ("#!/bin/bash\n# Plans and explicitly confirmed dedicated operations; default planning never executes Wine.\n"
             "if (( $# != 0 )); then echo 'この起動にはオプションは不要です。' >&2; exit 1; fi\n"
             'script_parent=.\nif [[ ${BASH_SOURCE[0]} == */* ]]; then script_parent=${BASH_SOURCE[0]%/*}; fi\n'
             'script_dir=$(CDPATH=\'\' cd -- "$script_parent" && pwd -P) || exit 1\n'
