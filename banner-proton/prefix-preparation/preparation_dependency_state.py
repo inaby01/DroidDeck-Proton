@@ -68,6 +68,14 @@ def normal_key(key):
     return key.casefold()
 
 
+def packed_guid(guid):
+    """Windows Installer's packed form of a registry GUID (as used under Installer keys)."""
+    text = guid.strip("{}").replace("-", "")
+    require(len(text) == 32 and all(c in "0123456789ABCDEFabcdef" for c in text), "invalid GUID")
+    return (text[0:8][::-1] + text[8:12][::-1] + text[12:16][::-1] +
+            "".join(text[i:i + 2][::-1] for i in range(16, 32, 2))).upper()
+
+
 def _data(raw):
     if raw.startswith('"'):
         value, end = _quoted(raw, 0)
@@ -94,7 +102,7 @@ def _data(raw):
 def _logical_lines(stream):
     pending = ""
     for raw in stream:
-        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        line = raw.decode("utf-8").rstrip("\r\n")  # Invalid bytes make the registry uninspected.
         if pending:
             line = pending + line.lstrip()
         if line.endswith("\\") and not line.endswith("\\\\"):
@@ -111,8 +119,9 @@ def read_registry(path, wanted):
     """Read recipe-listed keys and value names from one Wine registry file.
 
     ``wanted`` maps key paths to value names ('@' is the default value). The
-    result maps each normalized wanted key to {"occurrences": n, "values": {...}}
-    for keys present in the file. Unlisted keys and values are never kept.
+    name '*' records only the value names of that key, never their data. The
+    result maps each normalized wanted key to {"occurrences": n, "values": {...},
+    "names": [...]} for keys present in the file. Unlisted data is never kept.
     """
     targets = {normal_key(key): {name.casefold() for name in names} for key, names in wanted.items()}
     found = {}
@@ -135,7 +144,7 @@ def read_registry(path, wanted):
                 key = normal_key(_unescape(line[1:end]))
                 current = key if key in targets else None
                 if current is not None:
-                    entry = found.setdefault(current, {"occurrences": 0, "values": {}})
+                    entry = found.setdefault(current, {"occurrences": 0, "values": {}, "names": []})
                     entry["occurrences"] += 1
                 continue
             # Every value line must be structurally valid so key boundaries are trustworthy;
@@ -153,6 +162,9 @@ def read_registry(path, wanted):
                 name, end = _quoted(line, 0)
                 name, rest = name.casefold(), line[end:]
             require(rest.startswith("="), "registry value assignment expected")
+            if "*" in targets[current]:
+                require(len(found[current]["names"]) < 4096, "too many registry values")
+                found[current]["names"].append(name)
             if name in targets[current]:
                 values = found[current]["values"]
                 require(name not in values, "duplicate registry value")
@@ -283,6 +295,18 @@ def inspect_dependency_state(compatdata, recipe):
     product, service = recipe["product"], recipe["service"]
     uninstall = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + product["product_code"]
     wanted = {uninstall: {"DisplayVersion"}, product["marker_key"]: {product["marker_value"]}}
+    # Further product traces: presence only, plus value names of the UpgradeCode relations.
+    packed_product, packed_upgrade = packed_guid(product["product_code"]), packed_guid(product["upgrade_code"])
+    trace_keys = {
+        "uninstall-32bit-view": "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + product["product_code"],
+        "msi-product-classes": "Software\\Classes\\Installer\\Products\\" + packed_product,
+        "msi-product-userdata": "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\" + packed_product}
+    upgrade_keys = {"upgrade-code-classes": "Software\\Classes\\Installer\\UpgradeCodes\\" + packed_upgrade,
+                    "upgrade-code-installer": "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UpgradeCodes\\" + packed_upgrade}
+    for key in trace_keys.values():
+        wanted[key] = set()
+    for key in upgrade_keys.values():
+        wanted[key] = {"*"}
     for root in SERVICE_ROOTS:
         wanted[root + service["name"]] = {"Type", "Start", "ImagePath"}
     for key in SESSION_MANAGERS:
@@ -326,6 +350,21 @@ def inspect_dependency_state(compatdata, recipe):
         "product-marker": value_check(product["marker_key"], product["marker_value"], ("sz", "expand_sz"),
                                       lambda value: value == product["marker_data"])}
     incompatible = product_items["uninstall-display-version"].get("reason") == "value-differs"
+    product_traces = {}
+    for name, key in trace_keys.items():
+        entry = key_entry(key)
+        product_traces[name] = {"result": "absent"} if entry is None else entry if "result" in entry else {"result": "present"}
+    related = set()
+    for name, key in upgrade_keys.items():
+        entry = key_entry(key)
+        if entry is None or "result" in entry:
+            product_traces[name] = {"result": "absent"} if entry is None else entry
+            continue
+        others = {value.upper() for value in entry["names"]} - {packed_product}
+        related |= others
+        product_traces[name] = {"result": "present", "related_products": len(others)}
+    if related:
+        incompatible = True
 
     file_items = {}
     for relative, size, digest, machine in recipe["files"]:
@@ -354,11 +393,16 @@ def inspect_dependency_state(compatdata, recipe):
         com[view][clsid + "/" + context] = value_check(COM_ROOTS[view] + clsid + "\\" + context, "@", ("sz", "expand_sz"),
                                                        lambda value, server=server: _normal_path(value) == _path_value(server))
 
-    pending = None
+    pending, pending_detail = None, None
     if registry is not None:
-        found = [value_check(key, "PendingFileRenameOperations", ("str(7)", "hex(7)", "sz", "expand_sz"),
-                             lambda value: True)["result"] for key in SESSION_MANAGERS]
-        pending = True if "passed" in found else None if "uninspected" in found else False
+        checks = [value_check(key, "PendingFileRenameOperations", ("str(7)", "hex(7)", "sz", "expand_sz"),
+                              lambda value: True) for key in SESSION_MANAGERS]
+        pending_detail = [check.get("reason", check["result"]) for check in checks]
+        if any(check["result"] == "passed" for check in checks):
+            pending = True
+        elif all(check["result"] == "absent" or check.get("reason") == "value-missing" for check in checks):
+            pending = False  # The key or the value is simply not there.
+        # Otherwise (unexpected type, duplicate key, unreadable): unknown, never "no pending rename".
 
     traces = {}
     for directory in recipe["trace_directories"]:
@@ -374,9 +418,11 @@ def inspect_dependency_state(compatdata, recipe):
         result["items"][group] = {key: value for key, value in items.items() if value["result"] != "passed"}
         result["items"][group + "-passed-count"] = sum(item["result"] == "passed" for item in items.values())
     result["trace_directories"] = traces
+    result["product_traces"] = product_traces
     result["pending_file_rename_operations"] = pending
+    result["pending_file_rename_detail"] = pending_detail
     groups = result["groups"].values()
-    trace_states = {item["result"] for item in traces.values()}
+    trace_states = {item["result"] for item in (*traces.values(), *product_traces.values())}
     if "uninspected" in groups or "uninspected" in trace_states:
         state = "uninspected"
     elif incompatible:

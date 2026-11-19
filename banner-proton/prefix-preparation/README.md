@@ -693,9 +693,18 @@ machine), the UCManSvc service type/start/image, and the MSI Class-table COM ent
 in the 64-bit and 32-bit registry views. Only recipe-listed keys and value names of
 `system.reg` are interpreted; other data is not kept or exported, and `user.reg` is
 not read. Links, hard links, special files and malformed or duplicated registry
-data make an item failed or the whole state `uninspected`, never `absent`. A pending
-file rename keeps the state unverified. The Unix exit status is recorded only:
+data make an item failed or the whole state `uninspected`, never `absent`. Further product
+traces (32-bit Uninstall view, Windows Installer product keys, UpgradeCode
+relations) prevent `absent`; another product under the same UpgradeCode makes the
+state `incompatible`. The registry must decode as strict UTF-8. A pending file
+rename keeps the state unverified, and an unexpected value type makes it unknown. The Unix exit status is recorded only:
 Windows exit codes such as 1602 or 3010 cannot be observed through it.
+
+A new attempt is planned only after no record, a cancelled-absent or
+stopped-before-installer record, a record that never reached the installer, or an
+interrupted one; a failed or completed installer record, or any unreadable record,
+blocks it for review. Prefix allocation is measured from metadata before and after
+the installer and recorded with its growth.
 
 Timeouts never kill a process; `q` leaves the child running and records
 `needs-user`, not a cancellation. Records live in the private `dependency-installs`

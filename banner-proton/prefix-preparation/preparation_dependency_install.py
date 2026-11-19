@@ -47,6 +47,7 @@ from preparation_softdenchi_recipe import (
 )
 from preparation_store import PrivateStore
 from preparation_trial import _new_private
+from preparation_trial_audit import measure_prefix
 
 SCOPE = "managed-prefix-dependency-installation"
 RECORDS = "dependency-installs"
@@ -57,6 +58,8 @@ STATUSES = ("running", "needs-user", "failed", "stopped-before-installer", "canc
             "incompatible", "installed-unverified", "present-verified")
 PHASES = ("planned", "gui-check-spawned", "gui-check-exited", "gui-check-stopped", "gui-check-not-confirmed",
           "installer-staged", "installer-spawned", "installer-exited", "stop-observed", "post-inspected")
+PRE_INSTALLER = frozenset(("planned", "gui-check-spawned", "gui-check-exited", "gui-check-stopped", "gui-check-not-confirmed",
+                           "installer-staged"))
 POST_STATUS = {"present-verified": "present-verified", "present-unverified": "installed-unverified", "partial": "partial",
                "incompatible": "incompatible", "absent": "cancelled-absent", "uninspected": "needs-user"}
 
@@ -80,7 +83,7 @@ def validate_install_record(record):
                     "handler", "recipe_revision", "recipe_digest", "asset_sha256", "input_digest", "previous_install_id",
                     "phase", "status", "gui_check", "installer", "pre_state", "post_state", "runtime_execution_verified",
                     "device_namespace_verified", "preparation_complete"),
-           ("post_inspection", "stop_observation", "settings_identity_unchanged", "error"))
+           ("post_inspection", "stop_observation", "settings_identity_unchanged", "prefix_allocation", "error"))
     require(type(record["schema_version"]) is int and record["schema_version"] == 1 and record["scope"] == SCOPE,
             "unsupported installation record")
     require(type(record["tool_version"]) is str and 0 < len(record["tool_version"]) <= 64, "invalid installation version")
@@ -136,10 +139,23 @@ def _recheck_evidence(store_root, record, prefix_version):
 
 
 def _installations(store_root, key):
+    """Valid records of this registration (oldest first) and the count of unreadable records."""
     with PrivateStore(store_root) as store:
-        items = [item for item in store.inventory()["dependency_installs"]
-                 if item.get("status") != "invalid" and item.get("app_id") == key]
-    return sorted(items, key=lambda item: item["created_ns"])
+        listed = store.inventory()["dependency_installs"]
+    invalid = sum(item.get("status") == "invalid" for item in listed)
+    items = [item for item in listed if item.get("status") != "invalid" and item.get("app_id") == key]
+    return sorted(items, key=lambda item: item["created_ns"]), invalid
+
+
+def retry_blockers(latest, invalid):
+    """A new attempt follows only a cancelled, pre-installer or interrupted record (design section 7)."""
+    if invalid:
+        return ["invalid-installation-record-present"]
+    if latest is None or latest["status"] in ("cancelled-absent", "stopped-before-installer"):
+        return []
+    if latest["phase"] in PRE_INSTALLER or latest["status"] in ("running", "needs-user"):
+        return []
+    return ["previous-installation-" + latest["status"] + "-review-required"]
 
 
 @dataclass(frozen=True)
@@ -197,8 +213,9 @@ def plan_dependency_install(*, record, record_sha256, config, directory, rendere
     pre = inspect_dependency_state(base.compatdata, recipe)
     if pre["state"] != "absent":
         blockers.append("dependency-state-" + pre["state"] + "-preserve-and-inspect")
-    previous = _installations(base.store_root, record["app_id"])
+    previous, invalid = _installations(base.store_root, record["app_id"])
     latest = previous[-1] if previous else None
+    blockers.extend(retry_blockers(latest, invalid))
     home = safe_path(home)
     inputs_root = safe_path(base.work.parent / "inputs", home)
     size = spec["expected_size"]
@@ -365,6 +382,15 @@ class DependencyInstallSession:
         self._check_staged(target, measured)
         return target
 
+    def _measure(self):
+        """Metadata-only prefix allocation; an unmeasurable prefix is recorded, never fatal."""
+        try:
+            value = measure_prefix(self.plan.recheck.compatdata)
+            return {key: value[key] for key in ("entries", "regular_files", "symlinks_not_followed",
+                                                "logical_file_bytes", "allocated_file_bytes")}
+        except (OSError, ValueError) as error:
+            return {"status": "uninspected", "error_class": type(error).__name__}
+
     def _check_staged(self, target, measured=None):
         boot = self.plan.recipe["bootstrap"]
         with regular_open(target, INPUT_LIMITS["pe"]) as stream:
@@ -382,6 +408,7 @@ class DependencyInstallSession:
             self._clear()
             self.store.cache_asset(self.plan.spec, self.plan.asset_root)
             self.staged = self._stage()
+            self.record["prefix_allocation"] = {"before": self._measure(), "after": None}
             self.record.update(phase="installer-staged")
             self.record["installer"]["status"] = "staged"
             self._save()
@@ -425,6 +452,13 @@ class DependencyInstallSession:
                 post = {**post, "state": "uninspected", "concurrent_process_observed": True}
         except (OSError, ValueError, TypeError, KeyError) as error:
             post = {"state": "uninspected", "error_class": type(error).__name__}
+        allocation = self.record.get("prefix_allocation") or {"before": None}
+        allocation["after"] = self._measure()
+        before, after = allocation["before"], allocation["after"]
+        allocation["growth_bytes"] = (after["allocated_file_bytes"] - before["allocated_file_bytes"]
+                                      if before and after and "allocated_file_bytes" in before and "allocated_file_bytes" in after
+                                      else None)
+        self.record["prefix_allocation"] = allocation
         self.record.update(phase="post-inspected", post_state=post["state"], post_inspection=post)
         status = POST_STATUS[post["state"]]
         if errors or self.record["settings_identity_unchanged"] is not True:

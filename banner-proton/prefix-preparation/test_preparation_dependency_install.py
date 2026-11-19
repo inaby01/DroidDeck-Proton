@@ -212,6 +212,48 @@ class StateTests(unittest.TestCase):
         self.registry.write_text('NOT A REGISTRY\n')
         self.assertEqual(state.inspect_dependency_state(self.compat, self.recipe)['state'], 'uninspected')
 
+    def test_other_product_traces_are_never_absent(self):
+        product = softdenchi_recipe()['product']
+        packed_product, packed_upgrade = state.packed_guid(product['product_code']), state.packed_guid(product['upgrade_code'])
+        only32 = registry_path('Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + product['product_code'])
+        self.registry.write_text(f'WINE REGISTRY Version 2\n[{only32}] 1\n"DisplayVersion"="5.0.9.0"\n')
+        result = state.inspect_dependency_state(self.compat, self.recipe)
+        self.assertEqual(result['state'], 'partial')
+        self.assertEqual(result['product_traces']['uninstall-32bit-view']['result'], 'present')
+        upgrade = registry_path('Software\\Classes\\Installer\\UpgradeCodes\\' + packed_upgrade)
+        self.registry.write_text(f'WINE REGISTRY Version 2\n[{upgrade}] 1\n"{"0" * 32}"=""\n')
+        self.assertEqual(state.inspect_dependency_state(self.compat, self.recipe)['state'], 'incompatible')
+        self.registry.write_text('WINE REGISTRY Version 2\n')
+        self.install(registry=wine_registry() + f'[{upgrade}] 1\n"{packed_product}"=""\n')
+        result = state.inspect_dependency_state(self.compat, self.recipe)
+        self.assertEqual(result['state'], 'present-verified')
+        self.assertEqual(result['product_traces']['upgrade-code-classes']['related_products'], 0)
+
+    def test_unexpected_pending_rename_type_is_unknown_not_clear(self):
+        self.install(registry=wine_registry() + '[System\\\\ControlSet001\\\\Control\\\\Session Manager] 1\n'
+                     '"PendingFileRenameOperations"=dword:00000001\n')
+        result = state.inspect_dependency_state(self.compat, self.recipe)
+        self.assertIsNone(result['pending_file_rename_operations'])
+        self.assertEqual(result['state'], 'present-unverified')
+        self.assertIn('value-type-differs', result['pending_file_rename_detail'])
+
+    def test_invalid_utf8_registry_is_uninspected(self):
+        self.registry.write_bytes(b'WINE REGISTRY Version 2\n[Software\\\\Wow6432Node\\\\Palti\xffosoft] 1\n')
+        self.assertEqual(state.inspect_dependency_state(self.compat, self.recipe)['state'], 'uninspected')
+
+    def test_retry_policy_follows_only_cancelled_pre_installer_or_interrupted_records(self):
+        def record(status, phase):
+            return {'status': status, 'phase': phase}
+        self.assertEqual(dep.retry_blockers(None, 0), [])
+        for allowed in (record('cancelled-absent', 'post-inspected'), record('stopped-before-installer', 'gui-check-stopped'),
+                        record('failed', 'gui-check-exited'), record('needs-user', 'installer-spawned'),
+                        record('running', 'installer-exited')):
+            self.assertEqual(dep.retry_blockers(allowed, 0), [], allowed)
+        for blocked in (record('failed', 'post-inspected'), record('failed', 'installer-spawned'),
+                        record('present-verified', 'post-inspected'), record('partial', 'post-inspected')):
+            self.assertTrue(dep.retry_blockers(blocked, 0), blocked)
+        self.assertEqual(dep.retry_blockers(None, 1), ['invalid-installation-record-present'])
+
     def test_registry_line_limit_is_enforced(self):
         with patch.object(state, 'MAX_LOGICAL_LINE', 64):
             self.registry.write_text('WINE REGISTRY Version 2\n[Software\\\\X] 1\n"a"="' + 'x' * 100 + '"\n')
@@ -328,6 +370,9 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(result['status'], 'present-verified', result)
         self.assertEqual(result['gui_check']['display_confirmed'], True)
         self.assertTrue(result['installer']['staged_unchanged'])
+        allocation = result['prefix_allocation']
+        self.assertGreaterEqual(allocation['growth_bytes'], 0)
+        self.assertGreater(allocation['after']['regular_files'], allocation['before']['regular_files'])
         self.assertFalse(result['preparation_complete'])
         commands = [call.args[0][1:] for call in spawned.call_args_list]
         self.assertEqual(commands[0], ('runinprefix', 'winver.exe'))
@@ -401,6 +446,28 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(result['status'], 'failed')
         self.assertFalse(result['settings_identity_unchanged'])
         self.assertIn('DUMMY_EXTERNAL_CHANGE', self.games_config.read_text())
+
+    def test_failed_installer_record_and_invalid_records_block_a_new_attempt(self):
+        self.use_installer(installer(files={}, registry=''))
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture):
+            session = self.install_session(store).start_gui_check()
+            session.wait_gui_check(10)
+            session.confirm_display(True)
+            session.start_installer()
+            session.process.wait(timeout=10)
+            self.games_config.write_text('{"DUMMY_EXTERNAL_CHANGE": true}')
+            self.assertEqual(session.wait_installer(1)['status'], 'failed')
+        self.games_config.write_bytes((self.f.fixture.game.settings / 'games.json').read_bytes())
+        plan = self.install_plan()
+        self.assertEqual(plan.pre_state['state'], 'absent')
+        self.assertIn('previous-installation-failed-review-required', plan.blockers)
+        records = self.f.store_root / dep.RECORDS
+        for item in records.glob('depinstall-*.json'):
+            item.unlink()
+        descriptor = os.open(records / 'depinstall-broken.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(descriptor, b'{"DUMMY": true}')
+        os.close(descriptor)
+        self.assertIn('invalid-installation-record-present', self.install_plan().blockers)
 
     def test_staged_copy_changed_after_staging_is_refused(self):
         with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture):
