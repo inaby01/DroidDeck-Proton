@@ -93,6 +93,7 @@ def classify_process(process):
 def summarize_lingering(inventory):
     """Exportable view: identity, parent, role and image basename/place only."""
     processes = [{"pid": p["pid"], "started": p["started"], "parent": p["parent"], "role": classify_process(p),
+                  "prefix_consistent": p["prefix_consistent"], "executable_id_known": p["executable_id"] is not None,
                   **describe_image(p["image"])} for p in inventory["processes"]]
     roles = {}
     for item in processes:
@@ -111,7 +112,7 @@ def proxy_stop_targets(first, second):
     require(first["unreadable_count"] == 0 and second["unreadable_count"] == 0, "unreadable process in prefix view")
     processes = second["processes"]
     by_pid = {p["pid"]: p for p in processes}
-    require(all(classify_process(p) != "other" for p in processes), "unclassified process in prefix view")
+    _view_is_explained(second)
     proxies = [p for p in processes if classify_process(p) == "softdenchi-proxy"]
     require(proxies, "no SdProxy remaining")
     for proxy in proxies:
@@ -126,33 +127,69 @@ def proxy_stop_targets(first, second):
         services = by_pid.get(cursor["parent"])
         require(services is not None and services["started"] <= cursor["started"] and services["image"] == SERVICES_IMAGE,
                 "service origin not confirmed")
-    return [(p["pid"], p["started"]) for p in proxies]
+        # The Windows processes of one prefix share the loader; an unreadable or different
+        # executable identity is not explained by this tree.
+        chain = [proxy, cursor, services]
+        walker = proxy
+        while classify_process(walker) == "softdenchi-proxy":
+            chain.append(walker)
+            walker = by_pid[walker["parent"]]
+        identities = {item["executable_id"] for item in chain}
+        require(None not in identities and len(identities) == 1, "executable identity not confirmed")
+    return sorted(((p["pid"], p["started"]) for p in proxies), key=lambda key: key[1])
 
 
-def signal_proxies(compatdata, targets, proc_root, sender=None):
-    """Pin each target with a pidfd, re-read the prefix inventory, then send SIGTERM only.
+def _view_is_explained(inventory):
+    """Nothing unreadable, unclassified or with a conflicting prefix environment."""
+    require(inventory["unreadable_count"] == 0, "unreadable process in prefix view")
+    processes = inventory["processes"]
+    require(all(p["prefix_consistent"] for p in processes), "conflicting prefix environment")
+    require(all(classify_process(p) != "other" for p in processes), "unclassified process in prefix view")
 
-    ``sender`` replaces the kernel call in tests; production always uses pidfds,
-    so a reused PID cannot redirect the signal to another process.
+
+def signal_proxies(compatdata, targets, proc_root, sender=None, log=None):
+    """Pin the confirmed batch with pidfds, revalidate everything, then send SIGTERM one by one.
+
+    After pinning, two fresh inventories must yield exactly the confirmed batch under
+    the full stop conditions. Before each later send the view is read again: anything
+    unreadable, unclassified, with a conflicting prefix, or a SdProxy outside the batch
+    aborts. A pinned target that has already exited is recorded as gone. ``log`` is
+    filled per target as it happens, so a partial result survives an exception.
+    ``sender`` replaces the kernel call in tests; production always uses pidfds.
     """
+    log = [] if log is None else log
     open_pidfd, send = getattr(os, "pidfd_open", None), getattr(signal, "pidfd_send_signal", None)
     require(sender is not None or (callable(open_pidfd) and callable(send)), "pidfd API unavailable")
+    batch = sorted(targets, key=lambda key: key[1])
     descriptors = {}
     try:
         if sender is None:
-            for key in targets:
+            for key in batch:
                 descriptors[key] = open_pidfd(key[0], 0)
-        current = {(p["pid"], p["started"]): p for p in inventory_processes(compatdata, proc_root)["processes"]}
-        require(all(key in current and current[key]["image"] == PROXY_IMAGE for key in targets), "target changed before signal")
-        for key in targets:
-            if sender is None:
-                send(descriptors[key], signal.SIGTERM, None, 0)
-            else:
-                sender(key)
+        first, second = inventory_processes(compatdata, proc_root), inventory_processes(compatdata, proc_root)
+        require(proxy_stop_targets(first, second) == batch, "stop candidates changed")
+        for index, key in enumerate(batch):
+            if index:
+                current = inventory_processes(compatdata, proc_root)
+                _view_is_explained(current)
+                proxies = {(p["pid"], p["started"]) for p in current["processes"] if classify_process(p) == "softdenchi-proxy"}
+                require(proxies <= set(batch), "new SdProxy appeared")
+                if key not in proxies:
+                    log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal"})
+                    continue
+            try:
+                if sender is None:
+                    send(descriptors[key], signal.SIGTERM, None, 0)
+                else:
+                    sender(key)
+            except ProcessLookupError:
+                log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal"})
+                continue
+            log.append({"pid": key[0], "started": key[1], "result": "sigterm-sent"})
     finally:
         for descriptor in descriptors.values():
             os.close(descriptor)
-    return len(targets)
+    return sum(item["result"] == "sigterm-sent" for item in log)
 
 
 def validate_dependency_config(value):
@@ -479,8 +516,15 @@ class DependencyInstallSession:
             except Invalid as error:
                 entry["stop"] = {"result": "refused", "reason": str(error)}
                 return self._save()
-            entry["stop"] = {"result": "sigterm-sent", "targets": signal_proxies(compatdata, targets, proc_root, sender),
-                             "signal": "SIGTERM", "forced_kill": False}
+            entry["stop"] = {"result": "sending", "planned": len(targets), "signals": [], "signal": "SIGTERM",
+                             "forced_kill": False}
+            self._save()
+            try:
+                entry["stop"]["sent"] = signal_proxies(compatdata, targets, proc_root, sender, entry["stop"]["signals"])
+            except (OSError, ValueError) as error:
+                entry["stop"].update(result="aborted", **describe_error(error, "lingering-proxy-signal"))
+                return self._save()
+            entry["stop"]["result"] = "sigterm-sent"
             self._save()
             observation = self.stop.check()
             deadline = time.monotonic() + PROXY_STOP_WAIT
@@ -936,9 +980,15 @@ def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sende
     if not _confirm_proxy_stop(len(targets), stream, output):
         entry["stop"] = {"result": "declined"}
         return entry
-    RecheckSession(base, store, None, None, stop)._guard()
-    entry["stop"] = {"result": "sigterm-sent", "targets": signal_proxies(base.compatdata, targets, stop.proc_root, sender),
-                     "signal": "SIGTERM", "forced_kill": False}
+    entry["stop"] = {"result": "sending", "planned": len(targets), "signals": [], "signal": "SIGTERM", "forced_kill": False}
+    try:
+        RecheckSession(base, store, None, None, stop)._guard()
+        entry["stop"]["sent"] = signal_proxies(base.compatdata, targets, stop.proc_root, sender, entry["stop"]["signals"])
+    except (OSError, ValueError) as error:
+        entry["stop"].update(result="aborted", **describe_error(error, "lingering-proxy-signal"))
+        sent = sum(item["result"] == "sigterm-sent" for item in entry["stop"]["signals"])
+        print(f"停止を中止しました（{text(entry['stop']['reason'] or entry['stop']['error_class'])}）。送信済み {sent}件。", file=output)
+        return entry
     observation = stop.check()
     deadline = time.monotonic() + PROXY_STOP_WAIT
     while not observation["clear_in_view"] and time.monotonic() < deadline:

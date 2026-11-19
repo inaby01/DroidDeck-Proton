@@ -35,6 +35,11 @@ def _identity(raw, pid):
 
 
 def _matches(raw, compatdata):
+    return _prefix_fields(raw, compatdata)[0]
+
+
+def _prefix_fields(raw, compatdata):
+    """(any field matches, every present field matches) for STEAM_COMPAT_DATA_PATH and WINEPREFIX."""
     require(not raw or raw.endswith(b"\0"), "truncated process environment")
     wanted = {b"STEAM_COMPAT_DATA_PATH": str(compatdata), b"WINEPREFIX": str(compatdata / "pfx")}
     selected = {}
@@ -43,7 +48,8 @@ def _matches(raw, compatdata):
         if sep and key in wanted:
             require(key not in selected, "duplicate process prefix field")
             selected[key] = os.fsdecode(value)
-    return any(os.path.isabs(value) and os.path.realpath(value) == wanted[key] for key, value in selected.items())
+    results = [os.path.isabs(value) and os.path.realpath(value) == wanted[key] for key, value in selected.items()]
+    return any(results), bool(results) and all(results)
 
 
 def observe_processes(compatdata, proc_root=Path("/proc")):
@@ -164,15 +170,24 @@ def inventory_processes(compatdata, proc_root=Path("/proc")):
                     if os.fstat(descriptor).st_uid != owner:
                         continue
                     before = _parent_identity(_read(descriptor, "stat", 8192), entry.name)
-                    if before[0] in ("Z", "X") or not _matches(_read(descriptor, "environ", MAX_ENVIRON), compatdata):
+                    if before[0] in ("Z", "X"):
                         continue
+                    any_match, consistent = _prefix_fields(_read(descriptor, "environ", MAX_ENVIRON), compatdata)
+                    if not any_match:
+                        continue
+                    try:
+                        exe = os.stat("exe", dir_fd=descriptor)
+                        executable_id = f"{exe.st_dev}:{exe.st_ino}"
+                    except OSError:
+                        executable_id = None
                     argv0 = _read(descriptor, "cmdline", MAX_ARGV0 * 4).split(b"\0", 1)[0]
                     after = _parent_identity(_read(descriptor, "stat", 8192), entry.name)
                     if after[2] != before[2] or after[0] in ("Z", "X") or not argv0 or len(argv0) > MAX_ARGV0:
                         unreadable += 1
                         continue
                     image = windows_image(os.fsdecode(argv0))
-                    processes.append({"pid": int(entry.name), "started": after[2], "parent": after[1], "image": image})
+                    processes.append({"pid": int(entry.name), "started": after[2], "parent": after[1], "image": image,
+                                      "prefix_consistent": consistent, "executable_id": executable_id})
                 except FileNotFoundError:
                     continue
                 except (OSError, ValueError, UnicodeError):

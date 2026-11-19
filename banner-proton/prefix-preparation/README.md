@@ -722,9 +722,13 @@ PID, start time, parent, a role (`wineserver`, `wine-infrastructure`,
 coarse place. Environment values, arguments and other paths are not kept.
 
 After an explicit confirmation, SIGTERM is sent only to SdProxy processes whose
-parent chain reaches UCManSvc under `services.exe`, with consistent start times,
-from two identical inventories without unreadable or unclassified processes. Each
-target is pinned with a pidfd and re-read before the signal. There is no SIGKILL,
+parent chain reaches UCManSvc under `services.exe`, with consistent start times and
+one shared executable identity, from two identical inventories without unreadable,
+unclassified or prefix-conflicting processes (both prefix variables, when present,
+must name this prefix). The batch is pinned with pidfds and the full conditions are
+evaluated again after pinning; before each further signal the view is read again
+and anything new or unexplained aborts. A target that already exited is recorded as
+gone, and every per-target result is kept even when the stop aborts (0.24.1). There is no SIGKILL,
 no `wineserver -k` and no other process, prefix or game is signalled. If the view
 does not clear within a bounded wait, the state stays `needs-user`. After a clear
 view the installation continues with the offline post-inspection; menu 9 then

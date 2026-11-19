@@ -504,14 +504,22 @@ class InstallTests(TRIAL['TrialTests']):
     SERVICE = 'C:\\Program Files (x86)\\SoftDenchi\\UCManSvc.exe'
     PROXY = 'C:\\Program Files (x86)\\SoftDenchi\\SdProxy.exe'
 
-    def fake_process(self, pid, image, parent, started):
+    def fake_process(self, pid, image, parent, started, exe='loader', environ=None):
         folder = self.f.proc / str(pid)
         folder.mkdir()
         tail = ['S', str(parent)] + ['0'] * 17 + [str(started)] + ['0'] * 5
         (folder / 'stat').write_text(f'{pid} (fake) ' + ' '.join(tail))
         compat = self.f.steam / 'steamapps/compatdata/43'
-        (folder / 'environ').write_bytes(b'WINEPREFIX=' + str(compat / 'pfx').encode() + b'\0DUMMY_SECRET=1\0')
+        if environ is None:
+            environ = (b'STEAM_COMPAT_DATA_PATH=' + str(compat).encode() + b'\0WINEPREFIX=' + str(compat / 'pfx').encode() +
+                       b'\0DUMMY_SECRET=1\0')
+        (folder / 'environ').write_bytes(environ)
         (folder / 'cmdline').write_bytes(image.encode() + b'\0--DUMMY_ARGUMENT\0')
+        if exe is not None:
+            target = self.home / ('fake-' + exe)
+            if not target.exists():
+                target.write_bytes(b'synthetic loader, never executed')
+            (folder / 'exe').symlink_to(target)
         return pid, started
 
     def lingering_tree(self, proxy_parent=None, services_started=10):
@@ -557,9 +565,10 @@ class InstallTests(TRIAL['TrialTests']):
             self.assertEqual((sorted(planned), reason), (sorted(targets), None))
             self.assertEqual(sent, [])
             result = session.stop_lingering_proxies(sender)
-        self.assertEqual(sorted(sent), sorted(targets))
-        self.assertEqual(result['lingering']['stop'], {'result': 'sigterm-sent', 'targets': 2, 'signal': 'SIGTERM',
-                                                       'forced_kill': False})
+        self.assertEqual(sent, [targets[0]])  # The child had exited with its parent: recorded as gone, not signalled.
+        stop = result['lingering']['stop']
+        self.assertEqual((stop['result'], stop['planned'], stop['sent'], stop['forced_kill']), ('sigterm-sent', 2, 1, False))
+        self.assertEqual([item['result'] for item in stop['signals']], ['sigterm-sent', 'gone-before-signal'])
         self.assertEqual(result['status'], 'present-verified')
         self.assertEqual(result['phase'], 'post-inspected')
         text = json.dumps(result)
@@ -584,6 +593,59 @@ class InstallTests(TRIAL['TrialTests']):
                     self.assertIsNone(planned)
                     self.assertEqual(found, reason)
                     self.assertEqual(sent, [])
+        self.clear_fake()
+
+    def test_conflicting_prefix_environment_or_executable_identity_refuses_the_stop(self):
+        compat = self.f.steam / 'steamapps/compatdata/43'
+        cases = ({'environ': b'STEAM_COMPAT_DATA_PATH=' + str(compat).encode() + b'\0WINEPREFIX=/DUMMY_OTHER/pfx\0'},
+                 {'exe': 'other-loader'}, {'exe': None})
+        reasons = ('conflicting prefix environment', 'executable identity not confirmed', 'executable identity not confirmed')
+        for case, reason in zip(cases, reasons):
+            with self.subTest(case=case):
+                self.clear_fake()
+                self.lingering_tree()
+                (self.f.proc / '900006').rename(self.f.proc / '900099')
+                for item in (self.f.proc / '900099').iterdir():
+                    item.unlink()
+                (self.f.proc / '900099').rmdir()
+                self.fake_process(900006, self.PROXY, 900005, 40, **case)
+                with self.f.store() as store:
+                    _, planned, found = self.install_session(store).preview_proxy_stop()
+                self.assertIsNone(planned)
+                self.assertEqual(found, reason)
+        self.clear_fake()
+
+    def test_stop_is_revalidated_after_confirmation_and_partial_sends_are_kept(self):
+        plan = self.install_plan().recheck
+        stop = ProcessStopCheck(plan.compatdata, self.f.proc)
+        self.lingering_tree()
+
+        def confirm_then_change(count, stream, output):
+            self.fake_process(900007, 'C:\\users\\DUMMY_PRIVATE\\tool.exe', 900002, 50)
+            return True
+        with self.f.store() as store, patch.object(dep, '_confirm_proxy_stop', side_effect=confirm_then_change):
+            entry = dep.offer_reinspection_proxy_stop(plan, store, stop, io.StringIO(), io.StringIO(), str,
+                                                      sender=lambda key: self.fail('revalidation must refuse'))
+        self.assertEqual(entry['stop']['result'], 'aborted')
+        self.assertEqual(entry['stop']['reason'], 'unclassified process in prefix view')
+        self.assertEqual(entry['stop']['signals'], [])
+        self.clear_fake()
+        targets = self.lingering_tree()
+
+        def fail_second(key):
+            if key == targets[1]:
+                raise PermissionError('DUMMY_PRIVATE')
+        log = []
+        with self.assertRaises(PermissionError):
+            dep.signal_proxies(plan.compatdata, targets, self.f.proc, fail_second, log)
+        self.assertEqual(log, [{'pid': targets[0][0], 'started': targets[0][1], 'result': 'sigterm-sent'}])
+        output = io.StringIO()
+        with self.f.store() as store, patch.object(dep, '_confirm_proxy_stop', return_value=True):
+            entry = dep.offer_reinspection_proxy_stop(plan, store, stop, io.StringIO(), output, str, sender=fail_second)
+        self.assertEqual(entry['stop']['result'], 'aborted')
+        self.assertEqual([item['result'] for item in entry['stop']['signals']], ['sigterm-sent'])
+        self.assertIn('送信済み 1件', output.getvalue())
+        self.assertNotIn('DUMMY_PRIVATE', json.dumps(entry))
         self.clear_fake()
 
     def test_target_change_before_signal_and_remaining_processes_are_not_success(self):
