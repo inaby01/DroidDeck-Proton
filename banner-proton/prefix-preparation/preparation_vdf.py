@@ -19,7 +19,9 @@ class Entry:
 
 
 class Document:
-    def __init__(self, raw):
+    def __init__(self, raw, *, value_limit=MAX_STRING):
+        require(type(value_limit) is int and MAX_STRING <= value_limit <= MAX_JSON, "invalid VDF value limit")
+        self.value_limit = value_limit
         require(len(raw) <= MAX_JSON, "VDF too large")
         self.text = raw.decode("utf-8")
         self.tokens = []
@@ -35,10 +37,10 @@ class Document:
         self.root = self._block(0)
 
     @staticmethod
-    def _quoted(token):
+    def _quoted(token, limit=MAX_STRING):
         require(token.startswith('"'), "expected VDF string")
         value = re.sub(r'\\(["\\])', r'\1', token[1:-1])
-        require(len(value.encode("utf-8")) <= MAX_STRING, "VDF string too long")
+        require(len(value.encode("utf-8")) <= limit, "VDF string too long")
         return value
 
     def _block(self, depth, opening=None):
@@ -58,7 +60,7 @@ class Document:
                 node = self._block(depth + 1, following)
                 node.start = start
             else:
-                node = Entry(self._quoted(following[0]), start, following[2], following[1])
+                node = Entry(self._quoted(following[0], self.value_limit), start, following[2], following[1])
             result[key] = node
         require(opening is None, "unclosed VDF block")
         return Entry(result, 0, len(self.text), 0, len(self.text))
@@ -85,7 +87,7 @@ def patch_game_mapping(raw, registration_id, tool):
     key = app_id(registration_id)
     require(key == registration_id, "canonical unsigned game ID required")
     require(type(tool) is str and TOOL_ID.fullmatch(tool), "invalid tool ID")
-    document = Document(raw)
+    document = Document(raw, value_limit=MAX_JSON)
     steam = document.node(("InstallConfigStore", "Software", "Valve", "Steam"))
     require(type(steam.value) is dict, "Steam VDF block required")
     mapping = steam.value.get("CompatToolMapping")
@@ -110,5 +112,5 @@ def patch_game_mapping(raw, registration_id, tool):
     result = text.encode("utf-8")
     require(len(result) <= MAX_JSON, "result VDF too large")
     # Parse the candidate before it can reach a writer.
-    parse_vdf(result)
+    Document(result, value_limit=MAX_JSON)
     return result

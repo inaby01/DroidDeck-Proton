@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Target-only binding against disposable settings, never a real game or helper."""
 
+import ast
 import copy
 import hashlib
 import json
@@ -16,9 +17,9 @@ from unittest.mock import patch
 FIXTURES = runpy.run_path(str(Path(__file__).with_name("test_prepare_game.py")))
 ENGINE = FIXTURES["ENGINE"]
 import preparation_binding as binding
-from preparation_common import Invalid
+from preparation_common import MAX_DEPTH, MAX_JSON, MAX_STRING, Invalid
 from preparation_store import PrivateStore
-from preparation_vdf import parse_vdf, patch_game_mapping
+from preparation_vdf import Document, parse_vdf, patch_game_mapping
 
 
 class BindingTests(unittest.TestCase):
@@ -102,6 +103,56 @@ class BindingTests(unittest.TestCase):
         report = binding.inspect_binding_inputs(self.steam, self.settings, self.key, self.directory)
         self.assertEqual(report["checks"]["registered-tool"]["check"], "binding-tool-read-proton")
         self.assertEqual(report["checks"]["target-mapping"]["status"], "accepted")
+
+    def test_preserves_long_unrelated_values_in_binding_plan_and_guarded_writer(self):
+        value = "DUMMY_PRIVATE_VALUE_" * 500
+        self.config.write_text(self.config.read_text().replace('"Secret"', '"Untouched" "' + value + '" "Secret"'))
+        before = self.config.read_bytes()
+        plan = self.plan()
+        self.assertIn(value.encode(), plan.after["config"])
+        self.assertEqual(patch_game_mapping(plan.after["config"], self.key, "Example-Proton"), plan.after["config"])
+        legacy = binding.inspect_steam_config(self.steam)
+        self.assertEqual(legacy["checks"]["legacy-string-limit"]["condition"], "vdf-string-length")
+        self.assertEqual(legacy["checks"]["preserve-bounded-values"]["status"], "accepted")
+        self.assertEqual(legacy["input_sha256"], hashlib.sha256(before).hexdigest())
+        self.assertNotIn(value, json.dumps(legacy))
+        self.assertNotIn(value, json.dumps(plan.summary()))
+        self.apply(plan)
+        self.assertEqual(self.config.read_bytes(), plan.after["config"])
+
+    def test_long_vdf_keys_still_rejected_and_default_parser_stays_strict(self):
+        for raw in (('"' + 'k' * (MAX_STRING + 1) + '" "v"').encode(),):
+            with self.assertRaises(Invalid):
+                Document(raw, value_limit=MAX_JSON)
+        with self.assertRaises(Invalid):
+            Document(('"key" "' + 'v' * (MAX_STRING + 1) + '"').encode())
+        for limit in (MAX_JSON + 1, MAX_STRING - 1, True):
+            with self.assertRaises(Invalid):
+                Document(b'"key" "value"', value_limit=limit)
+
+    def test_bounded_preservation_still_rejects_size_depth_duplicates_and_bad_syntax(self):
+        for raw in (b' ' * (MAX_JSON + 1),
+                    (('"k" {' * (MAX_DEPTH + 2)) + ('}' * (MAX_DEPTH + 2))).encode(),
+                    b'"key" "x" "key" "y"', b'"key" unquoted', b'}'):
+            with self.assertRaises(Invalid):
+                Document(raw, value_limit=MAX_JSON)
+
+    def test_every_vdf_validation_has_a_fixed_diagnostic_code(self):
+        tree = ast.parse(Path(binding.__file__).with_name("preparation_vdf.py").read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "require":
+                message = ast.literal_eval(node.args[1])
+                with self.subTest(message=message):
+                    self.assertNotEqual(binding.binding_error(Invalid(message))["condition"], "input-rejected")
+
+    def test_parser_diagnostic_handles_missing_and_non_utf8_without_exposing_data(self):
+        self.config.unlink()
+        self.assertIn("error", binding.inspect_steam_config(self.steam))
+        self.config.write_bytes(b'"PRIVATE_KEY" "\xffPRIVATE_VALUE"')
+        result = binding.inspect_steam_config(self.steam)
+        for item in result["checks"].values():
+            self.assertEqual(item["condition"], "text-encoding")
+        self.assertNotIn("PRIVATE", json.dumps(result))
 
     def test_changes_only_target_mapping_and_preserves_other_config_bytes(self):
         plan = self.plan()
@@ -277,7 +328,7 @@ class BindingTests(unittest.TestCase):
 sys.path.insert(0,sys.argv[1])
 from pathlib import Path
 from preparation_binding import droiddeck_lock
-from preparation_common import Invalid
+from preparation_common import MAX_DEPTH, MAX_JSON, MAX_STRING, Invalid
 try:
     with droiddeck_lock(Path(sys.argv[2])):
         print("acquired")

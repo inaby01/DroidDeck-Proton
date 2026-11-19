@@ -18,7 +18,12 @@ import unicodedata
 from pathlib import Path
 
 from preparation_assets import digest_json, exe_identity
-from preparation_binding import binding_error, inspect_binding_inputs, plan_binding
+from preparation_binding import (
+    binding_error,
+    inspect_binding_inputs,
+    inspect_steam_config,
+    plan_binding,
+)
 from preparation_common import (
     MAX_REPORT,
     VERSION,
@@ -189,6 +194,7 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
             if os.path.lexists(private):
                 report["blockers"].append("private-launch-path-already-exists")
         if report["installation_plan"]["action"] == "reuse-verified-tree":
+            report["steam_config_validation"] = inspect_steam_config(steam)
             try:
                 report["binding_plan"] = checked("binding-plan", plan_binding,
                     steam, settings, key, installation.customization.directory).summary()

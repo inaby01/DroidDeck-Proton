@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from preparation_common import (
     MAX_JSON,
+    MAX_STRING,
     SHA256,
     VERSION,
     Invalid,
@@ -124,6 +125,17 @@ def binding_error(error):
         "expected VDF string": "vdf-string",
         "invalid VDF tail": "vdf-tail",
         "unclosed VDF block": "vdf-unclosed",
+        "VDF string too long": "vdf-string-length",
+        "VDF nesting too deep": "vdf-depth",
+        "unexpected VDF close": "vdf-unexpected-close",
+        "invalid VDF value limit": "vdf-value-limit",
+        "canonical unsigned game ID required": "mapping-canonical-id",
+        "invalid tool ID": "mapping-tool-id",
+        "Steam VDF block required": "mapping-steam-block",
+        "result VDF too large": "mapping-result-size",
+        "mapping block required": "mapping-block",
+        "game mapping must be a block": "mapping-game-block",
+        "mapping name must be a string": "mapping-name-string",
         "unknown or missing fields": "object-fields",
         "unknown choices version": "choices-version",
         "invalid binding JSON": "json-encoding-or-structure",
@@ -144,7 +156,32 @@ def binding_error(error):
     }
     return {"check": getattr(error, "preparation_check", "binding-input"),
             "error_class": type(error).__name__, "errno": getattr(error, "errno", None),
-            "condition": conditions.get(str(error), "input-rejected")}
+            "condition": "text-encoding" if isinstance(error, UnicodeError) else conditions.get(str(error), "input-rejected")}
+
+
+def inspect_steam_config(steam):
+    """Compare parser limits on one bounded read, without disclosing values.
+
+    This independent observation is diagnostic only, never writer authorization.
+    Long scalar values may be preserved; keys and identifiers retain their limits.
+    """
+    report = {"scope": "independent-read-only-parser-checks", "coherent_plan": False,
+              "writes": [], "execution_authorized": False, "checks": {}}
+    try:
+        raw = checked("binding-read-config", _raw, safe_path(steam / "config/config.vdf", steam))
+        require(raw is not None, "existing config required")
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        report["error"] = binding_error(error)
+        return report
+    report["input_sha256"] = hashlib.sha256(raw).hexdigest()
+    report["input_bytes"] = len(raw)
+    for name, limit in (("legacy-string-limit", MAX_STRING), ("preserve-bounded-values", MAX_JSON)):
+        try:
+            Document(raw, value_limit=limit).node(STEAM_PATH)
+            report["checks"][name] = {"status": "accepted"}
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            report["checks"][name] = {"status": "rejected", **binding_error(error)}
+    return report
 
 
 def inspect_binding_inputs(steam, settings, registration_id, directory):
@@ -234,7 +271,7 @@ def plan_binding(steam, settings, registration_id, directory):
     games["games"][key] = wanted
     applied[key] = wanted
     state["games_applied"] = applied
-    steam_node = checked("binding-steam-config", lambda: Document(before["config"]).node(STEAM_PATH).value)
+    steam_node = checked("binding-steam-config", lambda: Document(before["config"], value_limit=MAX_JSON).node(STEAM_PATH).value)
     require(type(steam_node) is dict, "invalid Steam block")
     mapping_node = steam_node.get("CompatToolMapping")
     mapping = mapping_node.value if mapping_node is not None else {}

@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.16.1)
+# Prefix preparation: offline planning and local staging (0.16.2)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -509,3 +509,18 @@ Use the normal planning option to inspect an already placed tool. Reinstallation
 probe recreation and execution are unnecessary for this diagnostic step. Placement
 success alone does not establish Wine execution, prefix initialization, dependency
 installation or game compatibility.
+
+## Preserving bounded Steam scalar values (0.16.2)
+
+Steam config planning and candidate validation can preserve unrelated scalar values
+longer than 4096 bytes within the existing 1 MiB file bound. Keys retain the 4096
+byte limit; tool IDs, target IDs, depth, duplicate keys and quoted syntax checks
+remain restricted. Other VDF readers retain their original scalar limit. Only the
+target mapping is edited by the internal guarded writer, which remains unexposed.
+
+For an installed tree, the read-only report compares the old scalar limit and the
+preservation limit on the same bounded read. It records fixed rejection codes, byte
+count and input digest, without settings values. These observations do not authorize
+execution or settings writes. Every VDF rejection now has a fixed diagnostic code;
+the local regression checks this coverage. Device validation of this change remains
+separate from local fixture tests.

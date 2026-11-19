@@ -148,6 +148,20 @@ class SelectionTests(unittest.TestCase):
         self.assertNotIn("SECRET_VALUE", json.dumps(report))
         self.assertNotIn("private-secret", json.dumps(report))
 
+    def test_reuse_preserves_long_config_values_and_reports_both_parser_profiles(self):
+        self.fixture.install_fixture()
+        value = "DUMMY_PRIVATE_SCALAR" * 500
+        config = self.fixture.game.config
+        config.write_text(config.read_text().replace('"Secret"', '"Untouched" "' + value + '" "Secret"'))
+        before = self.fixture.game.snapshot()
+        report = self.plan()
+        self.assertEqual(report["binding_plan"]["payload"], "verified-expected-tree")
+        self.assertEqual(report["steam_config_validation"]["checks"]["legacy-string-limit"]["condition"], "vdf-string-length")
+        self.assertEqual(report["steam_config_validation"]["checks"]["preserve-bounded-values"]["status"], "accepted")
+        self.assertNotIn("binding-input-rejected", report["blockers"])
+        self.assertNotIn(value, json.dumps(report))
+        self.assertEqual(before, self.fixture.game.snapshot())
+
     def test_preparation_plan_preserves_mismatched_legacy_tool(self):
         legacy = self.fixture.install_fixture()
         (legacy / "proton").write_bytes(b"DUMMY_LEGACY_BINARY")
