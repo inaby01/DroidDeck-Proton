@@ -168,15 +168,23 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None):
                 descriptors[key] = open_pidfd(key[0], 0)
         first, second = inventory_processes(compatdata, proc_root), inventory_processes(compatdata, proc_root)
         require(proxy_stop_targets(first, second) == batch, "stop candidates changed")
+        confirmed = {(p["pid"], p["started"]): p for p in second["processes"] if (p["pid"], p["started"]) in batch}
         for index, key in enumerate(batch):
             if index:
                 current = inventory_processes(compatdata, proc_root)
                 _view_is_explained(current)
-                proxies = {(p["pid"], p["started"]) for p in current["processes"] if classify_process(p) == "softdenchi-proxy"}
+                by_key = {(p["pid"], p["started"]): p for p in current["processes"]}
+                proxies = {k for k, p in by_key.items() if classify_process(p) == "softdenchi-proxy"}
                 require(proxies <= set(batch), "new SdProxy appeared")
-                if key not in proxies:
+                if key not in by_key:
                     log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal"})
                     continue
+                # Only the parent may change (re-parenting after the parent exited); the
+                # image, prefix consistency and executable identity must be as confirmed.
+                now, then = by_key[key], confirmed[key]
+                require(now["image"] == then["image"] == PROXY_IMAGE and now["prefix_consistent"] and
+                        now["executable_id"] is not None and now["executable_id"] == then["executable_id"],
+                        "target changed before signal")
             try:
                 if sender is None:
                     send(descriptors[key], signal.SIGTERM, None, 0)
@@ -989,15 +997,23 @@ def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sende
         sent = sum(item["result"] == "sigterm-sent" for item in entry["stop"]["signals"])
         print(f"停止を中止しました（{text(entry['stop']['reason'] or entry['stop']['error_class'])}）。送信済み {sent}件。", file=output)
         return entry
-    observation = stop.check()
-    deadline = time.monotonic() + PROXY_STOP_WAIT
-    while not observation["clear_in_view"] and time.monotonic() < deadline:
-        time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+    entry["stop"]["result"] = "sigterm-sent"
+    try:
         observation = stop.check()
-    entry["stop"]["result"] = "stopped" if observation["clear_in_view"] else "sigterm-sent-processes-remain"
-    if not observation["clear_in_view"]:
-        entry["after_stop"] = summarize_lingering(inventory_processes(base.compatdata, stop.proc_root))
+        deadline = time.monotonic() + PROXY_STOP_WAIT
+        while not observation["clear_in_view"] and time.monotonic() < deadline:
+            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+            observation = stop.check()
+        entry["stop"]["result"] = "stopped" if observation["clear_in_view"] else "sigterm-sent-processes-remain"
+        if not observation["clear_in_view"]:
+            entry["after_stop"] = summarize_lingering(inventory_processes(base.compatdata, stop.proc_root))
+    except (OSError, ValueError) as error:
+        entry["stop"]["observation_error"] = describe_error(error, "lingering-proxy-observation")
     return entry
+
+
+def signals_sent(lingering):
+    return sum(item["result"] == "sigterm-sent" for item in ((lingering or {}).get("stop") or {}).get("signals", []))
 
 
 def _save_result(selection, directory, home, report, protected, output):
@@ -1024,7 +1040,7 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
     directory, environment, steam, settings, home = _context(directory, os.environ if environment is None else environment,
                                                              steam, settings, home)
     management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
-    protected = [steam, settings]
+    protected, lingering = [steam, settings], None
     try:
         selection.validate_selection_config(config)
         require(config.get("initialization_trial") is True and "dependency_installation" in config, "dependency installation not enabled")
@@ -1049,11 +1065,16 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
                   "app_id": record["app_id"], "lingering": lingering,
                   "inspection": inspection, "installation_history": history, "wine_started": False,
                   "installation_records_updated": False, "preparation_complete": False,
-                  "writes": [{"scope": "private-locks-and-result-json"}]}
+                  "writes": [{"scope": "private-locks-and-result-json"}] +
+                            ([{"scope": "sigterm-to-confirmed-sdproxy", "count": signals_sent(lingering)}]
+                             if signals_sent(lingering) else [])}
     except (OSError, ValueError, TypeError, KeyError) as error:
+        sent = signals_sent(lingering)
         report = {"mode": "managed-dependency-reinspection-result", "scope": SCOPE, "tool_version": VERSION,
-                  **describe_error(error, "dependency-reinspection"), "preparation_complete": False, "writes": []}
+                  **describe_error(error, "dependency-reinspection"), "lingering": lingering, "preparation_complete": False,
+                  "writes": [{"scope": "sigterm-to-confirmed-sdproxy", "count": sent}] if sent else []}
         print("検査停止: " + selection._text(report["check"]) + " / " + selection._text(report["reason"] or report["error_class"]),
               file=output)
-        print("読み取り検査は停止しました。変更はしていません。", file=output)
+        print(f"読み取り検査は停止しました。SdProxyへのSIGTERMは{sent}件送信済み、それ以外の変更はしていません。" if sent
+              else "読み取り検査は停止しました。変更はしていません。", file=output)
     return _save_result(selection, directory, home, report, protected, output)

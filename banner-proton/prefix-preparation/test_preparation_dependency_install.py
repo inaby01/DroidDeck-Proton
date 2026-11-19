@@ -648,6 +648,65 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertNotIn('DUMMY_PRIVATE', json.dumps(entry))
         self.clear_fake()
 
+    def test_later_target_identity_change_aborts_and_keeps_the_first_send(self):
+        plan = self.install_plan().recheck
+        for change in ('other-loader', None):
+            with self.subTest(change=change):
+                self.clear_fake()
+                targets = self.lingering_tree()
+
+                def swap_child(key, change=change, targets=targets):
+                    if key != targets[0]:
+                        self.fail('changed target must not be signalled')
+                    exe = self.f.proc / str(targets[1][0]) / 'exe'
+                    exe.unlink()
+                    if change is not None:
+                        other = self.home / ('fake-' + change)
+                        if not other.exists():
+                            other.write_bytes(b'different synthetic loader')
+                        exe.symlink_to(other)
+                log = []
+                with self.assertRaisesRegex(Invalid, 'target changed before signal'):
+                    dep.signal_proxies(plan.compatdata, targets, self.f.proc, swap_child, log)
+                self.assertEqual([item['result'] for item in log], ['sigterm-sent'])
+        self.clear_fake()
+
+    def test_menu9_keeps_the_signal_history_when_a_later_step_fails(self):
+        plan = self.install_plan().recheck
+        stop = ProcessStopCheck(plan.compatdata, self.f.proc)
+        targets = self.lingering_tree()
+        busy = {'clear_in_view': False, 'active_count': 6, 'unknown_count': 0}
+        with self.f.store() as store, patch.object(dep, '_confirm_proxy_stop', return_value=True), \
+                patch.object(ProcessStopCheck, 'check', side_effect=[busy, OSError('DUMMY_PRIVATE')]):
+            entry = dep.offer_reinspection_proxy_stop(plan, store, stop, io.StringIO(), io.StringIO(), str,
+                                                      sender=lambda key: None)
+        self.assertEqual(entry['stop']['result'], 'sigterm-sent')
+        self.assertEqual(entry['stop']['observation_error']['error_class'], 'OSError')
+        self.assertEqual(dep.signals_sent(entry), 2)
+        self.assertNotIn('DUMMY_PRIVATE', json.dumps(entry))
+        self.clear_fake()
+        self.lingering_tree()
+        sent = []
+
+        def sender(key):
+            sent.append(key)
+            self.clear_fake()
+        real_signal = dep.signal_proxies
+        with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe), \
+                patch.object(dep, 'ProcessStopCheck', lambda compatdata: ProcessStopCheck(compatdata, self.f.proc)), \
+                patch.object(dep, 'signal_proxies', lambda *args: real_signal(*args[:3], sender, *args[4:])), \
+                patch.object(dep, 'PROXY_STOP_WAIT', 2), \
+                patch.object(dep, 'inspect_managed_dependency', side_effect=Invalid('DUMMY_LATER_FAILURE')):
+            status, report, output = self.menu('9\n1\n1\n')
+        self.assertEqual(status, 2)
+        self.assertEqual(report['lingering']['stop']['result'], 'stopped')
+        self.assertEqual(dep.signals_sent(report['lingering']), 1)
+        self.assertEqual(report['writes'][0], {'scope': 'sigterm-to-confirmed-sdproxy', 'count': 1})
+        self.assertIn('SIGTERMは1件送信済み', output)
+        self.assertNotIn('変更はしていません。\n', output.replace('それ以外の変更はしていません。', ''))
+        self.assertEqual(sent, [targets[0]])
+        self.clear_fake()
+
     def test_target_change_before_signal_and_remaining_processes_are_not_success(self):
         targets = self.lingering_tree()
         compat = self.f.steam / 'steamapps/compatdata/43'

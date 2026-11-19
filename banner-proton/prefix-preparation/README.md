@@ -727,8 +727,10 @@ one shared executable identity, from two identical inventories without unreadabl
 unclassified or prefix-conflicting processes (both prefix variables, when present,
 must name this prefix). The batch is pinned with pidfds and the full conditions are
 evaluated again after pinning; before each further signal the view is read again
-and anything new or unexplained aborts. A target that already exited is recorded as
-gone, and every per-target result is kept even when the stop aborts (0.24.1). There is no SIGKILL,
+and anything new or unexplained aborts; each later target must keep its confirmed image,
+prefix consistency and executable identity (only its parent may change). A target that
+already exited is recorded as gone, and every per-target result is kept even when the
+stop or a later step fails (0.24.1, 0.24.2). There is no SIGKILL,
 no `wineserver -k` and no other process, prefix or game is signalled. If the view
 does not clear within a bounded wait, the state stays `needs-user`. After a clear
 view the installation continues with the offline post-inspection; menu 9 then
