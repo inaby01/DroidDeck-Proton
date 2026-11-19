@@ -28,7 +28,7 @@ from preparation_common import (
     safe_path,
     unchanged,
 )
-from preparation_payload import PayloadInventory, verify_tree
+from preparation_payload import PayloadInventory, verify_fex_runtime_tree, verify_tree
 from preparation_processes import ProcessStopCheck
 from preparation_runtime_context import HOOK_KEYS, RuntimeEnvironmentPlan
 from preparation_target import RegistrationPin
@@ -300,7 +300,7 @@ class LaunchPlan:
 
 def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_environment,
                 expected_hashes, payload_inventory=None, payload_overlays=None, target_pin=None, runtime_plan=None, operation="initialize",
-                prefix_version_sha256=None, origin_launch_id=None):
+                prefix_version_sha256=None, origin_launch_id=None, trial_recheck_id=None):
     """Read-only plan. Hashes/runtime inputs come from trusted adapters, never profile JSON."""
     require(operation in OPERATIONS, "unsupported preparation operation")
     require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
@@ -318,14 +318,22 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
             require(private != protected and not private.is_relative_to(protected) and
                     not protected.is_relative_to(private), "launch directories overlap")
     if operation == "initialize":
-        require(prefix_version_sha256 is None and origin_launch_id is None and not os.path.lexists(compatdata), "new compatdata required")
+        require(trial_recheck_id is None and prefix_version_sha256 is None and origin_launch_id is None and not os.path.lexists(compatdata), "new compatdata required")
     else:
-        _launch_id(origin_launch_id)
+        if trial_recheck_id is None:
+            _launch_id(origin_launch_id)
+        else:
+            require(origin_launch_id is None and type(trial_recheck_id) is str and trial_recheck_id.startswith("trial-") and
+                    len(trial_recheck_id) == 38 and all(c in "0123456789abcdef" for c in trial_recheck_id[6:]),
+                    "managed trial origin required")
         require(type(prefix_version_sha256) is str and SHA256.fullmatch(prefix_version_sha256)
                 and _prefix(compatdata) == prefix_version_sha256, "unverified or changed prefix version")
     overlays = {} if payload_overlays is None else copy.deepcopy(payload_overlays)
     payload_digest = _payload_digest(payload_inventory, overlays)
-    verify_tree(tool, payload_inventory, overlays)
+    if trial_recheck_id is None:
+        verify_tree(tool, payload_inventory, overlays)
+    else:
+        verify_fex_runtime_tree(tool, payload_inventory, overlays)
     source_entries = {**payload_inventory.entries, **overlays}
     launcher_hashes = {}
     for name in ("proton", "version", "user_settings.py"):
@@ -359,7 +367,7 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
     spec = {"tool": tool, "steam": steam, "registration_id": key, "install": install, "work": work,
             "home": home, "runtime_environment": dict(runtime_environment), "expected_hashes": hashes,
             "payload_inventory": payload_inventory, "payload_overlays": overlays, "target_pin": target_pin, "runtime_plan": runtime_plan,
-            "operation": operation, "prefix_version_sha256": prefix_version_sha256, "origin_launch_id": origin_launch_id}
+            "operation": operation, "prefix_version_sha256": prefix_version_sha256, "origin_launch_id": origin_launch_id, "trial_recheck_id": trial_recheck_id}
     signature = {k: str(v) if hasattr(v, "parts") else v for k, v in spec.items()}
     signature["payload_inventory"] = payload_digest
     signature["target_pin"] = target_pin.digest
@@ -438,6 +446,7 @@ class LaunchSession:
 
     def _guard(self):
         self.store._guard()
+        require(self.plan.spec.get("trial_recheck_id") is None, "trial recheck cannot use ordinary launch readiness")
         require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
         compatdata = self.plan.spec["steam"] / "steamapps/compatdata" / self.plan.registration_id
         require(self.store._held_target == hashlib.sha256(str(compatdata).encode()).hexdigest(), "target launch lock required")

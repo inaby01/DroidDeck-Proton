@@ -74,6 +74,66 @@ class PayloadTests(unittest.TestCase):
                                "--payload-archive",str(self.archive),"--payload-sha512",self.sha,
                                "--payload-root",ROOT,*extra],capture_output=True,text=True,check=False)
 
+    def fex_fixture(self):
+        self.installed.chmod(0o755)
+        (self.installed / 'files/share/fex-emu').mkdir(parents=True)
+        self.make_archive(MEMBERS + [('files/share', 'directory', None, 0o755),
+                                    ('files/share/fex-emu', 'directory', None, 0o755)])
+        directory = self.installed / payload.FEX_RUNTIME_DIRECTORY
+        directory.mkdir(mode=0o700)
+        return directory, self.inspect()
+
+    def test_fex_contract_accepts_only_the_empty_runtime_directory_without_weakening_strict_verifier(self):
+        directory, inventory = self.fex_fixture()
+        before = self.snapshot()
+        with self.assertRaises(Invalid):
+            payload.verify_tree(self.installed, inventory)
+        result = payload.verify_fex_runtime_tree(self.installed, inventory)
+        self.assertEqual(result['runtime_contract'], payload.FEX_RUNTIME_CONTRACT)
+        self.assertTrue(result['runtime_directory_empty'])
+        self.assertFalse(result['execution_authorized'])
+        self.assertEqual(before, self.snapshot())
+        self.assertTrue(directory.exists())
+
+    def test_fex_contract_refuses_nonempty_directory_without_reading_configuration(self):
+        directory, inventory = self.fex_fixture()
+        file = directory / 'DUMMY_PRIVATE.json'
+        file.write_text('{"DUMMY_SECRET": true}')
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        self.assertIn('DUMMY_SECRET', file.read_text())
+
+    def test_fex_contract_refuses_wrong_modes_and_symlink(self):
+        directory, inventory = self.fex_fixture()
+        directory.chmod(0o755)
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        directory.chmod(0o700)
+        directory.rmdir()
+        directory.symlink_to(self.root)
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+
+    def test_fex_contract_does_not_ignore_other_extras_or_unprivate_parent(self):
+        _directory, inventory = self.fex_fixture()
+        extra = self.installed / 'unexpected'
+        extra.write_bytes(b'x')
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        extra.unlink()
+        self.root.chmod(0o755)
+        self.addCleanup(self.root.chmod, 0o700)
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+
+    def test_fex_contract_refuses_source_owned_directory_collision(self):
+        _directory, _ = self.fex_fixture()
+        self.make_archive(MEMBERS + [('files/share', 'directory', None, 0o755),
+            ('files/share/fex-emu', 'directory', None, 0o755),
+            (payload.FEX_RUNTIME_DIRECTORY, 'directory', None, 0o700)])
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, self.inspect())
+
     def test_difference_audit_aggregates_changes_extras_and_missing_without_adoption(self):
         self.installed.chmod(0o755)
         (self.installed / "proton").write_bytes(b"changed-content")

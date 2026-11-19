@@ -404,6 +404,17 @@ def inspect_incomplete_material(record, exe, key, source, steam, store_root, rec
 
 
 def verify_probe_registration(exe, key, source, steam, store_root):
+    return _probe_registration(exe, key, source, steam, store_root)
+
+
+def inspect_existing_probe_registration(exe, key, source, steam, store_root):
+    evidence = _probe_registration(exe, key, source, steam, store_root, allow_existing=True)
+    require(not evidence["prefix_absent"], "existing managed prefix required")
+    evidence["purpose"] = "existing-managed-probe-inspection"
+    return evidence
+
+
+def _probe_registration(exe, key, source, steam, store_root, allow_existing=False):
     """Read only. Fixed step diagnostics never include raw receipts/paths/data."""
     history = []
 
@@ -437,10 +448,10 @@ def verify_probe_registration(exe, key, source, steam, store_root):
             error.incomplete_probe_material = observation
             raise
     step("probe-private-receipt-ready", require, True, "probe receipt not ready")
-    return _verify_registered_context(record, marker, exe, key, source, steam, receipt_digest, step)
+    return _verify_registered_context(record, marker, exe, key, source, steam, receipt_digest, step, allow_existing=allow_existing)
 
 
-def _verify_registered_context(record, marker, exe, key, source, steam, receipt_digest, step=checked):
+def _verify_registered_context(record, marker, exe, key, source, steam, receipt_digest, step=checked, allow_existing=False):
     """Shared read-only conditions; readiness is enforced separately by each caller."""
     step("probe-steam-context", require, record["steam"] == str(steam), "probe Steam context differs")
     step("probe-registration-source-context", require, record["registration_source"] == str(source), "probe registration source context differs")
@@ -478,13 +489,16 @@ def _verify_registered_context(record, marker, exe, key, source, steam, receipt_
     step("probe-compatdata-base", require, not base.exists() or base.is_dir(), "invalid compatdata base")
     names = (key, str(int(key) - 2**32)) if int(key) >= 2**31 else (key,)
     for name in names:
-        step("probe-prefix-absent", require, not os.path.lexists(base / name), "probe prefix already exists; preserve it")
+        if not allow_existing or name != key:
+            step("probe-prefix-absent", require, not os.path.lexists(base / name), "probe prefix already exists; preserve it")
 
     def aliases_absent():
         if base.exists():
             with os.scandir(base) as children:
                 for count, child in enumerate(children):
                     require(count < 4096, "too many prefix entries")
+                    if allow_existing and child.name == key:
+                        continue
                     if re.fullmatch(r"-?[0-9]+", child.name) and int(child.name) % 2**32 == int(key):
                         require(False, "probe prefix alias already exists; preserve it")
 
@@ -492,7 +506,7 @@ def _verify_registered_context(record, marker, exe, key, source, steam, receipt_
     observed = step("probe-registration-reread", load_json, source)[1]
     step("probe-registration-stable", require, observed == source_digest, "registration changed during probe verification")
     return {"purpose": "registration-only-probe", "probe_id": record["probe_id"], "receipt_sha256": receipt_digest,
-            "new_id_relative_to_baseline": True, "exe_matches_private_receipt": True, "prefix_absent": True,
+            "new_id_relative_to_baseline": True, "exe_matches_private_receipt": True, "prefix_absent": not os.path.lexists(base / key),
             "observed_registration_sha256": source_digest, "source_archive_sha512": record["archive_sha512"],
             "source_inventory_digest": record["inventory_digest"], "preparation_complete": False}
 
@@ -518,11 +532,15 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
     if config.get("initialization_trial") is True and "placement_review" in config:
         print("5. 専用の新規prefixを初期化試験（実Proton/Wineを起動）", file=output)
         print("6. 既存の初期化試験を読み取り検査（再実行・修復しない）", file=output)
+        print("7. FEX空directoryを限定照合し、管理済みprefixで疎通再照会", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
     if answer == "4" and "placement_review" in config:
         from preparation_static_placement import interactive_static_placement
         return interactive_static_placement(directory, renderer, config, **options)
+    if answer == "7" and config.get("initialization_trial") is True and "placement_review" in config:
+        from preparation_recheck import interactive_recheck
+        return interactive_recheck(directory, renderer, config, **options)
     if answer == "6" and config.get("initialization_trial") is True and "placement_review" in config:
         from preparation_trial_audit import interactive_trial_audit
         return interactive_trial_audit(directory, renderer, config, **options)

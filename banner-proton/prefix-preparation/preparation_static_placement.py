@@ -78,8 +78,12 @@ def _proof(installation, probe_store_root):
 
 
 def _private_xalia_context(installation, review):
-    entries = installation.inventory.entries
-    require(not installation.inventory.root_mode & 0o022 and installation.inventory.root_mode & 0o500 == 0o500,
+    return reviewed_payload_permissions(installation.inventory, installation.target.steam, review)
+
+
+def reviewed_payload_permissions(inventory, steam, review):
+    entries = inventory.entries
+    require(not inventory.root_mode & 0o022 and inventory.root_mode & 0o500 == 0o500,
             "unsupported payload root permissions")
     unsupported = {name for name, entry in entries.items() if entry["kind"] in ("file", "directory", "hardlink") and
                    (entry["mode"] & 0o022 or not entry["mode"] & 0o400 or entry["kind"] == "directory" and not entry["mode"] & 0o100)}
@@ -88,8 +92,8 @@ def _private_xalia_context(installation, review):
             "payload permissions have not been reviewed for this archive")
     if not approved:
         return None
-    parent = safe_path(installation.target.steam / "compatibilitytools.d", installation.target.steam)
-    policy = _PrivateXaliaModes(installation.inventory.digest, frozenset(approved), parent)
+    parent = safe_path(steam / "compatibilitytools.d", steam)
+    policy = _PrivateXaliaModes(inventory.digest, frozenset(approved), parent)
     if parent.exists():
         policy.guard()
     return policy

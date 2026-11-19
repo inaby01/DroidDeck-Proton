@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and dedicated initialization trial (0.20.0)
+# Prefix preparation: offline planning and dedicated initialization trial (0.21.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -619,3 +619,27 @@ record is read again to detect replacement and is never updated, adopted, retrie
 or promoted. Only a new result report is written. Future trial failures retain
 fixed TreeMismatch metadata instead of only the exception class. An exit code zero
 with a post-check failure does not become verified initialization automatically.
+
+## Source-reviewed empty FEX directory and managed recheck (0.21.0)
+
+Proton selects `files/share/fex-emu/` as FEX's local config directory. Pinned FEX
+creates its `AppConfig/` directory during config lookup. `verify_tree` still rejects
+extras by default. A separate runtime verifier permits only that exact directory,
+absent from the source inventory, under an owned0700 tool parent, with an owned0700
+empty directory and stable identity. Nonempty configs, links, other modes/owners,
+other extras and modified source files are rejected. It never creates or removes
+the directory. New dedicated trial post-checks use this narrow runtime contract.
+
+Menu7 performs this verification and then offers a separately confirmed fixed
+`runinprefix cmd.exe /d /c exit 0` for the existing managed trial prefix. It does not
+initialize, clone, repair, install assets, modify bindings or rewrite old history.
+It requires the private trial's prior exit0/unchanged-settings evidence, the original
+probe receipt/current registration, reviewed source, current version and private
+prefix/work/home ancestors, live runtime and clear same-owner process views.
+
+Managed recheck plans carry a distinct trial origin and cannot be executed through
+the ordinary LaunchSession readiness API. Rechecks have a separate journal and
+inventory with mandatory reinspection. New result `probe-exited-unverified` means
+only the fixed command and guarded postconditions passed; GUI, dependencies,
+other-namespace stop scope and complete preparation remain unverified. Timeout
+never kills a process or automatically retries. Old failed records remain intact.

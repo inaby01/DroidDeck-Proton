@@ -32,7 +32,7 @@ from preparation_execution import (
     _prefix,
     plan_launch,
 )
-from preparation_payload import verify_tree
+from preparation_payload import verify_fex_runtime_tree
 from preparation_processes import ProcessStopCheck
 from preparation_static_placement import (
     StaticPlacementPlan,
@@ -206,7 +206,7 @@ class TrialSession:
         policy = _private_xalia_context(installation, p.placement.review)
         if policy is not None:
             policy.guard()
-        verify_tree(safe_path(installation.summary()["destination"]), installation.inventory, installation.customization.overlays)
+        verify_fex_runtime_tree(safe_path(installation.summary()["destination"]), installation.inventory, installation.customization.overlays)
         require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
         _aliases(installation.target.steam, installation.target.registration_id)
         if self.settings_identity is not None:
