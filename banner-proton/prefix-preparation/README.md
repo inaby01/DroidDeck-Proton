@@ -711,3 +711,21 @@ Timeouts never kill a process; `q` leaves the child running and records
 journal and always require reinspection. Destination resolution follows standard
 Windows Installer rules and is unverified on device Wine; registrations made by the
 installer's self-registration step are not statically known and are not checked.
+
+## Lingering SoftDenchi processes (0.24.0)
+
+The SoftDenchi service is started at installation and can keep Wine running in the
+managed prefix after the bootstrap exits. When the visible process view of that
+prefix is not clear, the installation record and menu 9 keep a process inventory:
+PID, start time, parent, a role (`wineserver`, `wine-infrastructure`,
+`softdenchi-service`, `softdenchi-proxy`, `other`) and the image basename with a
+coarse place. Environment values, arguments and other paths are not kept.
+
+After an explicit confirmation, SIGTERM is sent only to SdProxy processes whose
+parent chain reaches UCManSvc under `services.exe`, with consistent start times,
+from two identical inventories without unreadable or unclassified processes. Each
+target is pinned with a pidfd and re-read before the signal. There is no SIGKILL,
+no `wineserver -k` and no other process, prefix or game is signalled. If the view
+does not clear within a bounded wait, the state stays `needs-user`. After a clear
+view the installation continues with the offline post-inspection; menu 9 then
+reinspects as before.

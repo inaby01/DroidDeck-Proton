@@ -500,6 +500,123 @@ class InstallTests(TRIAL['TrialTests']):
                 LaunchSession(captured[0], store, lambda: {'target': True, 'payload': True, 'runtime': True, 'stopped': True},
                               ProcessStopCheck(session.plan.recheck.compatdata, self.f.proc)).start()
 
+    SERVICES = 'C:\\windows\\system32\\services.exe'
+    SERVICE = 'C:\\Program Files (x86)\\SoftDenchi\\UCManSvc.exe'
+    PROXY = 'C:\\Program Files (x86)\\SoftDenchi\\SdProxy.exe'
+
+    def fake_process(self, pid, image, parent, started):
+        folder = self.f.proc / str(pid)
+        folder.mkdir()
+        tail = ['S', str(parent)] + ['0'] * 17 + [str(started)] + ['0'] * 5
+        (folder / 'stat').write_text(f'{pid} (fake) ' + ' '.join(tail))
+        compat = self.f.steam / 'steamapps/compatdata/43'
+        (folder / 'environ').write_bytes(b'WINEPREFIX=' + str(compat / 'pfx').encode() + b'\0DUMMY_SECRET=1\0')
+        (folder / 'cmdline').write_bytes(image.encode() + b'\0--DUMMY_ARGUMENT\0')
+        return pid, started
+
+    def lingering_tree(self, proxy_parent=None, services_started=10):
+        self.fake_process(900001, '/opt/fixture/files/bin/wineserver', 1, 5)
+        self.fake_process(900002, self.SERVICES, 1, services_started)
+        self.fake_process(900003, 'C:\\windows\\system32\\explorer.exe', 900002, 12)
+        self.fake_process(900004, self.SERVICE, 900002, 20)
+        first = self.fake_process(900005, self.PROXY, proxy_parent or 900004, 30)
+        second = self.fake_process(900006, self.PROXY, 900005, 40)
+        return [first, second]
+
+    def clear_fake(self):
+        for folder in self.f.proc.iterdir():
+            if folder.name.startswith('9000'):
+                for item in folder.iterdir():
+                    item.unlink()
+                folder.rmdir()
+
+    def installed_with_lingering(self, store, **tree):
+        session = self.install_session(store).start_gui_check()
+        session.wait_gui_check(10)
+        session.confirm_display(True)
+        session.start_installer()
+        session.process.wait(timeout=10)
+        targets = self.lingering_tree(**tree)
+        result = session.wait_installer(1)
+        self.assertEqual(result['installer']['status'], 'exited-processes-remain')
+        return session, targets
+
+    def test_lingering_proxies_are_recorded_then_stopped_only_by_sigterm_after_confirmation(self):
+        sent = []
+
+        def sender(key):
+            sent.append(key)
+            self.clear_fake()
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep, 'PROXY_STOP_WAIT', 2):
+            session, targets = self.installed_with_lingering(store)
+            observed = session.record['lingering']['observed']
+            self.assertEqual(observed['roles'], {'wineserver': 1, 'wine-infrastructure': 2, 'softdenchi-service': 1,
+                                                 'softdenchi-proxy': 2})
+            _summary, planned, reason = session.preview_proxy_stop()
+            self.assertEqual((sorted(planned), reason), (sorted(targets), None))
+            self.assertEqual(sent, [])
+            result = session.stop_lingering_proxies(sender)
+        self.assertEqual(sorted(sent), sorted(targets))
+        self.assertEqual(result['lingering']['stop'], {'result': 'sigterm-sent', 'targets': 2, 'signal': 'SIGTERM',
+                                                       'forced_kill': False})
+        self.assertEqual(result['status'], 'present-verified')
+        self.assertEqual(result['phase'], 'post-inspected')
+        text = json.dumps(result)
+        self.assertNotIn('DUMMY_SECRET', text)
+        self.assertNotIn('DUMMY_ARGUMENT', text)
+        self.assertNotIn('Program Files', json.dumps(observed))
+
+    def test_unexplained_process_or_origin_refuses_the_stop(self):
+        cases = ({'extra': True}, {'proxy_parent': 900003}, {'services_started': 25})
+        reasons = ('unclassified process in prefix view', 'proxy origin not confirmed', 'service origin not confirmed')
+        for case, reason in zip(cases, reasons):
+            with self.subTest(case=case):
+                self.clear_fake()
+                sent = []
+                with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture):
+                    session = self.install_session(store)
+                    tree = {key: value for key, value in case.items() if key != 'extra'}
+                    self.lingering_tree(**tree)
+                    if case.get('extra'):
+                        self.fake_process(900007, 'C:\\users\\DUMMY_PRIVATE\\tool.exe', 900002, 50)
+                    _, planned, found = session.preview_proxy_stop()
+                    self.assertIsNone(planned)
+                    self.assertEqual(found, reason)
+                    self.assertEqual(sent, [])
+        self.clear_fake()
+
+    def test_target_change_before_signal_and_remaining_processes_are_not_success(self):
+        targets = self.lingering_tree()
+        compat = self.f.steam / 'steamapps/compatdata/43'
+        with self.assertRaises(Invalid):
+            dep.signal_proxies(compat, [(targets[0][0], 999)], self.f.proc, sender=lambda key: self.fail('signalled'))
+        self.clear_fake()
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep, 'PROXY_STOP_WAIT', 1):
+            session, _ = self.installed_with_lingering(store)
+            result = session.stop_lingering_proxies(lambda key: None)
+        self.assertEqual(result['lingering']['stop']['result'], 'sigterm-sent-processes-remain')
+        self.assertEqual(result['status'], 'needs-user')
+        self.assertIsNone(result['post_state'])
+        self.clear_fake()
+
+    def test_reinspection_offers_the_stop_and_declining_sends_nothing(self):
+        plan = self.install_plan().recheck
+        stop = ProcessStopCheck(plan.compatdata, self.f.proc)
+        self.lingering_tree()
+        with self.f.store() as store:
+            entry = dep.offer_reinspection_proxy_stop(plan, store, stop, io.StringIO('q\n'), io.StringIO(), str,
+                                                      sender=lambda key: self.fail('declined'))
+            self.assertEqual(entry['stop'], {'result': 'declined'})
+            output = io.StringIO()
+            with patch.object(dep, 'PROXY_STOP_WAIT', 2):
+                entry = dep.offer_reinspection_proxy_stop(plan, store, stop, io.StringIO('1\n'), output, str,
+                                                          sender=lambda key: self.clear_fake())
+            self.assertEqual(entry['stop']['result'], 'stopped')
+            self.assertIn('SIGKILL', output.getvalue())
+            self.assertEqual(dep.inspect_managed_dependency(plan, store, stop, self.recipe)['state'], 'absent')
+
     def test_mfc_and_unknown_handlers_are_rejected(self):
         self.config['dependency_installation']['handler'] = 'mfc-local'
         with self.assertRaises(Invalid):

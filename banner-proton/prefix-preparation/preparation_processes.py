@@ -4,6 +4,7 @@ Absence in this view is not proof about other UIDs/namespaces or Android/proot.
 No signals are sent. Only prefix-related environment values are interpreted.
 """
 
+import ntpath
 import os
 import stat
 from dataclasses import dataclass, field
@@ -121,3 +122,88 @@ class ProcessStopCheck:
                 "inspected_count": max(first["inspected_count"], second["inspected_count"]),
                 "failure_stages": {stage: max(first["failure_stages"].get(stage, 0), second["failure_stages"].get(stage, 0))
                                    for stage in first["failure_stages"].keys() | second["failure_stages"].keys()}}
+
+
+SYSTEM_DIRECTORIES = frozenset((r"c:\windows\system32", r"c:\windows\syswow64"))
+WINE_INFRASTRUCTURE = frozenset(("services.exe", "winedevice.exe", "explorer.exe", "plugplay.exe", "svchost.exe",
+                                 "rpcss.exe", "conhost.exe"))
+MAX_ARGV0 = 4096
+
+
+def windows_image(value):
+    """Normalize argv[0] as a DOS image path (lower case, backslashes), without arguments."""
+    value = value.replace("/", "\\")
+    for prefix in ("\\??\\", "\\\\?\\"):
+        value = value.removeprefix(prefix)
+    return ntpath.normpath(value).casefold()
+
+
+def inventory_processes(compatdata, proc_root=Path("/proc")):
+    """Same-owner processes of one prefix: identity, parent and argv[0] image only.
+
+    No environment values, arguments, command lines or other prefixes are kept.
+    Anything that cannot be read consistently is counted as unreadable.
+    """
+    compatdata, proc_root = safe_path(compatdata), safe_path(proc_root)
+    processes, unreadable = [], 0
+    root_fd = os.open(proc_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        own_fd = os.open(str(os.getpid()), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            owner = os.fstat(own_fd).st_uid
+        finally:
+            os.close(own_fd)
+        with os.scandir(root_fd) as entries:
+            for index, entry in enumerate(entries):
+                require(index < MAX_PROCESSES, "too many proc entries")
+                if not entry.name.isascii() or not entry.name.isdecimal() or int(entry.name) == os.getpid():
+                    continue
+                descriptor = None
+                try:
+                    descriptor = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                    if os.fstat(descriptor).st_uid != owner:
+                        continue
+                    before = _parent_identity(_read(descriptor, "stat", 8192), entry.name)
+                    if before[0] in ("Z", "X") or not _matches(_read(descriptor, "environ", MAX_ENVIRON), compatdata):
+                        continue
+                    argv0 = _read(descriptor, "cmdline", MAX_ARGV0 * 4).split(b"\0", 1)[0]
+                    after = _parent_identity(_read(descriptor, "stat", 8192), entry.name)
+                    if after[2] != before[2] or after[0] in ("Z", "X") or not argv0 or len(argv0) > MAX_ARGV0:
+                        unreadable += 1
+                        continue
+                    image = windows_image(os.fsdecode(argv0))
+                    processes.append({"pid": int(entry.name), "started": after[2], "parent": after[1], "image": image})
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError, UnicodeError):
+                    unreadable += 1
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+    finally:
+        os.close(root_fd)
+    return {"scope": "same-proc-directory-owner-as-self", "processes": sorted(processes, key=lambda p: (p["pid"], p["started"])),
+            "unreadable_count": unreadable, "device_namespace_verified": False}
+
+
+def _parent_identity(raw, pid):
+    text = raw.decode("utf-8")
+    require(text.startswith(str(pid) + " ("), "proc PID changed")
+    _, sep, tail = text.rpartition(")")
+    parts = tail.split()
+    require(sep and len(parts) >= 20 and parts[1].isdecimal() and parts[19].isdecimal(), "invalid proc stat")
+    return parts[0], int(parts[1]), int(parts[19])
+
+
+def describe_image(image):
+    """Exportable classification: basename plus a coarse directory class, never other paths."""
+    directory, name = ntpath.split(image)
+    if image.startswith("\\") and not image.startswith("\\\\"):
+        place = "native"
+    elif directory in SYSTEM_DIRECTORIES:
+        place = "windows-system"
+    elif directory == r"c:\program files (x86)\softdenchi":
+        place = "softdenchi-x86"
+    else:
+        place = "other"
+    return {"name": name, "place": place}

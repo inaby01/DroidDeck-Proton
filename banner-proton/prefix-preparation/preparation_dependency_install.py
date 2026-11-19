@@ -9,8 +9,10 @@ the Unix exit status alone.
 """
 
 import hashlib
+import ntpath
 import os
 import secrets
+import signal
 import stat
 import subprocess
 import time
@@ -36,7 +38,13 @@ from preparation_common import (
 )
 from preparation_dependency_state import inspect_dependency_state
 from preparation_execution import plan_launch
-from preparation_processes import ProcessStopCheck
+from preparation_processes import (
+    SYSTEM_DIRECTORIES,
+    WINE_INFRASTRUCTURE,
+    ProcessStopCheck,
+    describe_image,
+    inventory_processes,
+)
 from preparation_recheck import RecheckSession, plan_recheck, validate_recheck_record
 from preparation_softdenchi_recipe import (
     HANDLER,
@@ -60,8 +68,91 @@ PHASES = ("planned", "gui-check-spawned", "gui-check-exited", "gui-check-stopped
           "installer-staged", "installer-spawned", "installer-exited", "stop-observed", "post-inspected")
 PRE_INSTALLER = frozenset(("planned", "gui-check-spawned", "gui-check-exited", "gui-check-stopped", "gui-check-not-confirmed",
                            "installer-staged"))
+SERVICE_IMAGE = r"c:\program files (x86)\softdenchi\ucmansvc.exe"
+PROXY_IMAGE = r"c:\program files (x86)\softdenchi\sdproxy.exe"
+SERVICES_IMAGE = r"c:\windows\system32\services.exe"
+PROXY_STOP_WAIT = 30
 POST_STATUS = {"present-verified": "present-verified", "present-unverified": "installed-unverified", "partial": "partial",
                "incompatible": "incompatible", "absent": "cancelled-absent", "uninspected": "needs-user"}
+
+
+def classify_process(process):
+    image = process["image"]
+    directory, name = ntpath.split(image)
+    if image == PROXY_IMAGE:
+        return "softdenchi-proxy"
+    if image == SERVICE_IMAGE:
+        return "softdenchi-service"
+    if directory in SYSTEM_DIRECTORIES and name in WINE_INFRASTRUCTURE:
+        return "wine-infrastructure"
+    if image.startswith("\\") and not image.startswith("\\\\") and name == "wineserver":
+        return "wineserver"
+    return "other"
+
+
+def summarize_lingering(inventory):
+    """Exportable view: identity, parent, role and image basename/place only."""
+    processes = [{"pid": p["pid"], "started": p["started"], "parent": p["parent"], "role": classify_process(p),
+                  **describe_image(p["image"])} for p in inventory["processes"]]
+    roles = {}
+    for item in processes:
+        roles[item["role"]] = roles.get(item["role"], 0) + 1
+    return {"processes": processes, "roles": roles, "unreadable_count": inventory["unreadable_count"],
+            "scope": inventory["scope"], "device_namespace_verified": False}
+
+
+def proxy_stop_targets(first, second):
+    """SdProxy processes descending from UCManSvc under services.exe, and nothing unexplained.
+
+    Two identical consecutive inventories are required. Any unreadable or
+    unclassified process of this prefix refuses the stop instead of guessing.
+    """
+    require(first["processes"] == second["processes"], "process inventory unstable")
+    require(first["unreadable_count"] == 0 and second["unreadable_count"] == 0, "unreadable process in prefix view")
+    processes = second["processes"]
+    by_pid = {p["pid"]: p for p in processes}
+    require(all(classify_process(p) != "other" for p in processes), "unclassified process in prefix view")
+    proxies = [p for p in processes if classify_process(p) == "softdenchi-proxy"]
+    require(proxies, "no SdProxy remaining")
+    for proxy in proxies:
+        cursor, seen = proxy, set()
+        while classify_process(cursor) == "softdenchi-proxy":
+            require(cursor["pid"] not in seen, "proxy origin not confirmed")
+            seen.add(cursor["pid"])
+            parent = by_pid.get(cursor["parent"])
+            require(parent is not None and parent["started"] <= cursor["started"], "proxy origin not confirmed")
+            cursor = parent
+        require(classify_process(cursor) == "softdenchi-service", "proxy origin not confirmed")
+        services = by_pid.get(cursor["parent"])
+        require(services is not None and services["started"] <= cursor["started"] and services["image"] == SERVICES_IMAGE,
+                "service origin not confirmed")
+    return [(p["pid"], p["started"]) for p in proxies]
+
+
+def signal_proxies(compatdata, targets, proc_root, sender=None):
+    """Pin each target with a pidfd, re-read the prefix inventory, then send SIGTERM only.
+
+    ``sender`` replaces the kernel call in tests; production always uses pidfds,
+    so a reused PID cannot redirect the signal to another process.
+    """
+    open_pidfd, send = getattr(os, "pidfd_open", None), getattr(signal, "pidfd_send_signal", None)
+    require(sender is not None or (callable(open_pidfd) and callable(send)), "pidfd API unavailable")
+    descriptors = {}
+    try:
+        if sender is None:
+            for key in targets:
+                descriptors[key] = open_pidfd(key[0], 0)
+        current = {(p["pid"], p["started"]): p for p in inventory_processes(compatdata, proc_root)["processes"]}
+        require(all(key in current and current[key]["image"] == PROXY_IMAGE for key in targets), "target changed before signal")
+        for key in targets:
+            if sender is None:
+                send(descriptors[key], signal.SIGTERM, None, 0)
+            else:
+                sender(key)
+    finally:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+    return len(targets)
 
 
 def validate_dependency_config(value):
@@ -83,7 +174,7 @@ def validate_install_record(record):
                     "handler", "recipe_revision", "recipe_digest", "asset_sha256", "input_digest", "previous_install_id",
                     "phase", "status", "gui_check", "installer", "pre_state", "post_state", "runtime_execution_verified",
                     "device_namespace_verified", "preparation_complete"),
-           ("post_inspection", "stop_observation", "settings_identity_unchanged", "prefix_allocation", "error"))
+           ("post_inspection", "stop_observation", "settings_identity_unchanged", "prefix_allocation", "lingering", "error"))
     require(type(record["schema_version"]) is int and record["schema_version"] == 1 and record["scope"] == SCOPE,
             "unsupported installation record")
     require(type(record["tool_version"]) is str and 0 < len(record["tool_version"]) <= 64, "invalid installation version")
@@ -352,10 +443,63 @@ class DependencyInstallSession:
         if not observation["clear_in_view"]:
             self.record[section]["status"] = "exited-processes-remain"
             self.record["status"] = "needs-user"
+            try:
+                self.record["lingering"] = {"section": section, "observed": self.lingering()}
+            except (OSError, ValueError) as error:
+                self.record["lingering"] = {"section": section, "observed": describe_error(error, "process-inventory")}
             self._save()
             return False
         self.process = None
         return True
+
+    def lingering(self):
+        return summarize_lingering(inventory_processes(self.plan.recheck.compatdata, self.stop.proc_root))
+
+    def preview_proxy_stop(self):
+        """Read-only: the targets a confirmed stop would signal, or the refusal reason."""
+        first = inventory_processes(self.plan.recheck.compatdata, self.stop.proc_root)
+        second = inventory_processes(self.plan.recheck.compatdata, self.stop.proc_root)
+        try:
+            return summarize_lingering(second), proxy_stop_targets(first, second), None
+        except Invalid as error:
+            return summarize_lingering(second), None, str(error)
+
+    def stop_lingering_proxies(self, sender=None):
+        """Operator-confirmed: SIGTERM only to UCManSvc-descended SdProxy of this prefix, then post-checks."""
+        require(self.record["phase"] == "installer-exited" and self.record["installer"]["status"] == "exited-processes-remain",
+                "no lingering installer processes recorded")
+        entry = self.record.setdefault("lingering", {"section": "installer"})
+        try:
+            self._guard()
+            compatdata, proc_root = self.plan.recheck.compatdata, self.stop.proc_root
+            first, second = inventory_processes(compatdata, proc_root), inventory_processes(compatdata, proc_root)
+            entry["before_stop"] = summarize_lingering(second)
+            try:
+                targets = proxy_stop_targets(first, second)
+            except Invalid as error:
+                entry["stop"] = {"result": "refused", "reason": str(error)}
+                return self._save()
+            entry["stop"] = {"result": "sigterm-sent", "targets": signal_proxies(compatdata, targets, proc_root, sender),
+                             "signal": "SIGTERM", "forced_kill": False}
+            self._save()
+            observation = self.stop.check()
+            deadline = time.monotonic() + PROXY_STOP_WAIT
+            while not observation["clear_in_view"] and time.monotonic() < deadline:
+                time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+                observation = self.stop.check()
+            self.record["stop_observation"] = observation
+            if not observation["clear_in_view"]:
+                entry["stop"]["result"] = "sigterm-sent-processes-remain"
+                entry["after_stop"] = self.lingering()
+                return self._save()
+            self.record["settings_identity_unchanged"] = self._settings_unchanged()
+            self.process = None
+            self.record.update(phase="stop-observed", status="running")
+            self.record["installer"]["status"] = "exited"
+            self._save()
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            return self._fail("lingering-proxy-stop", error)
+        return self._post_inspect()
 
     def wait_gui_check(self, timeout=30):
         require(self.record["phase"] in ("gui-check-spawned", "gui-check-exited"), "GUI check not running")
@@ -453,6 +597,9 @@ class DependencyInstallSession:
             self._save()
         except (OSError, ValueError, TypeError, KeyError) as error:
             return self._fail("installer-stop-observation", error)
+        return self._post_inspect()
+
+    def _post_inspect(self):
         # Independent post-checks: each is collected even if another fails.
         errors = {}
         for name, check in (("inputs", self._guard), ("staged-input", lambda: self._check_staged(self.staged))):
@@ -700,7 +847,7 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                 session = DependencyInstallSession(plan, store, refresh, plan.digest, ProcessStopCheck(plan.recheck.compatdata))
                 session.start_gui_check()
                 print("winverの画面が出たら、内容を確認して閉じてください。", file=output, flush=True)
-                outcome = _wait_loop(session.wait_gui_check, stream, output)
+                outcome = _wait_loop(session.wait_gui_check, stream, output, "gui_check")
                 if outcome["phase"] == "gui-check-stopped":
                     print("winverの画面が表示され、閉じられましたか？ 表示された場合は1、表示されなかった場合はq: ", end="", file=output, flush=True)
                     if session.confirm_display(stream.readline(32).strip() == "1")["phase"] == "gui-check-stopped":
@@ -709,7 +856,9 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                             stage = "dependency-installer"
                             session.start_installer()
                             print("インストーラの画面で操作してください。完了を待っています。", file=output, flush=True)
-                            _wait_loop(session.wait_installer, stream, output)
+                            _wait_loop(session.wait_installer, stream, output, "installer")
+                            if session.record["installer"]["status"] == "exited-processes-remain":
+                                _offer_session_proxy_stop(session, stream, output, selection._text)
                         else:
                             session.decline_installer()
             report.update(installation=dict(session.record), writes=[
@@ -731,14 +880,74 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
     return _save_result(selection, directory, home, report, protected, output)
 
 
-def _wait_loop(wait, stream, output):
+def _wait_loop(wait, stream, output, section):
     while True:
         outcome = wait(30)
-        if outcome["status"] != "needs-user":
+        if outcome["status"] != "needs-user" or outcome[section]["status"] == "exited-processes-remain":
             return outcome
         print("未完了です。強制終了していません。1で再待機、qで記録を残して戻る: ", end="", file=output, flush=True)
         if stream.readline(32).strip() != "1":
             return outcome
+
+
+def _print_lingering(summary, output, text):
+    print(f"このprefixのプロセスが{len(summary['processes'])}件残っています（読めなかったもの {summary['unreadable_count']}件）。",
+          file=output)
+    for item in summary["processes"]:
+        print("  " + text(item["role"] + " / " + item["name"] + " [" + item["place"] + "] pid " + str(item["pid"])), file=output)
+
+
+def _confirm_proxy_stop(count, stream, output):
+    print(f"UCManSvcから起動されたSdProxy {count}件だけにSIGTERMを送り、Wineの終了を待ちます。", file=output)
+    print("ほかのプロセス・ほかのprefix・ゲームには送りません。強制終了（SIGKILL）はしません。", file=output)
+    print("送る場合は1、何もしないで記録を残す場合はq: ", end="", file=output, flush=True)
+    return stream.readline(32).strip() == "1"
+
+
+def _offer_session_proxy_stop(session, stream, output, text):
+    summary, targets, reason = session.preview_proxy_stop()
+    _print_lingering(summary, output, text)
+    if targets is None:
+        print("SdProxy限定の停止条件を満たしません: " + text(reason) + "。何もしません。", file=output)
+        session.record.setdefault("lingering", {"section": "installer"})["stop"] = {"result": "refused", "reason": reason}
+        session._save()
+        return
+    if not _confirm_proxy_stop(len(targets), stream, output):
+        session.record.setdefault("lingering", {"section": "installer"})["stop"] = {"result": "declined"}
+        session._save()
+        return
+    result = session.stop_lingering_proxies()
+    print("停止後の状態: " + text(result["status"]), file=output)
+
+
+def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sender=None):
+    """Menu 9: when the prefix view is not clear, optionally stop UCManSvc-descended SdProxy only."""
+    if stop.check()["clear_in_view"]:
+        return None
+    first, second = inventory_processes(base.compatdata, stop.proc_root), inventory_processes(base.compatdata, stop.proc_root)
+    entry = {"observed": summarize_lingering(second)}
+    _print_lingering(entry["observed"], output, text)
+    try:
+        targets = proxy_stop_targets(first, second)
+    except Invalid as error:
+        entry["stop"] = {"result": "refused", "reason": str(error)}
+        print("SdProxy限定の停止条件を満たしません: " + text(str(error)) + "。何もしません。", file=output)
+        return entry
+    if not _confirm_proxy_stop(len(targets), stream, output):
+        entry["stop"] = {"result": "declined"}
+        return entry
+    RecheckSession(base, store, None, None, stop)._guard()
+    entry["stop"] = {"result": "sigterm-sent", "targets": signal_proxies(base.compatdata, targets, stop.proc_root, sender),
+                     "signal": "SIGTERM", "forced_kill": False}
+    observation = stop.check()
+    deadline = time.monotonic() + PROXY_STOP_WAIT
+    while not observation["clear_in_view"] and time.monotonic() < deadline:
+        time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+        observation = stop.check()
+    entry["stop"]["result"] = "stopped" if observation["clear_in_view"] else "sigterm-sent-processes-remain"
+    if not observation["clear_in_view"]:
+        entry["after_stop"] = summarize_lingering(inventory_processes(base.compatdata, stop.proc_root))
+    return entry
 
 
 def _save_result(selection, directory, home, report, protected, output):
@@ -782,9 +991,12 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
         selection._private_report_directory(home, protected)
         lock = hashlib.sha256(str(base.compatdata).encode()).hexdigest()
         with PrivateStore(management) as store, store.locked(lock):
-            inspection = inspect_managed_dependency(base, store, ProcessStopCheck(base.compatdata), recipe)
+            stop = ProcessStopCheck(base.compatdata)
+            lingering = offer_reinspection_proxy_stop(base, store, stop, stream, output, selection._text)
+            inspection = inspect_managed_dependency(base, store, stop, recipe)
             history = [item for item in store.inventory()["dependency_installs"] if item.get("app_id") == record["app_id"]]
-        report = {"mode": "managed-dependency-reinspection-result", "scope": SCOPE, "app_id": record["app_id"],
+        report = {"mode": "managed-dependency-reinspection-result", "scope": SCOPE, "tool_version": VERSION,
+                  "app_id": record["app_id"], "lingering": lingering,
                   "inspection": inspection, "installation_history": history, "wine_started": False,
                   "installation_records_updated": False, "preparation_complete": False,
                   "writes": [{"scope": "private-locks-and-result-json"}]}
