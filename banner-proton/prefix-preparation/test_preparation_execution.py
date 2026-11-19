@@ -125,6 +125,56 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(report["checks"]["private-launch-paths"]["status"], "rejected")
         self.assertTrue((self.base / "-1").exists())
 
+    def inspect_context(self, environment=None):
+        return execution.inspect_prelaunch_context(steam=self.steam, settings=self.settings,
+            home=self.root, environment={} if environment is None else environment, runtime_root=self.root)
+
+    def test_batch_context_is_metadata_only_without_child_or_file_changes(self):
+        before = self.snapshot()
+        with patch("subprocess.Popen", side_effect=AssertionError("no child")):
+            report = self.inspect_context({"DISPLAY": ":0", "PROOT_FP_KEY": "DUMMY_PRIVATE_PROTOCOL"})
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(report["writes"], [])
+        self.assertFalse(report["execution_authorized"])
+        self.assertTrue(report["environment_presence"]["PROOT_FP_KEY"])
+        self.assertNotIn("DUMMY_PRIVATE_PROTOCOL", json.dumps(report))
+        self.assertIn("filesystem-private-state-parent", report["checks"])
+
+    def test_batch_context_does_not_read_authentication_file(self):
+        auth = self.root / "authority"
+        auth.write_text("DUMMY_AUTH_SECRET")
+        before = self.snapshot()
+        with patch("builtins.open", side_effect=AssertionError("no content reads")):
+            report = self.inspect_context({"XAUTHORITY": str(auth)})
+        value = report["checks"]["gui-authority-metadata"]
+        self.assertTrue(value["regular"])
+        self.assertFalse(value["content_read"])
+        self.assertEqual(before, self.snapshot())
+        self.assertNotIn("DUMMY_AUTH_SECRET", json.dumps(report))
+        self.assertNotIn(str(auth), json.dumps(report))
+
+    def test_batch_context_continues_after_bad_auth_path_and_hides_values(self):
+        report = self.inspect_context({"XAUTHORITY": str(self.root / ".env"),
+                                       "DISPLAY": "REMOTE_PRIVATE_HOST:0", "COPYPREFIX": "1"})
+        self.assertEqual(report["checks"]["gui-authority-metadata"]["status"], "rejected")
+        self.assertEqual(report["checks"]["filesystem-steam"]["status"], "accepted")
+        self.assertTrue(report["copy_prefix_requested"])
+        self.assertFalse(report["checks"]["gui-display-metadata"]["connection_verified"])
+        self.assertNotIn("REMOTE_PRIVATE_HOST", json.dumps(report))
+        self.assertNotIn(".env", json.dumps(report))
+
+    def test_batch_context_captures_capacity_and_mount_restrictions(self):
+        fs = os.statvfs(self.root)
+        values = list(fs)
+        values[8] = getattr(os, "ST_RDONLY", 1) | getattr(os, "ST_NOEXEC", 8)
+        with patch.object(os, "statvfs", return_value=os.statvfs_result(values)):
+            report = self.inspect_context()
+        value = report["checks"]["filesystem-tool-parent"]
+        self.assertTrue(value["read_only"])
+        self.assertTrue(value["noexec"])
+        self.assertIn("available_inodes", value)
+        self.assertFalse(value["actual_write_tested"])
+
     def hashes(self):
         return {name: hashlib.sha256((self.tool / name).read_bytes()).hexdigest() if (self.tool / name).exists() else None
                 for name in ("proton", "version", "user_settings.py")}

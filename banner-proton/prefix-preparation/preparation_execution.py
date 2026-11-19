@@ -10,7 +10,9 @@ import copy
 import hashlib
 import json
 import os
+import re
 import secrets
+import stat
 import subprocess
 from dataclasses import dataclass, field
 
@@ -163,6 +165,87 @@ def inspect_initialization_inputs(*, tool, steam, registration_id, expected_hash
     inspect("prefix-absence", prefix)
     inspect("private-launch-paths", private_paths)
     inspect("process-observation", processes)
+    return result
+
+
+def inspect_prelaunch_context(*, steam, settings, home, environment, runtime_root):
+    """Independent metadata observations, also usable when target planning fails.
+
+    No directories, locks, connections or subprocesses; no credential content,
+    command lines, environment values or mount tables are exported.
+    """
+    result = {"scope": "read-only-prelaunch-context", "checks": {}, "writes": [],
+              "execution_authorized": False, "active_connection_tested": False}
+
+    def inspect(name, function):
+        try:
+            result["checks"][name] = {"status": "accepted", **function()}
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            result["checks"][name] = {"status": "rejected", "error_class": type(error).__name__,
+                                      "errno": getattr(error, "errno", None)}
+
+    def filesystem(path):
+        path = safe_path(path)
+        nearest = path
+        while not nearest.exists():
+            nearest = nearest.parent
+        safe_path(nearest)
+        info, fs = nearest.stat(), os.statvfs(nearest)
+        require(nearest.is_dir(), "filesystem directory required")
+        return {"exists": path.exists(), "ancestor_owner_matches_self": info.st_uid == os.getuid(),
+                "ancestor_mode": format(stat.S_IMODE(info.st_mode), "04o"),
+                "ancestor_other_writer": bool(info.st_mode & 0o022),
+                "available_bytes": fs.f_bavail * (fs.f_frsize or fs.f_bsize),
+                "available_inodes": fs.f_favail,
+                "read_only": bool(fs.f_flag & getattr(os, "ST_RDONLY", 1)),
+                "noexec": bool(fs.f_flag & getattr(os, "ST_NOEXEC", 8)),
+                "actual_write_tested": False}
+
+    for name, path in (("steam", steam), ("tool-parent", steam / "compatibilitytools.d"),
+                       ("compatdata-parent", steam / "steamapps/compatdata"), ("settings", settings),
+                       ("private-work-parent", home / ".local/share/droiddeck-preparation-work"),
+                       ("private-state-parent", home / ".local/state/droiddeck-prefix-preparation")):
+        inspect("filesystem-" + name, lambda path=path: filesystem(path))
+
+    def metadata(path):
+        path = safe_path(path)
+        if not path.exists():
+            return {"exists": False}
+        info = path.stat()
+        return {"exists": True, "regular": stat.S_ISREG(info.st_mode),
+                "socket": stat.S_ISSOCK(info.st_mode), "mode": format(stat.S_IMODE(info.st_mode), "04o"),
+                "owner_matches_self": info.st_uid == os.getuid(), "link_count": info.st_nlink,
+                "readable": os.access(path, os.R_OK), "content_read": False}
+
+    def display():
+        value = environment.get("DISPLAY", "")
+        require(type(value) is str, "invalid display input")
+        match = re.fullmatch(r":([0-9]{1,5})(?:\.[0-9]{1,3})?", value)
+        if match is None:
+            return {"present": bool(value), "local_socket_form": False, "connection_verified": False}
+        return {"present": True, "local_socket_form": True, "connection_verified": False,
+                "endpoint": metadata(runtime_root / "tmp/.X11-unix" / ("X" + match[1]))}
+
+    def authority():
+        path = environment.get("XAUTHORITY")
+        if path:
+            return {"explicit": True, **metadata(safe_path(path))}
+        parent_home = environment.get("HOME")
+        return {"explicit": False, **metadata(safe_path(parent_home or home) / ".Xauthority")}
+
+    inspect("gui-display-metadata", display)
+    inspect("gui-authority-metadata", authority)
+    for name, relative in (("system-python", "usr/bin/python3"), ("arm64-loader", "lib/ld-linux-aarch64.so.1")):
+        # System paths are commonly symlinks: observe existence/access only,
+        # never follow them to read content or treat them as trusted code.
+        def system_file(relative=relative):
+            path = runtime_root / relative
+            return {"exists": path.exists(), "executable": os.access(path, os.X_OK), "code_executed": False}
+        inspect(name, system_file)
+    result["environment_presence"] = {key: bool(environment.get(key)) for key in
+        ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY", "PULSE_SERVER", "DBUS_SESSION_BUS_ADDRESS",
+         "FEX_ROOTFS", "FEX_APP_CONFIG_LOCATION", "PROOT_FP_KEY", "LD_PRELOAD", "LD_AUDIT")}
+    result["copy_prefix_requested"] = environment.get("COPYPREFIX") == "1"
     return result
 
 

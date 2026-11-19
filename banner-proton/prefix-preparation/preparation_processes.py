@@ -48,6 +48,10 @@ def _matches(raw, compatdata):
 def observe_processes(compatdata, proc_root=Path("/proc")):
     compatdata, proc_root = safe_path(compatdata), safe_path(proc_root)
     active, unknown, inspected = 0, 0, 0
+    failures = {}
+
+    def failed(stage):
+        failures[stage] = failures.get(stage, 0) + 1
     root_fd = os.open(proc_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         own_fd = os.open(str(os.getpid()), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
@@ -61,16 +65,22 @@ def observe_processes(compatdata, proc_root=Path("/proc")):
                 if not entry.name.isascii() or not entry.name.isdecimal() or int(entry.name) == os.getpid():
                     continue
                 descriptor = None
+                stage = "open-pid"
                 try:
                     descriptor = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                    stage = "pid-owner"
                     if os.fstat(descriptor).st_uid != owner:
                         continue
                     inspected += 1
+                    stage = "stat-before"
                     before = _identity(_read(descriptor, "stat", 8192), entry.name)
                     if before[0] in ("Z", "X"):
                         continue
+                    stage = "prefix-environment"
                     matches = _matches(_read(descriptor, "environ", MAX_ENVIRON), compatdata)
+                    stage = "stat-after"
                     after = _identity(_read(descriptor, "stat", 8192), entry.name)
+                    stage = "identity-recheck"
                     require(before[1] == after[1], "proc identity changed")
                     if after[0] not in ("Z", "X") and matches:
                         active += 1
@@ -81,8 +91,10 @@ def observe_processes(compatdata, proc_root=Path("/proc")):
                     except FileNotFoundError:
                         continue
                     unknown += 1
+                    failed(stage)
                 except (OSError, ValueError, UnicodeError):
                     unknown += 1
+                    failed(stage)
                 finally:
                     if descriptor is not None:
                         os.close(descriptor)
@@ -90,7 +102,7 @@ def observe_processes(compatdata, proc_root=Path("/proc")):
         os.close(root_fd)
     return {"scope": "same-proc-directory-owner-as-self", "active_count": active, "unknown_count": unknown,
             "inspected_count": inspected, "clear_in_view": active == 0 and unknown == 0,
-            "device_namespace_verified": False}
+            "device_namespace_verified": False, "failure_stages": failures}
 
 
 @dataclass(frozen=True)
@@ -105,4 +117,7 @@ class ProcessStopCheck:
         return {"clear_in_view": first["clear_in_view"] and second["clear_in_view"],
                 "active_count": max(first["active_count"], second["active_count"]),
                 "unknown_count": max(first["unknown_count"], second["unknown_count"]),
-                "scope": first["scope"], "device_namespace_verified": False}
+                "scope": first["scope"], "device_namespace_verified": False, "observations": 2,
+                "inspected_count": max(first["inspected_count"], second["inspected_count"]),
+                "failure_stages": {stage: max(first["failure_stages"].get(stage, 0), second["failure_stages"].get(stage, 0))
+                                   for stage in first["failure_stages"].keys() | second["failure_stages"].keys()}}

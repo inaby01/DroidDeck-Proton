@@ -54,6 +54,36 @@ class SelectionTests(unittest.TestCase):
         report = json.loads((self.directory / name).read_bytes()) if name else None
         return code, report, output.getvalue(), name
 
+    def test_summary_distinguishes_collected_passes_from_deferred_work(self):
+        report = selection.summarize_inspection({"installation_plan": {"action": "reuse-verified-tree"},
+            "binding_plan": {"adapter": "example"}, "initialization_inputs": {"checks": {
+                "process-observation": {"status": "accepted", "clear_in_view": True}}}})
+        self.assertEqual(report["status"], "collected-checks-passed")
+        self.assertEqual(report["unexpected_findings"], [])
+        self.assertTrue(report["deferred_steps"])
+        self.assertTrue(report["unverified_limits"])
+        self.assertFalse(report["execution_authorized"])
+
+    def test_summary_separates_rejected_checks_from_attention_observations(self):
+        report = selection.summarize_inspection({"binding_plan": {"status": "blocked"},
+            "initialization_inputs": {"checks": {
+                "launcher-inputs": {"status": "rejected"},
+                "process-observation": {"status": "accepted", "clear_in_view": False}}},
+            "prelaunch_context": {"copy_prefix_requested": True}})
+        self.assertEqual(report["status"], "unexpected-findings")
+        self.assertEqual(report["unexpected_findings"], ["binding-inputs", "launcher-inputs"])
+        self.assertIn("target-processes-active-or-unreadable", report["attention_items"])
+        self.assertIn("copy-prefix-requested", report["attention_items"])
+
+    def test_fatal_target_plan_still_saves_independent_context_and_summary(self):
+        with patch.object(selection, "selected_plan", side_effect=Invalid("PRIVATE_EXCEPTION_VALUE")):
+            _, report, output, _ = self.run_menu()
+        self.assertIn("filesystem-steam", report["prelaunch_context"]["checks"])
+        self.assertIn("target-plan", report["inspection_summary"]["unexpected_findings"])
+        self.assertIn("想定外の検査失敗あり", output)
+        self.assertNotIn("PRIVATE_EXCEPTION_VALUE", json.dumps(report))
+        self.assertNotIn("PRIVATE_EXCEPTION_VALUE", output)
+
     def test_catalog_uses_environment_referenced_file_and_normalizes_id(self):
         source, digest, games = self.catalog()
         self.assertEqual(source, self.fixture.game.added)

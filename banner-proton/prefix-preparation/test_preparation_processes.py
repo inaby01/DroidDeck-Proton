@@ -116,12 +116,35 @@ class ProcessTests(unittest.TestCase):
         (self.proc / self.pid).symlink_to(self.root,target_is_directory=True)
         self.assertEqual(self.observe()["unknown_count"],1)
 
+    def test_failure_stages_are_aggregated_without_pid_or_environment(self):
+        folder = self.record(b"DUMMY_SECRET=never-log\0")
+        (folder / "environ").unlink()
+        result = self.observe()
+        self.assertEqual(result["failure_stages"], {"prefix-environment": 1})
+        self.assertFalse(result["clear_in_view"])
+        self.assertNotIn(self.pid, json.dumps(result))
+        self.assertNotIn("DUMMY_SECRET", json.dumps(result))
+        (folder / "stat").write_text("DUMMY_INVALID_STAT")
+        result = self.observe()
+        self.assertEqual(result["failure_stages"], {"stat-before": 1})
+
+    def test_two_observations_report_peak_failure_counts(self):
+        base = {"scope": "fixture", "clear_in_view": False, "active_count": 0, "unknown_count": 2,
+                "inspected_count": 3, "failure_stages": {"stat-before": 2}}
+        other = {**base, "failure_stages": {"prefix-environment": 1}, "unknown_count": 1}
+        with patch.object(processes, "observe_processes", side_effect=(base, other)):
+            result = processes.ProcessStopCheck(self.target, self.proc).check()
+        self.assertEqual(result["failure_stages"], {"stat-before": 2, "prefix-environment": 1})
+        self.assertEqual(result["observations"], 2)
+        self.assertFalse(result["device_namespace_verified"])
+
     def test_process_entry_limit_blocks_observation(self):
         with patch.object(processes,"MAX_PROCESSES",0), self.assertRaises(Invalid):
             self.observe()
 
     def test_stop_check_requires_both_observations_to_be_clear(self):
-        clear = {"scope":"fixture","clear_in_view":True,"active_count":0,"unknown_count":0}
+        clear = {"scope":"fixture","clear_in_view":True,"active_count":0,"unknown_count":0,
+                 "inspected_count": 1, "failure_stages": {}}
         active = {**clear,"clear_in_view":False,"active_count":1}
         for pair in ((clear,active),(active,clear)):
             with patch.object(processes,"observe_processes",side_effect=pair):

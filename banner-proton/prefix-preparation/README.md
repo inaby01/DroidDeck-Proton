@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.17.0)
+# Prefix preparation: offline planning and local staging (0.18.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -540,3 +540,27 @@ The report retains explicit runtime, process-scope and growth blockers and never
 authorizes execution. The existing launcher guards and CLI execution restrictions
 remain unchanged. Prefix initialization, Wine GUI and dependencies still need
 separate device validation after the test scope and changes have been shared.
+
+## Batched observations and progress reporting (0.18.0)
+
+The normal planning action includes the initialization input inspection and collects
+independent filesystem metadata for Steam, tools, compatdata, settings and proposed
+private work/state roots. It records available bytes/inodes, owner/mode and mount
+read-only/noexec flags. These are observations, not actual write or execution tests.
+Local X11 endpoint and authority-file metadata, known system executable availability,
+and presence of selected runtime variables are collected without reading cookies,
+exporting environment values, opening GUI connections or starting subprocesses.
+The verified inventory also identifies the selected native Wine branch and inputs;
+this is layout information, not runtime validation. No assets are executed.
+
+Same-owner proc observations include fixed failure-stage counts and the peak counts
+from two views, without PIDs, command lines or raw environments. Visibility and
+serialization limitations remain unchanged. Independent context remains available
+in an interactive error report even if target-dependent planning fails.
+
+The JSON and terminal distinguish collected checks that passed, rejected checks,
+observations requiring attention, dependent checks not run, deferred implementation
+steps and unverified runtime limits. A legacy parser-limit refusal that the bounded
+preservation parser handles is informational, not a new failure. The existing
+blocked execution status is retained and is separate from the inspection summary.
+This batch replaces the unrun 0.17.0 inspection; there is no need to run both.

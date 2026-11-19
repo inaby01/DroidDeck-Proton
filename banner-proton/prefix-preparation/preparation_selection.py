@@ -35,7 +35,10 @@ from preparation_common import (
     safe_path,
     string,
 )
-from preparation_execution import inspect_initialization_inputs
+from preparation_execution import (
+    inspect_initialization_inputs,
+    inspect_prelaunch_context,
+)
 from preparation_installation import plan_installation
 from preparation_target import pin_registration, registrations
 
@@ -131,7 +134,7 @@ def _prefix_capacity(steam, inventory):
 
 
 def selected_plan(directory, config, key, source, source_digest, games, steam, settings, home, renderer, environment,
-                  runtime_root=Path("/")):
+                  runtime_root=Path("/"), collected_context=None):
     directory, steam, settings, home = map(safe_path, (directory, steam, settings, home))
     require(steam.is_dir() and settings.is_dir(), "existing Steam/settings roots required")
     config = validate_selection_config(copy.deepcopy(config))
@@ -197,6 +200,11 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
         if report["installation_plan"]["action"] == "reuse-verified-tree":
             report["steam_config_validation"] = inspect_steam_config(steam)
             source_entries = {**installation.inventory.entries, **installation.customization.overlays}
+            branch = "files/bin-arm64" if "files/bin-arm64" in source_entries else "files/bin"
+            report["native_wine_layout"] = {"branch": branch, "execution_tested": False,
+                "inputs": {name: {"present": branch + "/" + name in source_entries,
+                    "kind": source_entries.get(branch + "/" + name, {}).get("kind")}
+                           for name in ("wine", "wineserver")}}
             launcher_hashes = {name: source_entries[name]["sha256"] if name in source_entries else None
                                for name in ("proton", "version", "user_settings.py")}
             report["initialization_inputs"] = inspect_initialization_inputs(
@@ -224,7 +232,68 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
     _verify_catalog(environment, source, source_digest)
     pin.verify()
     require(_prefix_state(steam, key) == prefix, "prefix state changed during planning")
+    report["prelaunch_context"] = collected_context if collected_context is not None else inspect_prelaunch_context(
+        steam=steam, settings=settings, home=home, environment=environment, runtime_root=runtime_root)
+    report["inspection_summary"] = summarize_inspection(report)
     return report
+
+
+def summarize_inspection(report):
+    """Distinguish failed checks, observations needing attention and future work."""
+    passed, unexpected, attention = [], [], []
+    if "error_class" in report:
+        unexpected.append("target-plan")
+    if report.get("installation_plan", {}).get("action") == "reuse-verified-tree":
+        passed.append("installed-tool-identity")
+    binding = report.get("binding_plan", {})
+    if binding.get("status") == "blocked":
+        unexpected.append("binding-inputs")
+    elif binding:
+        passed.append("binding-plan")
+    if "archive-missing-or-ambiguous" in report.get("blockers", []):
+        attention.append("archive-location")
+    for name, value in report.get("initialization_inputs", {}).get("checks", {}).items():
+        if value["status"] == "rejected":
+            unexpected.append(name)
+        elif name == "process-observation" and not value.get("clear_in_view", False):
+            attention.append("target-processes-active-or-unreadable")
+        else:
+            passed.append(name)
+    context = report.get("prelaunch_context", {})
+    for name, value in context.get("checks", {}).items():
+        if value["status"] == "rejected":
+            unexpected.append(name)
+        else:
+            passed.append(name)
+            if name.startswith("filesystem-"):
+                if value["read_only"]:
+                    attention.append(name + "-read-only")
+                if value["ancestor_other_writer"] or not value["ancestor_owner_matches_self"]:
+                    attention.append(name + "-ownership-or-permissions")
+                if value["available_bytes"] == 0 or value["available_inodes"] == 0:
+                    attention.append(name + "-space-or-inodes-unavailable")
+                if name == "filesystem-tool-parent" and value["noexec"]:
+                    attention.append("tool-filesystem-noexec")
+            if name == "system-python" and not value["executable"]:
+                attention.append("system-python-unavailable")
+    if any(not value["present"] for value in report.get("native_wine_layout", {}).get("inputs", {}).values()):
+        attention.append("native-wine-layout-missing")
+    capacity = report.get("prefix_capacity", {})
+    baseline = capacity.get("template_allocation_estimate_bytes")
+    if baseline is not None and capacity["available_bytes"] < baseline:
+        attention.append("insufficient-template-baseline-space")
+    if context.get("copy_prefix_requested"):
+        attention.append("copy-prefix-requested")
+    return {"status": "unexpected-findings" if unexpected else "attention-needed" if attention else "collected-checks-passed",
+            "passed_checks": passed, "unexpected_findings": unexpected, "attention_items": attention,
+            "dependent_checks_not_run": [name for name, present in (
+                ("initialization-inputs", "initialization_inputs" in report),
+                ("binding-plan", "binding_plan" in report)) if not present],
+            "deferred_steps": ["dedicated-prefix-initialization", "dependency-installation", "unauthenticated-template-and-cloning",
+                               "binding-application-and-real-game-validation"],
+            "unverified_limits": ["other-process-namespaces-and-external-launchers", "actual-write-and-execution-permissions",
+                                  "gui-connection-and-wine-runtime", "prefix-and-dependency-growth"],
+            "execution_authorized": False, "preparation_complete": False}
 
 
 def save_selection_report(directory, report, protected_roots=()):
@@ -361,6 +430,7 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
     protected_roots = [steam, settings]
     stage, selected, report = "configuration", None, None
     selected_exe = None
+    context = None
     try:
         config_path, config_hash = None, None
         if config is None:
@@ -384,9 +454,11 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
         selected_exe = Path(games[selected]["exe"])
         protected_roots.append(selected_exe.parent)
         print("使用するProton（計画）: " + _text(config["payload"]["root"]), file=output)
+        context = inspect_prelaunch_context(steam=steam, settings=settings, home=home,
+                                            environment=environment, runtime_root=runtime_root)
         stage = "selected-plan"
         report = selected_plan(directory, config, selected, source, source_digest, games, steam, settings, home, renderer,
-                               environment, runtime_root)
+                               environment, runtime_root, collected_context=context)
         if config_path is not None:
             require(load_json(config_path)[1] == config_hash, "configuration changed")
         print("prefix: " + _text(report["prefix"]["compatdata"]), file=output)
@@ -430,6 +502,21 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
         print("検査停止: " + _text(report["check"]) + " / " + report["reason"] +
               " / " + report["error_class"] + " / errno=" + str(report["errno"]), file=output)
         print("診断結果を保存します。prefixや設定は変更していません。", file=output)
+    if context is not None:
+        report["prelaunch_context"] = context
+    report["inspection_summary"] = summarize_inspection(report)
+    summary = report["inspection_summary"]
+    label = {"unexpected-findings": "想定外の検査失敗あり", "attention-needed": "観測結果に要確認あり",
+             "collected-checks-passed": "今回収集した検査は通過"}[summary["status"]]
+    print("検査の集計: " + label, file=output)
+    print(f"通過 {len(summary['passed_checks'])} / 想定外 {len(summary['unexpected_findings'])} / 要確認 {len(summary['attention_items'])}", file=output)
+    for name in summary["unexpected_findings"]:
+        print("  検査失敗: " + _text(name), file=output)
+    for name in summary["attention_items"]:
+        print("  要確認: " + _text(name), file=output)
+    print("未確認の範囲: 他namespaceの停止・GUI/Wine動作・実書込/実行権限・初期化後の増分", file=output)
+    print("未実施の後工程: prefix初期化 → 依存導入 → 未認証ひな形・複製 → 割り当て反映・実ゲーム検証", file=output)
+    print("検査通過は実行許可ではありません。Wine・設定・prefixの変更は行っていません。", file=output)
     try:
         saved_path, private_copy = save_selection_result(directory, home, report, protected_roots)
     except (OSError, ValueError):
