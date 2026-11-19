@@ -73,6 +73,58 @@ class ExecutionTests(unittest.TestCase):
                         "target_pin": pin_registration(self.added,self.key,self.exe_root,self.steam)}
         self.lock_key = hashlib.sha256(str(self.compatdata).encode()).hexdigest()
 
+    def inspect_initialization(self):
+        return execution.inspect_initialization_inputs(
+            tool=self.tool, steam=self.steam, registration_id=self.key, expected_hashes=self.hashes(),
+            work=self.root / "future-work", home=self.root / "future-home")
+
+    def test_initialization_inspection_never_launches_creates_or_authorizes(self):
+        observation = {"scope": "same-proc-directory-owner-as-self", "clear_in_view": True,
+                       "active_count": 0, "unknown_count": 0, "device_namespace_verified": False}
+        before = self.snapshot()
+        with patch.object(ProcessStopCheck, "check", return_value=observation), \
+             patch("subprocess.Popen", side_effect=AssertionError("no child")):
+            report = self.inspect_initialization()
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(report["checks"]["launcher-inputs"]["status"], "accepted")
+        self.assertEqual(report["checks"]["prefix-absence"]["status"], "accepted")
+        self.assertEqual(report["checks"]["private-launch-paths"]["status"], "accepted")
+        self.assertFalse(report["execution_authorized"])
+        self.assertFalse(report["prefix_initialization_authorized"])
+        self.assertFalse(report["checks"]["process-observation"]["device_namespace_verified"])
+        self.assertIn("device-process-scope-unverified", report["blockers"])
+        self.assertEqual(report["writes"], [])
+
+    def test_initialization_inspection_aggregates_failures_without_raw_exceptions(self):
+        self.compatdata.mkdir()
+        (self.root / "future-home").mkdir()
+        (self.tool / "user_settings.py").write_text('raise RuntimeError("DUMMY_PRIVATE_SETTINGS")')
+        before = self.snapshot()
+        with patch.object(ProcessStopCheck, "check", side_effect=OSError(5, "DUMMY_PRIVATE_ERROR")):
+            report = self.inspect_initialization()
+        for name in ("launcher-inputs", "prefix-absence", "private-launch-paths", "process-observation"):
+            self.assertEqual(report["checks"][name]["status"], "rejected")
+        self.assertEqual(before, self.snapshot())
+        self.assertNotIn("DUMMY_PRIVATE", json.dumps(report))
+
+    def test_initialization_inspection_does_not_ignore_active_or_unknown_processes(self):
+        for active, unknown in ((1, 0), (0, 1)):
+            with patch.object(ProcessStopCheck, "check", return_value={"clear_in_view": False,
+                    "active_count": active, "unknown_count": unknown, "device_namespace_verified": False}):
+                report = self.inspect_initialization()
+            self.assertIn("target-process-view-not-clear", report["blockers"])
+            self.assertFalse(report["execution_authorized"])
+
+    def test_initialization_inspection_preserves_signed_alias_and_unsafe_ancestor(self):
+        (self.base / "-1").mkdir()
+        self.root.chmod(0o777)
+        self.addCleanup(self.root.chmod, 0o700)
+        with patch.object(ProcessStopCheck, "check", return_value={"clear_in_view": True}):
+            report = self.inspect_initialization()
+        self.assertEqual(report["checks"]["prefix-absence"]["status"], "rejected")
+        self.assertEqual(report["checks"]["private-launch-paths"]["status"], "rejected")
+        self.assertTrue((self.base / "-1").exists())
+
     def hashes(self):
         return {name: hashlib.sha256((self.tool / name).read_bytes()).hexdigest() if (self.tool / name).exists() else None
                 for name in ("proton", "version", "user_settings.py")}

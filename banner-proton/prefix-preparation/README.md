@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.16.2)
+# Prefix preparation: offline planning and local staging (0.17.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -524,3 +524,19 @@ count and input digest, without settings values. These observations do not autho
 execution or settings writes. Every VDF rejection now has a fixed diagnostic code;
 the local regression checks this coverage. Device validation of this change remains
 separate from local fixture tests.
+
+## Initialization input inspection (0.17.0)
+
+When the selected tool is already fully verified, normal read-only planning also
+checks the launcher hashes and literal settings restrictions, missing canonical
+prefix and aliases, absent private work/home paths and their existing ancestor,
+and two same-owner proc observations. It aggregates failures using fixed check
+names and error classes without raw settings, process environment values or output.
+No child is started, directory created, lock acquired or settings file changed.
+
+This is input inspection for a future dedicated initialization test. Even a clear
+process view cannot establish other namespaces or external launcher serialization.
+The report retains explicit runtime, process-scope and growth blockers and never
+authorizes execution. The existing launcher guards and CLI execution restrictions
+remain unchanged. Prefix initialization, Wine GUI and dependencies still need
+separate device validation after the test scope and changes have been shared.

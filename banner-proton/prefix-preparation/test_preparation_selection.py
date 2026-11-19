@@ -115,6 +115,9 @@ class SelectionTests(unittest.TestCase):
         self.assertNotIn("payload-integrity-unverified", report["binding_plan"]["blockers"])
         self.assertFalse(report["binding_plan"]["other_games_changed"])
         self.assertFalse(report["binding_plan"]["default_changed"])
+        self.assertIn("launcher-inputs", report["initialization_inputs"]["checks"])
+        self.assertFalse(report["initialization_inputs"]["execution_authorized"])
+        self.assertEqual(report["initialization_inputs"]["writes"], [])
         self.assertEqual(before, self.fixture.game.snapshot())
 
     def test_rejected_binding_keeps_verified_installation_and_remaining_plan(self):

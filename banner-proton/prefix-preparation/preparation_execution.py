@@ -102,6 +102,70 @@ def _identities(tool, expected):
     return measured
 
 
+def inspect_initialization_inputs(*, tool, steam, registration_id, expected_hashes, work, home):
+    """Read-only qualification inputs for a future dedicated initialization test.
+
+    Does not make directories, lock, launch or interpret observations as permission.
+    Proc absence remains limited to the visible same-owner view, including on proot.
+    """
+    tool, steam, work, home = map(safe_path, (tool, steam, work, home))
+    key = app_id(registration_id)
+    compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
+    result = {"mode": "inspect-initialization-inputs", "command": list(OPERATIONS["initialize"]),
+              "execution_authorized": False, "prefix_initialization_authorized": False,
+              "preparation_complete": False, "writes": [], "checks": {},
+              "blockers": ["initialization-test-not-exposed", "device-process-scope-unverified",
+                           "wine-runtime-and-gui-unverified", "initialization-growth-unmeasured"]}
+
+    def inspect(name, function):
+        try:
+            value = function()
+            result["checks"][name] = {"status": "accepted", **(value if type(value) is dict else {})}
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            result["checks"][name] = {"status": "rejected", "error_class": type(error).__name__,
+                                      "errno": getattr(error, "errno", None)}
+            result["blockers"].append(name + "-rejected")
+
+    def launcher():
+        _identities(tool, expected_hashes)
+        return {"identity": "matched", "settings": "restricted-literal-only", "code_executed": False}
+
+    def prefix():
+        _aliases(steam, key)
+        exists = os.path.lexists(compatdata)
+        require(not exists, "new compatdata required")
+        return {"exists": False, "action": "new-prefix-only-blocked"}
+
+    def private_paths():
+        for private in (work, home):
+            require(not os.path.lexists(private), "private launch path already exists")
+            for protected in (steam, tool):
+                require(private != protected and not private.is_relative_to(protected) and
+                        not protected.is_relative_to(private), "launch directories overlap")
+            ancestor = private.parent
+            while not ancestor.exists():
+                ancestor = ancestor.parent
+            safe_path(ancestor)
+            info = ancestor.stat()
+            require(ancestor.is_dir() and info.st_uid == os.getuid() and not info.st_mode & 0o022,
+                    "unsafe private launch ancestor")
+        require(work != home and not work.is_relative_to(home) and not home.is_relative_to(work),
+                "overlapping private launch paths")
+        return {"existing_paths_adopted": False, "creation_authorized": False}
+
+    def processes():
+        observation = ProcessStopCheck(compatdata).check()
+        if not observation["clear_in_view"]:
+            result["blockers"].append("target-process-view-not-clear")
+        return observation
+
+    inspect("launcher-inputs", launcher)
+    inspect("prefix-absence", prefix)
+    inspect("private-launch-paths", private_paths)
+    inspect("process-observation", processes)
+    return result
+
+
 def _prefix(compatdata):
     safe_path(compatdata)
     require(compatdata.is_dir(), "prefix absent")

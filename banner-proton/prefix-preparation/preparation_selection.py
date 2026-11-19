@@ -35,6 +35,7 @@ from preparation_common import (
     safe_path,
     string,
 )
+from preparation_execution import inspect_initialization_inputs
 from preparation_installation import plan_installation
 from preparation_target import pin_registration, registrations
 
@@ -195,6 +196,12 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
                 report["blockers"].append("private-launch-path-already-exists")
         if report["installation_plan"]["action"] == "reuse-verified-tree":
             report["steam_config_validation"] = inspect_steam_config(steam)
+            source_entries = {**installation.inventory.entries, **installation.customization.overlays}
+            launcher_hashes = {name: source_entries[name]["sha256"] if name in source_entries else None
+                               for name in ("proton", "version", "user_settings.py")}
+            report["initialization_inputs"] = inspect_initialization_inputs(
+                tool=tool, steam=steam, registration_id=key, expected_hashes=launcher_hashes,
+                work=work, home=private_home)
             try:
                 report["binding_plan"] = checked("binding-plan", plan_binding,
                     steam, settings, key, installation.customization.directory).summary()
