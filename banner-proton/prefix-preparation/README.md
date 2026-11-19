@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and dedicated initialization trial (0.21.0)
+# Prefix preparation: offline planning and dependency planning and dedicated trial (0.22.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -643,3 +643,23 @@ inventory with mandatory reinspection. New result `probe-exited-unverified` mean
 only the fixed command and guarded postconditions passed; GUI, dependencies,
 other-namespace stop scope and complete preparation remain unverified. Timeout
 never kills a process or automatically retries. Old failed records remain intact.
+
+## Measured dependency plans (0.22.0)
+
+`--plan-dependency --assets <manifest> --asset-root <directory>
+--dependency-handler softdenchi-interactive --dependency-asset <asset-id>` binds a
+measured asset to a concrete handler plan without a registration or prefix write.
+It is a separate read-only mode and returns2 for a produced blocked plan. No new
+device action or installer execution is enabled by this mode.
+
+The original interactive bootstrap is retained with no guessed silent arguments
+or direct-MSI bypass, including its prerequisite handling. Product registration,
+file hashes/PE/versions, UCManSvc configuration and both COM views must be checked;
+exit0 alone is insufficient. MFC plans remain single-file candidates with an
+unresolved architecture mapping, no broad vcrun6 install, CRT/OLE overrides or
+substitution for MFC140. Original asset provenance, independent reference, terms,
+identity and product-role blockers remain; executable handlers and live probes are
+not yet connected. An unknown/partial/incompatible existing state never requests
+automatic repair, upgrade or deletion. A persisted verified label never authorizes
+a skip without live reinspection. Submitted postcondition observations are reported
+separately and cannot authorize execution or binding.

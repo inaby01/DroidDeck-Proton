@@ -35,6 +35,7 @@ from preparation_common import (
     string,
     unchanged,
 )
+from preparation_dependencies import plan_local_dependency
 from preparation_installation import plan_installation
 from preparation_payload import inspect_archive, verify_tree
 from preparation_preflight import inspect_preflight, preflight_script
@@ -311,6 +312,7 @@ def main():
     mode.add_argument("--inspect-runtime", action="store_true", help="read-only runtime source/library/socket inventory")
     mode.add_argument("--inspect-payload", action="store_true", help="read-only archive and optional installed-tree identity check")
     mode.add_argument("--plan", action="store_true")
+    mode.add_argument("--plan-dependency", action="store_true", help="read-only measured asset and concrete dependency plan")
     mode.add_argument("--plan-preparation", action="store_true", help="compose read-only installation/reuse, runtime and target plans")
     mode.add_argument("--stage-local", action="store_true", help="cache assets and pause private state; never prepare a prefix")
     mode.add_argument("--list-local", action="store_true", help="read private cache/run inventory")
@@ -323,6 +325,8 @@ def main():
     parser.add_argument("--recipes", type=Path)
     parser.add_argument("--droiddeck-version")
     parser.add_argument("--proton-version")
+    parser.add_argument("--dependency-handler", choices=sorted(HANDLERS))
+    parser.add_argument("--dependency-asset")
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--asset-root", type=Path)
     parser.add_argument("--tool-directory", help="plan target-only binding to an already registered custom tool")
@@ -345,7 +349,14 @@ def main():
         require(args.inspect_preflight or not args.probe_temporary, "temporary probes require preflight mode")
         require(args.plan_preparation or not any((args.runtime_audit, args.installation_mode)),
                 "runtime audit and installation mode require composed planning")
-        if args.select_plan or args.emit_selection_script:
+        require(args.plan_dependency or not (args.dependency_handler or args.dependency_asset),
+                "dependency options require dependency planning")
+        if args.plan_dependency:
+            allowed = {"plan_dependency", "assets", "asset_root", "dependency_handler", "dependency_asset"}
+            require(not any(value for key, value in vars(args).items() if key not in allowed), "dependency planning is a separate mode")
+            require(all((args.assets, args.asset_root, args.dependency_handler, args.dependency_asset)), "dependency planning inputs required")
+            result = plan_local_dependency(load_json(args.assets)[0], args.asset_root, args.dependency_asset, args.dependency_handler)
+        elif args.select_plan or args.emit_selection_script:
             allowed = {"select_plan", "emit_selection_script", "selection_config", "selection_directory"}
             require(not any(value for key, value in vars(args).items() if key not in allowed), "selection is a separate mode")
             config = load_json(args.selection_config)[0] if args.selection_config is not None else None
@@ -451,7 +462,7 @@ def main():
         parser.exit(1, "Input rejected; no preparation performed. Check input formats and paths.\n")
     print(report)
     # A readable report is distinct from a usable preparation plan.
-    return 2 if args.plan or args.plan_preparation or args.stage_local or args.inspect_preflight else 0
+    return 2 if args.plan or args.plan_dependency or args.plan_preparation or args.stage_local or args.inspect_preflight else 0
 
 
 if __name__ == "__main__":
