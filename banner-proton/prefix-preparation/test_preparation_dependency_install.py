@@ -519,6 +519,53 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(len(report['installation_history']), 1)
         self.assertFalse(report['wine_started'])
 
+    def test_plan_failure_names_the_check_and_keeps_independent_diagnostics(self):
+        appconfig = next((self.f.steam / 'compatibilitytools.d').glob('*/files/share/fex-emu/AppConfig'))
+        (appconfig / 'override.json').write_text('{"DUMMY_SECRET": true}')
+        with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe), \
+                patch('subprocess.Popen', side_effect=AssertionError('planning failure never starts Wine')):
+            status, report, output = self.menu('8\n1\n')
+        self.assertEqual(status, 2)
+        self.assertEqual(report['stage'], 'dependency-plan')
+        self.assertEqual(report['check'], 'recheck-fex-tool-tree')
+        self.assertEqual(report['reason'], 'FEX AppConfig is not empty; configuration not permitted')
+        self.assertIn('検査停止: recheck-fex-tool-tree', output)
+        checks = report['diagnostics']['checks']
+        self.assertEqual(checks['managed-recheck-plan']['check'], 'recheck-fex-tool-tree')
+        self.assertEqual(checks['dependency-state']['state'], 'absent')
+        self.assertIs(checks['asset-file']['recipe_bootstrap'], True)
+        self.assertEqual(checks['recheck-records']['records'][0]['status'], 'probe-exited-unverified')
+        self.assertTrue(checks['recheck-records']['records'][0]['prefix_version_matches_live'])
+        self.assertEqual(checks['registration']['registered'], True)
+        self.assertFalse(report['diagnostics']['wine_started'])
+        self.assertNotIn('DUMMY_SECRET', json.dumps(report))
+        self.assertFalse((self.f.store_root / dep.RECORDS).exists())
+
+    def test_environment_presence_change_is_named_without_values(self):
+        reference = self.config['runtime_reference']['environment_presence']
+        name = next((key for key in ('DISPLAY', 'XDG_RUNTIME_DIR', 'PULSE_SERVER', 'WAYLAND_DISPLAY')
+                     if reference.get(key) and self.environment.get(key)), None)
+        if name is None:
+            self.skipTest('fixture reference has no present display/runtime variable')
+        value = self.environment.pop(name)
+        with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe):
+            _, report, _ = self.menu('8\n1\n')
+        self.assertEqual(report['check'], 'recheck-runtime-environment')
+        differing = report['diagnostics']['checks']['environment-presence']['differing']
+        self.assertEqual(differing[name], {'reference': True, 'current': False})
+        self.assertNotIn(value, json.dumps(report))
+
+    def test_hard_linked_asset_is_named_with_metadata(self):
+        asset = self.f.fixture.source.root / 'sdrt-fixture.exe'
+        os.link(asset, self.home / 'second-link.exe')
+        with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe):
+            _, report, _ = self.menu('8\n1\n')
+        self.assertEqual(report['check'], 'asset-inspection')
+        self.assertEqual(report['reason'], 'single-link regular file required')
+        file = report['diagnostics']['checks']['asset-file']
+        self.assertEqual(file['metadata']['path']['link_count'], 2)
+        self.assertEqual(file['inspection']['reason'], 'single-link regular file required')
+
     def test_menu_cancel_before_gui_check_writes_nothing(self):
         with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe), \
                 patch('subprocess.Popen', side_effect=AssertionError('cancel never executes')):

@@ -92,8 +92,19 @@ class RecheckPlan:
                 "device_namespace_verified": False, "preparation_complete": False, "writes": []}
 
 
-def plan_recheck(*, record, record_sha256, config, directory, renderer, source, games, steam, settings, home,
-                 environment, runtime_root):
+def plan_recheck(**kwargs):
+    """Read-only managed recheck plan; a failure carries the name of the check that stopped it."""
+    progress = ["recheck-trial-record"]
+    try:
+        return _plan_recheck(progress, **kwargs)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        if not hasattr(error, "preparation_check"):
+            error.preparation_check = progress[-1]
+        raise
+
+
+def _plan_recheck(progress, *, record, record_sha256, config, directory, renderer, source, games, steam, settings, home,
+                  environment, runtime_root):
     validate_trial_record(record)
     require(record["exit_code"] == 0 and record.get("settings_identity_unchanged") is True,
             "prior fixed-command exit and unchanged settings required")
@@ -108,29 +119,39 @@ def plan_recheck(*, record, record_sha256, config, directory, renderer, source, 
     probe_store = safe_path(store_root.parent / "probe-store", home)
     with PrivateStore(store_root) as store:
         require(store.read_record("trials", record["trial_id"] + ".json")[1] == record_sha256, "trial record changed")
+    progress.append("recheck-registration-pin")
     exe = safe_path(games[key]["exe"])
     target = pin_registration(source, key, exe.parent, steam)
+    progress.append("recheck-probe-registration")
     proof = inspect_existing_probe_registration(exe, key, source, steam, probe_store)
+    progress.append("recheck-build-review")
     payload = config["payload"]
     require(payload.get("tool_slot") == "preparation", "reviewed preparation slot required")
     review = validate_build_review(config["placement_review"])
     require(review["archive_sha512"] == payload["sha512"] == proof["source_archive_sha512"], "recheck source identity differs")
+    progress.append("recheck-payload-archive")
     from preparation_selection import _archive
     inventory = inspect_archive(_archive(directory, payload), payload["sha512"], payload["root"], capture=CAPTURE)
     require(proof["source_inventory_digest"] == inventory.digest, "probe source inventory differs")
+    progress.append("recheck-runtime-environment")
     runtime = plan_runtime_environment(runtime_root, config["runtime_reference"], environment)
     _require_live(runtime)
+    progress.append("recheck-tool-customization")
     custom = plan_customizations(inventory, payload["archive"], payload["mode"], runtime_root / "usr/local/bin/steam-compatibility",
         renderer, label=runtime.label, umask=int(runtime.umask, 8), tool_slot="preparation")
+    progress.append("recheck-fex-tool-tree")
     tool = safe_path(steam / "compatibilitytools.d" / custom.directory, steam)
     verify_fex_runtime_tree(tool, inventory, custom.overlays)
+    progress.append("recheck-payload-permissions")
     policy = reviewed_payload_permissions(inventory, steam, review)
     if policy is not None:
         policy.guard()
+    progress.append("recheck-prefix")
     compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
     _private_existing(compatdata, steam)
     _aliases(steam, key)
     version = _prefix(compatdata)
+    progress.append("recheck-private-paths")
     work = safe_path(home / ".local/share/droiddeck-preparation-work" / key / "work", home)
     private_home = safe_path(work.parent / "home", home)
     for path in (work, private_home):
@@ -139,6 +160,7 @@ def plan_recheck(*, record, record_sha256, config, directory, renderer, source, 
             require(path != protected and not path.is_relative_to(protected) and not protected.is_relative_to(path),
                     "recheck paths overlap protected data")
     require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
+    progress.append("recheck-settings")
     signature = {"version": VERSION, "scope": SCOPE, "record": record_sha256, "archive": inventory.archive_sha512,
                  "inventory": inventory.digest, "customization": custom.digest, "runtime": runtime.identity_digest,
                  "target": target.digest, "prefix_version": version, "work": str(work), "home": str(private_home),

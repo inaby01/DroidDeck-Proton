@@ -191,16 +191,32 @@ class InstallPlan:
                 "execution_authorized": False, "device_namespace_verified": False, "preparation_complete": False, "writes": []}
 
 
-def plan_dependency_install(*, record, record_sha256, config, directory, renderer, source, games, steam, settings, home,
-                            environment, runtime_root, recipe=None):
-    """Read-only plan. Blockers are reported, never cleared by later steps."""
+def plan_dependency_install(**kwargs):
+    """Read-only plan. Blockers are reported, never cleared by later steps.
+
+    A failure carries the name of the check that stopped it (``preparation_check``).
+    """
+    progress = ["dependency-config"]
+    try:
+        return _plan_dependency_install(progress, **kwargs)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        if not hasattr(error, "preparation_check"):
+            error.preparation_check = progress[-1]
+        raise
+
+
+def _plan_dependency_install(progress, *, record, record_sha256, config, directory, renderer, source, games, steam, settings,
+                             home, environment, runtime_root, recipe=None):
     recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
     dependency = validate_dependency_config(config.get("dependency_installation"))
     require(dependency["recipe_revision"] == recipe["revision"], "configured recipe revision differs")
+    progress.append("managed-recheck-plan")
     base = plan_recheck(record=record, record_sha256=record_sha256, config=config, directory=directory, renderer=renderer,
                         source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
                         runtime_root=runtime_root)
+    progress.append("recheck-evidence")
     recheck_id, recheck_sha256 = _recheck_evidence(base.store_root, record, base.prefix_version)
+    progress.append("asset-inspection")
     spec = dependency["asset"]
     directory = safe_path(directory)
     report = inspect_assets({"schema_version": 1, "assets": [spec]}, directory)[0]
@@ -210,12 +226,15 @@ def plan_dependency_install(*, record, record_sha256, config, directory, rendere
     except Invalid:
         binding = None
         blockers.append("asset-not-recipe-bootstrap")
+    progress.append("dependency-state")
     pre = inspect_dependency_state(base.compatdata, recipe)
     if pre["state"] != "absent":
         blockers.append("dependency-state-" + pre["state"] + "-preserve-and-inspect")
+    progress.append("installation-history")
     previous, invalid = _installations(base.store_root, record["app_id"])
     latest = previous[-1] if previous else None
     blockers.extend(retry_blockers(latest, invalid))
+    progress.append("capacity")
     home = safe_path(home)
     inputs_root = safe_path(base.work.parent / "inputs", home)
     size = spec["expected_size"]
@@ -485,6 +504,109 @@ def inspect_managed_dependency(plan_base, store, stop_check, recipe=None):
     return result
 
 
+def describe_error(error, stage):
+    """Check name and reason without echoing paths or input content.
+
+    Only this tool's own fixed ``Invalid`` messages are reported verbatim; other
+    exception texts can contain paths or data and are reduced to their class.
+    """
+    result = {"check": getattr(error, "preparation_check", stage), "error_class": type(error).__name__,
+              "errno": getattr(error, "errno", None), "reason": str(error) if type(error) is Invalid else None}
+    for name in ("tree_diagnostic", "installed_tree_diagnostic"):
+        if hasattr(error, name):
+            result[name] = getattr(error, name)
+    return result
+
+
+def _isolated(function):
+    try:
+        return {"status": "accepted", **function()}
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
+        return {"status": "rejected", **describe_error(error, None)}
+
+
+def collect_diagnostics(*, record, config, directory, renderer, environment, steam, settings, home, runtime_root, recipe=None):
+    """Independent read-only observations kept in the same report when planning stops.
+
+    No Wine, no locks, no writes. Environment values are reduced to presence booleans.
+    The dependency state is read without a process stop observation and is diagnostic only.
+    """
+    import preparation_selection as selection
+    from preparation_execution import _prefix
+
+    recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
+    directory, steam, settings, home = map(safe_path, (directory, steam, settings, home))
+    key = record["app_id"]
+    compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
+    store_root = safe_path(home / ".local/state/droiddeck-prefix-preparation/tool-store", home)
+
+    def presence():
+        reference = config["runtime_reference"]["environment_presence"]
+        differing = {name: {"reference": bool(value), "current": bool(environment.get(name))}
+                     for name, value in sorted(reference.items()) if bool(value) != bool(environment.get(name))}
+        return {"differing": differing, "values_exported": False}
+
+    def registration():
+        _, _, games = selection.registration_catalog(environment)
+        return {"registered": key in games}
+
+    def recheck_plan():
+        source, _, games = selection.registration_catalog(environment)
+        with PrivateStore(store_root) as store:
+            digest = store.read_record("trials", record["trial_id"] + ".json")[1]
+        plan_recheck(record=record, record_sha256=digest, config=config, directory=directory, renderer=renderer,
+                     source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
+                     runtime_root=runtime_root)
+        return {}
+
+    def rechecks():
+        version = _prefix(compatdata)
+        summary = []
+        with PrivateStore(store_root) as store:
+            items = [item for item in store.inventory()["rechecks"] if item.get("trial_id") == record["trial_id"]]
+            for item in items:
+                full, _ = store.read_record("rechecks", item["recheck_id"] + ".json")
+                validate_recheck_record(full)
+                summary.append({"recheck_id": full["recheck_id"], "status": full["status"], "exit_code": full["exit_code"],
+                                "settings_identity_unchanged": full.get("settings_identity_unchanged"),
+                                "prefix_version_matches_live": full["prefix_version_sha256"] == version})
+        return {"records": summary}
+
+    def asset():
+        spec = config["dependency_installation"]["asset"]
+        path = safe_path(directory / spec["filename"], directory)
+        present = os.path.lexists(path)
+        result = {"present": present, "metadata": selection._input_metadata(path) if present else None}
+        if present:
+            # Metadata above is kept even when the strict read below refuses the file.
+            try:
+                report = inspect_assets({"schema_version": 1, "assets": [spec]}, directory)[0]
+            except (OSError, ValueError) as error:
+                result["inspection"] = describe_error(error, "asset-inspection")
+                return result
+            result.update(blockers=report["blockers"], measured=report["measured"])
+            try:
+                bind_asset(recipe, spec, report["measured"])
+                result["recipe_bootstrap"] = True
+            except Invalid:
+                result["recipe_bootstrap"] = False
+        return result
+
+    def state():
+        found = inspect_dependency_state(compatdata, recipe)
+        return {"state": found["state"], "groups": found["groups"], "trace_directories": found["trace_directories"],
+                "product_traces": found["product_traces"], "process_view_checked": False}
+
+    def history():
+        previous, invalid = _installations(store_root, key)
+        return {"records": previous, "invalid_records": invalid}
+
+    checks = {name: _isolated(function) for name, function in (
+        ("environment-presence", presence), ("registration", registration), ("managed-recheck-plan", recheck_plan),
+        ("recheck-records", rechecks), ("asset-file", asset), ("dependency-state", state), ("installation-history", history))}
+    return {"scope": "independent-read-only-diagnostics", "checks": checks, "wine_started": False, "writes": []}
+
+
 def _select_trial(store, stream, output, prompt):
     records = [item for item in store.inventory()["trials"] if item["status"] != "invalid"]
     require(records, "no private trial records")
@@ -536,14 +658,16 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
     directory, environment, steam, settings, home = _context(directory, os.environ if environment is None else environment,
                                                              steam, settings, home)
     management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
-    protected, session, started, stage = [steam, settings], None, False, "dependency-plan"
+    protected, session, started, stage, record = [steam, settings], None, False, "selection-config", None
     try:
         selection.validate_selection_config(config)
         require(config.get("initialization_trial") is True and "dependency_installation" in config, "dependency installation not enabled")
+        stage = "trial-selection"
         with PrivateStore(management) as store:
             record, digest = _select_trial(store, stream, output, "ソフト電池を導入する管理済みprefixの番号（qで取消）: ")
         if record is None:
             return 0, None
+        stage = "registration-catalog"
         source, _, games = selection.registration_catalog(environment)
         protected.extend(Path(game["exe"]).parent for game in games.values())
 
@@ -555,6 +679,7 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                 environment=environment, runtime_root=runtime_root, recipe=recipe)
 
         print("管理済みprefix・tool・資材・導入前状態を照合しています（Wineは起動しません）。", file=output, flush=True)
+        stage = "dependency-plan"
         plan = refresh()
         _print_plan(plan, output, selection._text)
         report = {"mode": "managed-dependency-installation-result", "scope": SCOPE, "plan": plan.summary(),
@@ -591,11 +716,17 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                 {"scope": "managed-trial-prefix-by-wine-processes"}, {"scope": "private-cache-input-journal-and-locks"},
                 {"scope": "cooperative-settings-lock-only"}])
     except (OSError, ValueError, TypeError, KeyError) as error:
-        report = {"mode": "managed-dependency-installation-result", "scope": SCOPE, "stage": stage,
-                  "error_class": type(error).__name__, "errno": getattr(error, "errno", None), "preparation_complete": False,
+        report = {"mode": "managed-dependency-installation-result", "scope": SCOPE, "tool_version": VERSION, "stage": stage,
+                  **describe_error(error, stage), "preparation_complete": False,
                   "writes": [] if not started else [{"scope": "partial-managed-installation-preserve"}]}
         if session is not None:
             report["installation"] = dict(session.record)
+        print("検査停止: " + selection._text(report["check"]) + " / " + selection._text(report["reason"] or report["error_class"]),
+              file=output)
+        if record is not None and not started:
+            print("独立した読み取り診断を集めています（Wineは起動しません）。", file=output, flush=True)
+            report["diagnostics"] = collect_diagnostics(record=record, config=config, directory=directory, renderer=renderer,
+                environment=environment, steam=steam, settings=settings, home=home, runtime_root=runtime_root, recipe=recipe)
         print("導入処理は停止しました。prefix・記録・資材を削除せず結果を保存します。", file=output)
     return _save_result(selection, directory, home, report, protected, output)
 
@@ -658,7 +789,9 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
                   "installation_records_updated": False, "preparation_complete": False,
                   "writes": [{"scope": "private-locks-and-result-json"}]}
     except (OSError, ValueError, TypeError, KeyError) as error:
-        report = {"mode": "managed-dependency-reinspection-result", "scope": SCOPE, "error_class": type(error).__name__,
-                  "errno": getattr(error, "errno", None), "preparation_complete": False, "writes": []}
+        report = {"mode": "managed-dependency-reinspection-result", "scope": SCOPE, "tool_version": VERSION,
+                  **describe_error(error, "dependency-reinspection"), "preparation_complete": False, "writes": []}
+        print("検査停止: " + selection._text(report["check"]) + " / " + selection._text(report["reason"] or report["error_class"]),
+              file=output)
         print("読み取り検査は停止しました。変更はしていません。", file=output)
     return _save_result(selection, directory, home, report, protected, output)
