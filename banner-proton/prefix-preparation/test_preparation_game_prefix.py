@@ -2,6 +2,7 @@
 """Registered-game new prefix: native surrogate only, never Wine, vendor binaries or real games."""
 
 import copy
+import json
 import runpy
 import sys
 import unittest
@@ -116,6 +117,71 @@ class GamePrefixTests(DEP['InstallTests']):
     def test_dependency_installation_accepts_the_initialized_game_prefix(self):
         record, digest = self.initialize()
         self.assertEqual(record['status'], 'initialized-unverified')
+        result = self.install_dependency(record, digest)
+        self.assertEqual(result['status'], 'present-verified', result)
+        self.assertEqual(result['app_id'], '42')
+        self.assertFalse(result['preparation_complete'])
+
+    def binding_plan(self, record, digest):
+        source, _, games = DEP['TRIAL']['BASE']['selection'].registration_catalog(self.environment)
+        return game.plan_game_binding(record=record, record_sha256=digest, config=self.config,
+            directory=self.f.fixture.source.root, renderer=self.f.fixture.options['renderer'], source=source, games=games,
+            steam=self.f.steam, settings=self.f.settings, home=self.home, environment=self.environment,
+            runtime_root=self.f.root, stop_check=ProcessStopCheck(self.game_compat, self.f.proc), recipe=self.recipe)
+
+    def test_binding_is_refused_while_a_dependency_is_blocked_or_missing(self):
+        record, digest = self.initialize()
+        before = self.protected()
+        plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ('dependency-blocked:mfc42-candidate', 'dependency-not-verified:softdenchi-runtime'))
+        self.install_dependency(record, digest)
+        plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ('dependency-blocked:mfc42-candidate',))
+        lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
+        with PrivateStore(self.f.store_root) as store, store.locked(lock), self.assertRaisesRegex(Invalid, 'game binding blocked'):
+            game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,
+                                    ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+        self.assertEqual(before, self.protected())
+
+    def test_binding_with_every_dependency_verified_writes_only_this_game(self):
+        self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime']
+        record, digest = self.initialize()
+        self.install_dependency(record, digest)
+        plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ())
+        games_before = json.loads(self.games_config.read_text())
+        lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
+        with PrivateStore(self.f.store_root) as store, store.locked(lock):
+            with self.assertRaises(Invalid):
+                game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), '0' * 64,
+                                        ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+            result = game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,
+                                             ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+        self.assertEqual(result['status'], 'binding-verified')
+        games_after = json.loads(self.games_config.read_text())
+        self.assertEqual(games_after['games']['42'], {'valve': False, 'dir': plan.base.customization.directory})
+        self.assertEqual({k: v for k, v in games_after['games'].items() if k != '42'},
+                         {k: v for k, v in games_before['games'].items() if k != '42'})
+        self.assertFalse(result['preparation_complete'])
+
+    def test_binding_menu_reports_blockers_without_writing(self):
+        self.initialize()
+        before = self.protected()
+        with patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe):
+            status, report, output = self.menu('11\n1\n')
+        self.assertEqual(status, 2, output)
+        self.assertFalse(report['binding_written'])
+        self.assertIn('dependency-blocked:mfc42-candidate', report['plan']['blockers'])
+        self.assertIn('全依存が検証済みになるまで割り当てません', output)
+        self.assertEqual(before, self.protected())
+
+    def test_profile_change_after_initialization_refuses_binding(self):
+        record, digest = self.initialize()
+        self.config['game_preparation']['profiles'][0]['revision'] = 2
+        with self.assertRaisesRegex(Invalid, 'game profile changed'):
+            self.binding_plan(record, digest)
+
+    def install_dependency(self, record, digest):
         source, _, games = DEP['TRIAL']['BASE']['selection'].registration_catalog(self.environment)
 
         def plan():
@@ -138,9 +204,7 @@ class GamePrefixTests(DEP['InstallTests']):
             session.start_installer()
             result = session.wait_installer(10)
             self.assertEqual(store.read_record(game.RECORDS, record['trial_id'] + '.json')[1], digest)
-        self.assertEqual(result['status'], 'present-verified', result)
-        self.assertEqual(result['app_id'], '42')
-        self.assertFalse(result['preparation_complete'])
+        return result
 
     def test_game_executable_change_after_initialization_refuses_dependency_planning(self):
         record, digest = self.initialize()

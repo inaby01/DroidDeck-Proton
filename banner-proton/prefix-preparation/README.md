@@ -754,3 +754,18 @@ when it exists, the reuse plan and the managed initialization/recheck launch pla
 accept it under the source-reviewed FEX contract. Without it, or for the legacy slot,
 the strict tree check is unchanged, and plans made under the contract are refused by
 the ordinary launch readiness path.
+
+## Target-only binding of a prepared game prefix (0.26.0)
+
+Menu 11 binds one initialized registered-game prefix to the reviewed preparation slot
+only when every dependency of the profile bound at initialization is live
+`present-verified` (offline inspection with a clear process view before and after).
+A `blocked` recipe (MFC today) or an unverified dependency is reported and nothing is
+written. A profile changed since initialization refuses the plan. After an exact
+confirmation the existing guarded target-only writer changes this game's entries in
+`games.json`, `config.vdf` and `state.json`, keeps other games' pending choices and the
+default, and stores a private backup and record. Before each file write the
+registration, the tool tree under the FEX contract, the prefix version, the stopped
+view and the dependency state are checked again. No game is launched and no
+authentication is performed; `preparation_complete` stays false until a normal launch
+is verified separately.

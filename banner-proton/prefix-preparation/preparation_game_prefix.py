@@ -292,3 +292,179 @@ def interactive_game_prefix(directory, renderer, config, *, input_stream=None, o
     print("初期化の状態: " + report.get("initialization", {}).get("status", "stopped-before-result"), file=output)
     return 2, str(saved)
 
+
+
+@dataclass(frozen=True)
+class GameBindingPlan:
+    digest: str
+    base: object = field(repr=False)
+    profile: dict = field(repr=False)
+    dependencies: tuple
+    binding: object = field(repr=False)
+    blockers: tuple
+
+    def summary(self):
+        return {"scope": "registered-game-target-only-binding", "input_digest": self.digest, "app_id": self.base.record["app_id"],
+                "origin": self.base.record["trial_id"], "profile_id": self.profile["profile_id"],
+                "dependencies": list(self.dependencies), "binding": self.binding.summary(),
+                "tool_directory": self.base.customization.directory, "blockers": list(self.blockers),
+                "game_launched": False, "authentication_performed": False, "preparation_complete": False, "writes": []}
+
+
+def _dependency_states(profile, recipes, compatdata, recipe, stop_check):
+    """Live, offline dependency states. A view that is not clear makes every check uninspected."""
+    from preparation_dependency_state import inspect_dependency_state
+    clear = stop_check.check()["clear_in_view"]
+    states = []
+    for dependency in profile["dependencies"]:
+        item = recipes[dependency]
+        if item["status"] != "ready":
+            states.append({"dependency_id": dependency, "state": "blocked", "reason": item["reason"]})
+        elif not clear:
+            states.append({"dependency_id": dependency, "state": "uninspected", "reason": "target-process-view-not-clear"})
+        else:
+            states.append({"dependency_id": dependency, "state": inspect_dependency_state(compatdata, recipe)["state"]})
+    if clear and not stop_check.check()["clear_in_view"]:
+        states = [{**item, "state": "uninspected", "reason": "concurrent-process-observed"} if item["state"] != "blocked" else item
+                  for item in states]
+    return tuple(states)
+
+
+def plan_game_binding(*, record, record_sha256, config, directory, renderer, source, games, steam, settings, home,
+                      environment, runtime_root, stop_check, recipe=None):
+    """Read-only. Binding is allowed only when every profile dependency is live present-verified."""
+    from preparation_binding import plan_binding
+    from preparation_recheck import plan_recheck
+    from preparation_softdenchi_recipe import softdenchi_recipe, validate_recipe
+    recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
+    base = plan_recheck(record=record, record_sha256=record_sha256, config=config, directory=directory, renderer=renderer,
+                        source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
+                        runtime_root=runtime_root, records=RECORDS)
+    profiles, recipes = validate_game_config(config.get("game_preparation"))
+    profile = profiles.get(record["profile"]["profile_id"])
+    require(profile is not None and digest_json(profile) == record["profile"]["profile_digest"],
+            "game profile changed since initialization")
+    require(isinstance(stop_check, ProcessStopCheck) and stop_check.compatdata == base.compatdata, "matching process observation required")
+    dependencies = _dependency_states(profile, recipes, base.compatdata, recipe, stop_check)
+    blockers = sorted({("dependency-blocked:" if item["state"] == "blocked" else "dependency-not-verified:") + item["dependency_id"]
+                       for item in dependencies if item["state"] != "present-verified"})
+    binding = plan_binding(steam, settings, record["app_id"], base.customization.directory)
+    signature = {"version": VERSION, "base": base.digest, "profile": record["profile"]["profile_digest"],
+                 "dependencies": list(dependencies), "binding": binding.digest, "blockers": blockers}
+    return GameBindingPlan(digest_json(signature), base, profile, dependencies, binding, tuple(blockers))
+
+
+def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=None):
+    """Operator-confirmed target-only binding through the guarded internal writer.
+
+    The readiness callback rechecks the registration, the FEX-contract tool tree, the
+    prefix version, the stopped view and every dependency before each file write.
+    """
+    from preparation_binding import apply_binding
+    from preparation_dependency_state import inspect_dependency_state
+    from preparation_execution import _prefix
+    from preparation_payload import verify_fex_runtime_tree
+    from preparation_softdenchi_recipe import softdenchi_recipe, validate_recipe
+    recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
+    require(isinstance(plan, GameBindingPlan) and confirmation == plan.digest, "exact binding confirmation required")
+    require(not plan.blockers, "game binding blocked")
+    require(refresh().digest == plan.digest, "game binding plan changed")
+    base = plan.base
+    tool = safe_path(base.target.steam / "compatibilitytools.d" / base.customization.directory, base.target.steam)
+    # Only the SoftDenchi recipe can be ready (validate_game_config); MFC stays blocked.
+    require(plan.dependencies and all(item["state"] == "present-verified" for item in plan.dependencies),
+            "dependencies not verified")
+
+    def ready():
+        base.target.verify()
+        base.runtime.verify()
+        verify_fex_runtime_tree(tool, base.inventory, base.customization.overlays)
+        require(_prefix(base.compatdata) == base.prefix_version, "game prefix version changed")
+        require(stop_check.check()["clear_in_view"], "target process view not clear")
+        require(inspect_dependency_state(base.compatdata, recipe)["state"] == "present-verified",
+                "dependency postconditions changed")
+        return {"target": True, "dependencies": True, "payload": True, "stopped": True}
+    return apply_binding(plan.binding, base.target.steam, base.settings, store, ready)
+
+
+def interactive_game_binding(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
+                             steam=None, settings=None, home=None, runtime_root=Path("/")):
+    """Bind one initialized game prefix to the preparation slot, only when all dependencies are verified."""
+    import sys
+
+    import preparation_selection as selection
+    from preparation_dependency_install import describe_error
+
+    stream = sys.stdin if input_stream is None else input_stream
+    output = sys.stdout if output_stream is None else output_stream
+    environment = os.environ if environment is None else environment
+    home = safe_path(home if home is not None else Path.home())
+    steam = safe_path(steam if steam is not None else home / ".local/share/Steam")
+    settings = safe_path(settings if settings is not None else home / ".local/share/droiddeck-compat")
+    directory = safe_path(directory)
+    management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
+    protected, stage, started = [steam, settings], "game-binding-plan", False
+    try:
+        selection.validate_selection_config(config)
+        require("game_preparation" in config, "game preparation not enabled")
+        with PrivateStore(management) as store:
+            listed = [item for item in store.inventory()["game_prefixes"] if item.get("status") == "initialized-unverified"]
+            require(listed, "no initialized game prefix")
+            for number, item in enumerate(listed, 1):
+                print(f"{number}. {selection._text(str(item.get('profile_id')))} / ID {item['app_id']} / {item['trial_id']}", file=output)
+            print("割り当てる実ゲームprefixの番号（qで取消）: ", end="", file=output, flush=True)
+            answer = stream.readline(32).strip()
+            if answer == "q":
+                return 0, None
+            require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(listed), "invalid game prefix selection")
+            record, digest = store.read_record(RECORDS, listed[int(answer) - 1]["trial_id"] + ".json")
+        source, _, games = selection.registration_catalog(environment)
+        protected.extend(Path(game["exe"]).parent for game in games.values())
+        stop = ProcessStopCheck(safe_path(steam / "steamapps/compatdata" / record["app_id"], steam))
+
+        def refresh():
+            current, _, now = selection.registration_catalog(environment)
+            require(current == source, "registration source changed")
+            return plan_game_binding(record=record, record_sha256=digest, config=config, directory=directory, renderer=renderer,
+                                     source=current, games=now, steam=steam, settings=settings, home=home,
+                                     environment=environment, runtime_root=runtime_root, stop_check=stop)
+
+        print("prefix・tool・依存をWineを起動せず照合し、割り当て計画を作っています。", file=output, flush=True)
+        plan = refresh()
+        summary = plan.summary()
+        for item in summary["dependencies"]:
+            print("  依存: " + selection._text(item["dependency_id"] + " / " + item["state"]), file=output)
+        print("割り当て先: " + selection._text(summary["tool_directory"]), file=output)
+        print("変更予定: " + selection._text(", ".join(summary["binding"]["planned_files"]) or "なし") +
+              f"（他ゲームの保留選択 {summary['binding']['other_pending_count']}件は変更しません）", file=output)
+        report = {"mode": "game-binding-result", "scope": summary["scope"], "tool_version": VERSION, "plan": summary,
+                  "binding_written": False, "preparation_complete": False}
+        if plan.blockers:
+            for blocker in plan.blockers:
+                print("停止理由: " + selection._text(blocker), file=output)
+            print("全依存が検証済みになるまで割り当てません。変更せずに結果を保存します。", file=output)
+            report["writes"] = []
+        else:
+            print("このゲームだけを準備用slotへ割り当てる場合は1、取消はq（ゲームは起動しません）: ", end="", file=output, flush=True)
+            if stream.readline(32).strip() != "1":
+                return 0, None
+            stage, started = "game-binding-apply", True
+            selection._private_report_directory(home, protected)
+            lock = hashlib.sha256(str(plan.base.compatdata).encode()).hexdigest()
+            with PrivateStore(management) as store, store.locked(lock):
+                result = apply_game_binding(plan, store, refresh, plan.digest, stop)
+            report.update(binding=result, binding_written=result["status"] == "binding-verified",
+                          writes=[{"scope": "target-only-games-config-state"}, {"scope": "private-binding-backup-and-record"}])
+            print("割り当て: " + selection._text(result["status"]) + "。通常のDroidDeckから起動して確認してください。", file=output)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        report = {"mode": "game-binding-result", "tool_version": VERSION, "stage": stage, **describe_error(error, stage),
+                  "preparation_complete": False, "writes": [] if not started else [{"scope": "partial-binding-preserve"}]}
+        print("検査停止: " + selection._text(report["check"]) + " / " + selection._text(report["reason"] or report["error_class"]),
+              file=output)
+    try:
+        saved, _ = selection.save_selection_result(directory, home, report, protected)
+    except (OSError, ValueError):
+        print("結果JSONを保存できませんでした。私有記録と設定のバックアップは保持しています。", file=output)
+        return 1, None
+    print("結果を保存しました: " + selection._text(str(saved)), file=output)
+    return 2, str(saved)
