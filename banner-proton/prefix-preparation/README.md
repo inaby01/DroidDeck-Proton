@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.16.0)
+# Prefix preparation: offline planning and local staging (0.16.1)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -494,3 +494,18 @@ parents. A parent becoming readable by others stops the operation. The original
 full writer still has no such exception by default. This copy-only containment
 must not be treated as execution readiness; future launch checks must establish
 their own safe containment and all remaining runtime/process prerequisites.
+
+## Read-only binding diagnostics (0.16.1)
+
+If binding planning rejects an input after an installed tree has been verified,
+the selection report preserves the installation, registration and prefix checks.
+The binding subplan remains blocked. Independent bounded checks of the registered
+tool, requested games, applied history, selection history and target mapping are
+included with fixed diagnostic codes, without raw settings or exception messages.
+These independent observations are not a coherent binding plan and cannot authorize
+any writer. The existing strict binding validation and writer guards still apply.
+
+Use the normal planning option to inspect an already placed tool. Reinstallation,
+probe recreation and execution are unnecessary for this diagnostic step. Placement
+success alone does not establish Wine execution, prefix initialization, dependency
+installation or game compatibility.

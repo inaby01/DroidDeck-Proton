@@ -117,6 +117,37 @@ class SelectionTests(unittest.TestCase):
         self.assertFalse(report["binding_plan"]["default_changed"])
         self.assertEqual(before, self.fixture.game.snapshot())
 
+    def test_rejected_binding_keeps_verified_installation_and_remaining_plan(self):
+        self.fixture.install_fixture()
+        self.fixture.game.config.write_text('"PRIVATE_CONFIG" { "duplicate" "x" "duplicate" "y" }')
+        before = self.fixture.game.snapshot()
+        report = self.plan()
+        self.assertEqual(report["installation_plan"]["action"], "reuse-verified-tree")
+        self.assertEqual(report["binding_plan"]["status"], "blocked")
+        self.assertEqual(report["binding_plan"]["error"]["check"], "binding-steam-config")
+        self.assertEqual(report["binding_plan"]["error"]["condition"], "vdf-duplicate-or-incomplete")
+        self.assertIn("binding-input-rejected", report["blockers"])
+        self.assertIn("input_digest", report)
+        self.assertFalse(report["preparation_complete"])
+        self.assertFalse(report["binding_plan"]["execution_authorized"])
+        self.assertEqual(before, self.fixture.game.snapshot())
+        self.assertNotIn("PRIVATE_CONFIG", json.dumps(report))
+
+    def test_binding_failure_reports_multiple_independent_input_failures(self):
+        self.fixture.install_fixture()
+        (self.settings / "games.json").write_text('{"version": 2, "games": {}}')
+        (self.settings / "state.json").write_text('{"auto": [], "picked": {}, "private-secret": "SECRET_VALUE"}')
+        before = self.fixture.game.snapshot()
+        report = self.plan()
+        checks = report["binding_diagnostics"]["checks"]
+        self.assertEqual(checks["games-schema"]["condition"], "choices-version")
+        self.assertEqual(checks["state-auto"]["condition"], "auto-history")
+        self.assertEqual(checks["state-picked"]["condition"], "selection-history")
+        self.assertEqual(checks["target-mapping"]["status"], "accepted")
+        self.assertEqual(before, self.fixture.game.snapshot())
+        self.assertNotIn("SECRET_VALUE", json.dumps(report))
+        self.assertNotIn("private-secret", json.dumps(report))
+
     def test_preparation_plan_preserves_mismatched_legacy_tool(self):
         legacy = self.fixture.install_fixture()
         (legacy / "proton").write_bytes(b"DUMMY_LEGACY_BINARY")

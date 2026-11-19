@@ -18,7 +18,7 @@ import unicodedata
 from pathlib import Path
 
 from preparation_assets import digest_json, exe_identity
-from preparation_binding import plan_binding
+from preparation_binding import binding_error, inspect_binding_inputs, plan_binding
 from preparation_common import (
     MAX_REPORT,
     VERSION,
@@ -189,9 +189,17 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
             if os.path.lexists(private):
                 report["blockers"].append("private-launch-path-already-exists")
         if report["installation_plan"]["action"] == "reuse-verified-tree":
-            report["binding_plan"] = plan_binding(steam, settings, key, installation.customization.directory).summary()
-            report["binding_plan"]["payload"] = "verified-expected-tree"
-            report["binding_plan"]["blockers"].remove("payload-integrity-unverified")
+            try:
+                report["binding_plan"] = checked("binding-plan", plan_binding,
+                    steam, settings, key, installation.customization.directory).summary()
+                report["binding_plan"]["payload"] = "verified-expected-tree"
+                report["binding_plan"]["blockers"].remove("payload-integrity-unverified")
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                report["binding_plan"] = {"status": "blocked", "error": binding_error(error),
+                    "blockers": ["binding-input-rejected"], "writes": [], "execution_authorized": False}
+                report["binding_diagnostics"] = inspect_binding_inputs(
+                    steam, settings, key, installation.customization.directory)
+                report["blockers"].append("binding-input-rejected")
         installation.runtime.verify(environment)
         installation.target.verify()
     if not prefix["exists"]:

@@ -21,6 +21,7 @@ from preparation_common import (
     Invalid,
     app_id,
     bounded,
+    checked,
     fields,
     pairs,
     read_bytes,
@@ -88,8 +89,8 @@ def registered_tool(steam, directory):
     paths = {key: safe_path(root / filename, root) for key, filename in (
         ("catalog", "compatibilitytool.vdf"), ("manifest", "toolmanifest.vdf"),
         ("wrapper", "droiddeck-proton-wrap"), ("proton", "proton"))}
-    raw = {key: read_bytes(path) for key, path in paths.items()}
-    tools = Document(raw["catalog"]).node(("compatibilitytools", "compat_tools")).value
+    raw = {key: checked("binding-tool-read-" + key, read_bytes, path) for key, path in paths.items()}
+    tools = checked("binding-tool-catalog", lambda: Document(raw["catalog"]).node(("compatibilitytools", "compat_tools")).value)
     require(type(tools) is dict and len(tools) == 1, "tool catalog must identify exactly one tool")
     tool_id = next(iter(tools))
     require(TOOL_ID.fullmatch(tool_id), "invalid registered tool ID")
@@ -98,11 +99,91 @@ def registered_tool(steam, directory):
             "custom tool must use its own directory")
     require(all(key in entry and entry[key].value == value for key, value in
                 (("from_oslist", "windows"), ("to_oslist", "linux"))), "unsupported tool platforms")
-    manifest = Document(raw["manifest"]).node(("manifest",)).value
+    manifest = checked("binding-tool-manifest", lambda: Document(raw["manifest"]).node(("manifest",)).value)
     require(type(manifest) is dict and "commandline" in manifest and
             manifest["commandline"].value == "/droiddeck-proton-wrap %verb%", "tool wrapper not registered")
     require(os.access(paths["wrapper"], os.X_OK) and os.access(paths["proton"], os.X_OK), "tool launchers not executable")
     return tool_id, {key: hashlib.sha256(data).hexdigest() for key, data in raw.items()}
+
+
+def _games_document(raw):
+    value = _json(raw, {"version": 1, "games": {}})
+    fields(value, ("version", "games"))
+    require(type(value["version"]) is int and value["version"] == 1, "unknown choices version")
+    _requests(value["games"])
+    return value
+
+
+def binding_error(error):
+    """Fixed diagnostic vocabulary only; never expose exception text or values."""
+    conditions = {
+        "unsupported VDF token": "vdf-token",
+        "duplicate or incomplete VDF entry": "vdf-duplicate-or-incomplete",
+        "missing VDF block": "vdf-missing-block",
+        "VDF too large": "vdf-size",
+        "expected VDF string": "vdf-string",
+        "invalid VDF tail": "vdf-tail",
+        "unclosed VDF block": "vdf-unclosed",
+        "unknown or missing fields": "object-fields",
+        "unknown choices version": "choices-version",
+        "invalid binding JSON": "json-encoding-or-structure",
+        "binding JSON must be an object": "json-object",
+        "invalid game request map": "request-map",
+        "noncanonical request ID": "request-id",
+        "invalid app ID": "app-id",
+        "invalid choice kind": "choice-kind",
+        "invalid choice directory": "choice-directory",
+        "invalid choice tool ID": "choice-tool-id",
+        "unsupported auto history format": "auto-history",
+        "invalid selection history": "selection-history",
+        "invalid history ID": "history-id",
+        "single-link regular file required": "regular-single-link-file",
+        "tool wrapper not registered": "tool-wrapper",
+        "tool launchers not executable": "launcher-executable",
+        "invalid registered tool ID": "tool-id",
+    }
+    return {"check": getattr(error, "preparation_check", "binding-input"),
+            "error_class": type(error).__name__, "errno": getattr(error, "errno", None),
+            "condition": conditions.get(str(error), "input-rejected")}
+
+
+def inspect_binding_inputs(steam, settings, registration_id, directory):
+    """Independent bounded read checks after a rejected plan; no raw config data.
+
+    A successful subcheck is diagnostic only and cannot authorize a writer. Each
+    input is reopened safely; these observations are not a coherent binding plan.
+    """
+    results = {}
+
+    def inspect(name, function):
+        try:
+            function()
+            results[name] = {"status": "accepted"}
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            results[name] = {"status": "rejected", **binding_error(error)}
+
+    inspect("registered-tool", lambda: registered_tool(steam, directory))
+    inspect("games-schema", lambda: _games_document(_raw(safe_path(settings / "games.json", settings))))
+
+    def state_field(name):
+        state = _json(_raw(safe_path(settings / "state.json", settings)), {})
+        if name not in state:
+            return
+        value = state[name]
+        if name == "games_applied":
+            _requests(value)
+        elif name == "auto":
+            require(type(value) is dict, "unsupported auto history format")
+        else:
+            require(type(value) is list and len(value) <= 4096, "invalid selection history")
+            require(all(type(app) is str and app_id(app) == app for app in value), "invalid history ID")
+
+    for name in ("games_applied", "auto", "picked", "native_choices"):
+        inspect("state-" + name, lambda name=name: state_field(name))
+    inspect("target-mapping", lambda: patch_game_mapping(
+        _raw(safe_path(steam / "config/config.vdf", steam)), registration_id, "Diagnostic-Tool"))
+    return {"scope": "independent-read-only-checks", "coherent_plan": False,
+            "checks": results, "writes": [], "execution_authorized": False}
 
 
 @dataclass(frozen=True)
@@ -134,20 +215,17 @@ def plan_binding(steam, settings, registration_id, directory):
             "Steam/settings roots must be separate")
     require(steam.is_dir() and settings.is_dir(), "existing Steam/settings directories required")
     key = app_id(registration_id)
-    tool, tool_hashes = registered_tool(steam, directory)
+    tool, tool_hashes = checked("binding-registered-tool", registered_tool, steam, directory)
     paths = {"config": safe_path(steam / "config/config.vdf", steam),
              "games": safe_path(settings / "games.json", settings), "state": safe_path(settings / "state.json", settings)}
-    before = {name: _raw(path) for name, path in paths.items()}
+    before = {name: checked("binding-read-" + name, _raw, path) for name, path in paths.items()}
     require(before["config"] is not None, "existing config required")
-    original_games = _json(before["games"], {"version": 1, "games": {}})
-    fields(original_games, ("version", "games"))
-    require(type(original_games["version"]) is int and original_games["version"] == 1, "unknown choices version")
-    _requests(original_games["games"])
-    original_state = _json(before["state"], {})
+    original_games = checked("binding-games-schema", _games_document, before["games"])
+    original_state = checked("binding-state-schema", _json, before["state"], {})
     recorded = original_state.get("games_applied")
     require(recorded is None and "games_applied" not in original_state or type(recorded) is dict, "invalid applied history")
     if recorded is not None:
-        _requests(recorded)
+        checked("binding-applied-history", _requests, recorded)
     applied = copy.deepcopy(recorded if recorded is not None else
                             original_games["games"] if "tools" in original_state else {})
     pending = sum(1 for app, choice in original_games["games"].items() if app != key and (app not in applied or applied[app] != choice))
@@ -156,7 +234,7 @@ def plan_binding(steam, settings, registration_id, directory):
     games["games"][key] = wanted
     applied[key] = wanted
     state["games_applied"] = applied
-    steam_node = Document(before["config"]).node(STEAM_PATH).value
+    steam_node = checked("binding-steam-config", lambda: Document(before["config"]).node(STEAM_PATH).value)
     require(type(steam_node) is dict, "invalid Steam block")
     mapping_node = steam_node.get("CompatToolMapping")
     mapping = mapping_node.value if mapping_node is not None else {}
@@ -179,7 +257,7 @@ def plan_binding(steam, settings, registration_id, directory):
     state["picked"] = picked if key in picked else picked + [key]
     if "native_choices" in state:
         state["native_choices"] = [app for app in state["native_choices"] if app != key]
-    after = {"config": patch_game_mapping(before["config"], key, tool),
+    after = {"config": checked("binding-target-mapping", patch_game_mapping, before["config"], key, tool),
              "games": _encoded(before["games"], games, original_games),
              "state": _encoded(before["state"], state, original_state)}
     fingerprint = {"version": VERSION, "app_id": key, "directory": directory, "tool": tool,

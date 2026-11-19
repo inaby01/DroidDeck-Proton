@@ -78,6 +78,31 @@ class BindingTests(unittest.TestCase):
         self.assertNotIn("DUMMY", repr(plan))
         self.assertIn("payload-integrity-unverified", summary["blockers"])
 
+    def test_diagnostic_rejections_never_echo_raw_errors_or_config(self):
+        self.games.write_text('{"version": 1, "games": {"PRIVATE_ID": {"SECRET": "value"}}}')
+        self.state.write_text('{"games_applied": null, "picked": ["SECRET_ID"]}')
+        before = self.snapshot()
+        report = binding.inspect_binding_inputs(self.steam, self.settings, self.key, self.directory)
+        self.assertEqual(report["checks"]["games-schema"]["status"], "rejected")
+        self.assertEqual(report["checks"]["state-games_applied"]["status"], "rejected")
+        self.assertEqual(report["checks"]["state-picked"]["status"], "rejected")
+        self.assertFalse(report["coherent_plan"])
+        self.assertFalse(report["execution_authorized"])
+        self.assertEqual(before, self.snapshot())
+        self.assertNotIn("SECRET", json.dumps(report))
+        self.assertNotIn("PRIVATE_ID", json.dumps(report))
+        for error in (Invalid("SECRET_EXCEPTION"), OSError(5, "SECRET_PATH")):
+            self.assertNotIn("SECRET", json.dumps(binding.binding_error(error)))
+
+    def test_diagnostic_tool_read_identifies_file_without_exposing_contents(self):
+        (self.tool / "proton").write_bytes(b"x" * (1024 * 1024 + 1))
+        with self.assertRaises(Invalid) as raised:
+            self.plan()
+        self.assertEqual(raised.exception.preparation_check, "binding-tool-read-proton")
+        report = binding.inspect_binding_inputs(self.steam, self.settings, self.key, self.directory)
+        self.assertEqual(report["checks"]["registered-tool"]["check"], "binding-tool-read-proton")
+        self.assertEqual(report["checks"]["target-mapping"]["status"], "accepted")
+
     def test_changes_only_target_mapping_and_preserves_other_config_bytes(self):
         plan = self.plan()
         before, after = parse_vdf(plan.before["config"]), parse_vdf(plan.after["config"])
