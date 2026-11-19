@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and dependency planning and dedicated trial (0.22.0)
+# Prefix preparation: offline planning, dependency planning, dedicated trial and managed dependency installation (0.23.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -663,3 +663,42 @@ not yet connected. An unknown/partial/incompatible existing state never requests
 automatic repair, upgrade or deletion. A persisted verified label never authorizes
 a skip without live reinspection. Submitted postcondition observations are reported
 separately and cannot authorize execution or binding.
+
+## Managed-prefix SoftDenchi installation (0.23.0)
+
+When the selection configuration contains `dependency_installation` (handler
+`softdenchi-interactive`, recipe revision and one asset declaration), the short
+launcher offers two more items for a managed trial prefix that already has a
+successful fixed-command recheck:
+
+- 8: interactive installation. A Wine builtin `winver` window is shown first. The
+  original bootstrap starts only after the operator confirms the window appeared and
+  the visible process view is clear again. The bootstrap runs from a new private copy
+  under its distributed file name, with no arguments, no guessed silent switches and
+  no MSI-only launch. The license is accepted, or not, by the operator in the
+  installer window. No authentication is performed.
+- 9: read-only reinspection without starting Wine.
+
+The asset must be the exact bootstrap of the trusted, statically derived recipe in
+`preparation_softdenchi_recipe.py` (SoftDenchi runtime 5.0.9.0, revision 1): a
+self-consistent manifest for another x86 PE is refused. Terms and provenance
+blockers still apply. Installation proceeds only when the live state is `absent`;
+`partial`, `incompatible`, `present-unverified`, `present-verified` and
+`uninspected` are preserved and reported. Nothing is repaired, upgraded, removed or
+retried on another prefix.
+
+The final state comes from an offline inspection after the visible process view is
+clear: product registration and version, all recipe files (size, SHA-256, PE
+machine), the UCManSvc service type/start/image, and the MSI Class-table COM entries
+in the 64-bit and 32-bit registry views. Only recipe-listed keys and value names of
+`system.reg` are interpreted; other data is not kept or exported, and `user.reg` is
+not read. Links, hard links, special files and malformed or duplicated registry
+data make an item failed or the whole state `uninspected`, never `absent`. A pending
+file rename keeps the state unverified. The Unix exit status is recorded only:
+Windows exit codes such as 1602 or 3010 cannot be observed through it.
+
+Timeouts never kill a process; `q` leaves the child running and records
+`needs-user`, not a cancellation. Records live in the private `dependency-installs`
+journal and always require reinspection. Destination resolution follows standard
+Windows Installer rules and is unverified on device Wine; registrations made by the
+installer's self-registration step are not statically known and are not checked.

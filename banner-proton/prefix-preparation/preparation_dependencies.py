@@ -1,4 +1,4 @@
-"""Read-only concrete dependency plans. No dependency executor is exposed.
+"""Read-only concrete dependency plans. Execution exists only in the managed-prefix session.
 
 Evidence declarations and submitted postcondition observations are descriptions,
 not execution/binding authorization. MFC generation and layout remain separate.
@@ -10,7 +10,8 @@ from preparation_assets import (
     inspect_assets,
     validate_manifest,
 )
-from preparation_common import HANDLERS, VERSION, fields, require
+from preparation_common import HANDLERS, VERSION, Invalid, fields, require
+from preparation_softdenchi_recipe import bind_asset, softdenchi_recipe
 
 SOFTDENCHI_CHECKS = ("product-registration-and-version", "installed-files-hashes-pe-versions",
                     "ucmansvc-service-image-and-start-type", "x86-com-registration", "x64-com-registration")
@@ -26,14 +27,22 @@ def dependency_plan(handler, spec, inspection, observed_state="uninspected"):
     require(inspection["asset_id"] == spec["asset_id"] and inspection["revision"] == spec["revision"] and
             inspection["spec_digest"] == digest_json(spec), "dependency asset inspection differs")
     blockers = asset_blockers(spec, inspection["measured"])
-    blockers.append("asset-product-version-and-role-unverified")
+    recipe_binding = None
+    if handler == "softdenchi-interactive":
+        try:
+            recipe_binding = bind_asset(softdenchi_recipe(), spec, inspection["measured"])
+        except Invalid:
+            recipe_binding = None
+    if recipe_binding is None:
+        blockers.append("asset-product-version-and-role-unverified")
     if handler == "softdenchi-interactive":
         require(spec["format"] == "pe" and spec["pe_machine"] == "x86", "x86 setup bootstrap required")
         checks = SOFTDENCHI_CHECKS
         action = {"kind": "interactive-original-bootstrap", "arguments": [], "silent_arguments_inferred": False,
                   "msi_only_bypass": False, "user_license_decision": "required", "inner_product_architecture": "x86_64",
                   "prerequisites": "preserve-original-bootstrap-handling"}
-        blockers.extend(("live-product-service-com-probes-not-connected", "interactive-installer-executor-not-connected"))
+        # The executor and offline postconditions exist only inside the managed-prefix session.
+        blockers.append("execution-only-through-managed-prefix-session")
     else:
         require(spec["format"] == "pe" and spec["pe_machine"] == "x86", "x86 MFC asset required")
         checks = MFC_CHECKS
@@ -51,7 +60,8 @@ def dependency_plan(handler, spec, inspection, observed_state="uninspected"):
     return {"schema_version": 1, "tool_version": VERSION, "mode": "dependency-installation-plan", "handler": handler,
             "recipe_revision": 1, "asset_id": spec["asset_id"], "asset_revision": spec["revision"],
             "asset_spec_digest": digest_json(spec), "measured": inspection["measured"], "input_digest": digest_json(signature),
-            "asset_evidence": "operator-declared-plus-measured-identity", "observed_state": observed_state,
+            "asset_evidence": "operator-declared-plus-measured-identity", "recipe_binding": recipe_binding,
+            "observed_state": observed_state,
             "planned_operation": action, "required_postconditions": list(checks),
             "automatic_repair": False, "automatic_upgrade": False, "skip_installation_authorized": False,
             "postcondition_observations_authorize_execution": False,

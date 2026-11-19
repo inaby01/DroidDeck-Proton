@@ -337,8 +337,8 @@ class PrivateStore:
 
     def inventory(self):
         """Read-only bounded inventory. Incomplete objects remain visible, never deleted."""
-        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "trials": [], "rechecks": [], "installations": [], "backups": [], "temporary_records": []}
-        for directory in ("assets", "runs", "bindings", "launches", "trials", "rechecks", "installations", "backups"):
+        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "trials": [], "rechecks": [], "installations": [], "dependency_installs": [], "backups": [], "temporary_records": []}
+        for directory in ("assets", "runs", "bindings", "launches", "trials", "rechecks", "installations", "dependency-installs", "backups"):
             try:
                 with self.directory((directory,)) as fd:
                     names = self._names(fd)
@@ -391,6 +391,18 @@ class PrivateStore:
                         result["launches"][-1]["reinspection_required"] = True
                     except (OSError, Invalid, TypeError, KeyError):
                         result["launches"].append({"object": name, "status": "invalid"})
+                elif directory == "dependency-installs" and not name.startswith("tmp-"):
+                    try:
+                        from preparation_dependency_install import (
+                            validate_install_record,
+                        )
+                        record, _ = self.read_record("dependency-installs", name)
+                        validate_install_record(record)
+                        result["dependency_installs"].append({key: record[key] for key in
+                            ("install_id", "created_ns", "app_id", "trial_id", "status", "phase", "post_state", "preparation_complete")})
+                        result["dependency_installs"][-1]["reinspection_required"] = True
+                    except (OSError, Invalid, TypeError, KeyError):
+                        result["dependency_installs"].append({"object": name, "status": "invalid"})
                 elif directory == "installations" and not name.startswith("tmp-"):
                     try:
                         record, _ = self.read_record("installations", name)

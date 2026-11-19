@@ -533,11 +533,19 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
         print("5. 専用の新規prefixを初期化試験（実Proton/Wineを起動）", file=output)
         print("6. 既存の初期化試験を読み取り検査（再実行・修復しない）", file=output)
         print("7. FEX空directoryを限定照合し、管理済みprefixで疎通再照会", file=output)
+    if config.get("initialization_trial") is True and "placement_review" in config and "dependency_installation" in config:
+        print("8. 管理済みprefixへソフト電池を対話導入（winver確認→正規インストーラ、実Wineを起動）", file=output)
+        print("9. 管理済みprefixのソフト電池導入状態を読み取り検査（Wineを起動しない）", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
     if answer == "4" and "placement_review" in config:
         from preparation_static_placement import interactive_static_placement
         return interactive_static_placement(directory, renderer, config, **options)
+    if answer in ("8", "9") and config.get("initialization_trial") is True and "placement_review" in config \
+            and "dependency_installation" in config:
+        import preparation_dependency_install as dependency
+        action = dependency.interactive_dependency_install if answer == "8" else dependency.interactive_dependency_reinspect
+        return action(directory, renderer, config, **options)
     if answer == "7" and config.get("initialization_trial") is True and "placement_review" in config:
         from preparation_recheck import interactive_recheck
         return interactive_recheck(directory, renderer, config, **options)
