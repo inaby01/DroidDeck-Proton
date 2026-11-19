@@ -40,7 +40,7 @@ def _text(value):
 
 
 def validate_selection_config(config):
-    fields(config, ("schema_version", "payload", "runtime_reference"), ("probe_material",))
+    fields(config, ("schema_version", "payload", "runtime_reference"), ("probe_material", "placement_review"))
     require(type(config.get("probe_material", False)) is bool, "invalid probe menu option")
     require(type(config["schema_version"]) is int and config["schema_version"] == 1, "unknown selection config")
     payload = config["payload"]
@@ -59,6 +59,11 @@ def validate_selection_config(config):
                 and not any(c in part for c in "\0\\\r\n") for part in parts) and parts[-1] == name, "invalid archive layout")
     require(payload.get("tool_slot", "legacy") in ("legacy", "preparation"), "unknown tool slot")
     require(type(config["runtime_reference"]) is dict, "runtime reference required")
+    if "placement_review" in config:
+        from preparation_static_placement import validate_build_review
+        validate_build_review(config["placement_review"])
+        require(config["placement_review"]["archive_sha512"] == payload["sha512"] and payload.get("tool_slot") == "preparation",
+                "placement review must match the preparation payload")
     return config
 
 
@@ -162,6 +167,12 @@ def selected_plan(directory, config, key, source, source_digest, games, steam, s
             mode=config["payload"]["mode"], runtime_root=runtime_root, runtime_audit=config["runtime_reference"],
             registrations=source, registration_id=key, exe_root=exe.parent, steam=steam, renderer=renderer, parent_environment=environment, tool_slot=config["payload"].get("tool_slot", "legacy"))
         report["installation_plan"] = installation.summary()
+        if "placement_review" in config:
+            review = config["placement_review"]
+            require(review["archive_sha512"] == report["installation_plan"]["payload"]["archive_sha512"], "reviewed payload identity differs")
+            report["payload_source_review"] = {**review, "archive_identity_rechecked": True, "execution_readiness": "unverified"}
+            report["installation_plan"]["blockers"].remove("payload-provenance-unreviewed")
+            report["installation_plan"]["payload"]["blockers"].remove("payload-provenance-unreviewed")
         report["blockers"].extend(report["installation_plan"]["blockers"])
         report["planned_writes"].extend(report["installation_plan"]["planned_writes"])
         report["prefix_capacity"] = _prefix_capacity(steam, installation.inventory)
@@ -421,7 +432,7 @@ def selection_script(config=None):
     names = ("preparation_common", "preparation_assets", "preparation_vdf", "preparation_binding", "preparation_target",
              "preparation_payload", "preparation_runtime", "preparation_customization", "preparation_runtime_context",
              "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
-             "preparation_tool_writer", "preparation_store", "preparation_probe", "preparation_probe_recovery", "preparation_selection")
+             "preparation_tool_writer", "preparation_store", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}
     installer = parent.parent / "install-softdenchi.py"
     if not installer.exists():

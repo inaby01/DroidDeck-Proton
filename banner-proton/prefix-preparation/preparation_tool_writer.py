@@ -12,6 +12,7 @@ import os
 import secrets
 import stat
 import tarfile
+from dataclasses import dataclass
 
 from preparation_binding import droiddeck_lock
 from preparation_common import (
@@ -58,15 +59,38 @@ def _owned_directory(fd):
     return info.st_dev, info.st_ino
 
 
-def _stream_tree(archive, inventory, root_fd, guard):
+@dataclass(frozen=True)
+class _PrivateXaliaModes:
+    inventory_digest: str
+    paths: frozenset
+    parent: object
+
+    def guard(self):
+        info = safe_path(self.parent).stat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700,
+                "reviewed Xalia modes require a private 0700 tool parent")
+
+    def check_entry(self, name, entry):
+        self.guard()
+        require(name in self.paths and entry["kind"] == "file" and entry["mode"] == 0o666,
+                "payload mode is outside reviewed private Xalia files")
+
+
+def _stream_tree(archive, inventory, root_fd, guard, private_xalia=None):
     """Materialize only pinned entries through directory FDs, never extractall."""
     entries = inventory.entries
     require(not inventory.root_mode & 0o022 and inventory.root_mode & 0o500 == 0o500,
             "unsupported payload root permissions")
-    for entry in entries.values():
+    if private_xalia is not None:
+        require(isinstance(private_xalia, _PrivateXaliaModes) and private_xalia.inventory_digest == inventory.digest,
+                "reviewed Xalia inventory context required")
+        private_xalia.guard()
+    for name, entry in entries.items():
         if entry["kind"] in ("file", "directory", "hardlink"):
-            require(not entry["mode"] & 0o022 and entry["mode"] & 0o400,
-                    "unsupported payload permissions")
+            supported = not entry["mode"] & 0o022 and entry["mode"] & 0o400
+            if not supported:
+                require(private_xalia is not None, "unsupported payload permissions")
+                private_xalia.check_entry(name, entry)
         if entry["kind"] == "directory":
             require(entry["mode"] & 0o100, "unsearchable payload directory")
     directories = sorted((name for name in entries if entries[name]["kind"] == "directory"), key=lambda name: (name.count("/"), name))
@@ -217,7 +241,7 @@ def apply_installation(plan, refresh, store, settings, ready, stop_check):
         require(str(plan.runtime.root) == "/", "live runtime root required")
         require(safe_path(stop_check.proc_root) == safe_path("/proc"), "live installation requires live proc observation")
 
-    def check_ready():
+    def check_ready(published=False):
         store._guard()
         checks = ready()
         fields(checks, ("target", "payload", "runtime", "stopped"))
@@ -228,6 +252,20 @@ def apply_installation(plan, refresh, store, settings, ready, stop_check):
         plan.target.verify()
         plan.runtime.verify()
 
+    return _write_installation_tree(plan, refresh, store, settings, check_ready)
+
+
+def _write_installation_tree(plan, refresh, store, settings, check_ready, private_xalia=None):
+    """Shared filesystem transaction; callers enforce their own strict scope.
+
+    apply_installation requires full execution readiness. The static new-slot
+    caller separately requires an explicitly approved, absent preparation slot
+    and verified probe; it never authorizes a launch, prefix write or binding.
+    """
+    steam = safe_path(plan.target.steam)
+    if private_xalia is not None:
+        require(isinstance(private_xalia, _PrivateXaliaModes) and private_xalia.inventory_digest == plan.inventory.digest and
+                safe_path(private_xalia.parent) == safe_path(steam / "compatibilitytools.d", steam), "invalid private Xalia context")
     def refreshed():
         current = refresh()
         require(isinstance(current, InstallationPlan) and current.digest == plan.digest and current.target == plan.target and
@@ -276,6 +314,8 @@ def apply_installation(plan, refresh, store, settings, ready, stop_check):
 
                 def anchor():
                     store._guard()
+                    if private_xalia is not None:
+                        private_xalia.guard()
                     check_lock()
                     for path, identity in ((steam, steam_identity), (tools, tools_identity)):
                         info = safe_path(path).stat()
@@ -306,7 +346,8 @@ def apply_installation(plan, refresh, store, settings, ready, stop_check):
                 save()
                 # Refresh source archive path is caller-bound by the same inventory.
                 # The plan carries the exact original path privately.
-                directories = _stream_tree(current.archive, current.inventory, tree_fd, guard)
+                directories = (_stream_tree(current.archive, current.inventory, tree_fd, guard) if private_xalia is None else
+                               _stream_tree(current.archive, current.inventory, tree_fd, guard, private_xalia))
                 _customize(tree_fd, current, directories)
                 stage = tools / record["staging_name"]
                 verify_tree(stage / "tree", current.inventory, current.customization.overlays)
@@ -325,7 +366,7 @@ def apply_installation(plan, refresh, store, settings, ready, stop_check):
                 os.fsync(stage_fd)
                 save()
                 anchor()
-                check_ready()
+                check_ready(published=True)
                 verify_tree(tools / current.customization.directory, current.inventory, current.customization.overlays)
                 info = os.stat(record["staging_name"], dir_fd=tools_fd, follow_symlinks=False)
                 require((info.st_dev, info.st_ino) == stage_identity, "staging directory replaced after publication")

@@ -1,4 +1,4 @@
-# Prefix preparation: offline planning and local staging (0.15.0)
+# Prefix preparation: offline planning and local staging (0.16.0)
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -437,3 +437,60 @@ error-kind enum and bounded errno in the private failed receipt where possible.
 The visible creation report uses the same fixed stage. No exception message or
 input data is stored. This evidence is preserved through subsequent revalidation;
 legacy failures that lack it remain explicitly unknown.
+
+
+## Static placement of the reviewed preparation tool (0.16.0)
+
+A trusted emitted bundle may include `placement_review`, recording the reviewed
+GitHub build commit/run/artifact ZIP digest, build-info digest and inner archive
+SHA-512. This review is pinned distribution data established before emission;
+format validation alone is not a remote attestation. The archive is still fully
+verified on the device. The common menu exposes option 4 only for this reviewed
+bundle and only for a verified registration probe from the same archive/inventory.
+It shows the new destination, capacity, review identity and write scope, then
+requires a separate `1` before any placement writes. Canceling writes nothing.
+
+This operation copies files into the fixed **preparation** slot only. It checks
+current target/receipt/history identity, prefix absence (including aliases),
+source/runtime identity, private parents and capacity; it rechecks under private
+global/target and cooperative DroidDeck settings locks. Staging is bounded,
+mode-preserving and verified against every archive member plus the six generated
+metadata files. Native `renameat2(RENAME_NOREPLACE)` publishes the new tree;
+post-publication verification repeats the probe and whole-tree checks. Existing
+legacy trees are never repaired or replaced. A matching existing preparation tree
+is observed read-only; a changed tree is refused. Failure preserves staging or
+published data and its journal for inspection. The same target's normal plan is
+then generated automatically, leaving later prefix/execution blockers in place.
+
+The static scope is intentionally separate from full execution readiness. It
+never calls Wine, wrappers, installers or the legacy sync helper, writes
+compatdata, changes tool bindings, or asserts that other process namespaces are
+stopped. Its writes are the new preparation tree/staging, private journal/locks,
+DroidDeck's cooperative lock file and a new report. This is justified by the
+absent new destination and the absence of any existing tool/prefix/config update.
+The existing `apply_installation` API still requires all four independent full
+readiness checks plus its `ProcessStopCheck`; it was not given bypass flags.
+Only the private filesystem transaction is shared with the new scoped caller.
+Runtime equivalence, GUI, stopped scope, dependency capacity and all execution
+requirements remain unverified and cannot be satisfied by this placement report.
+
+Exact confirmation pins the fixed target/destination/action, reviewed archive,
+customizations and probe evidence. Available space is remeasured, not frozen into
+identity; the already allocated staged tree is not counted a second time before
+publication. A race creating the destination causes refusal without replacement.
+The reviewed build identity is recorded in the output; it establishes which
+artifact was copied, not source reproducibility or compatibility of Wine/games.
+
+
+For the reviewed distribution's Xalia files, static placement may preserve a
+small explicit `private_xalia_files` list of regular files with source mode 0666.
+The list must exactly equal all otherwise unsupported entries in the pinned
+inventory; no arbitrary writable path, directory, hardlink or other mode is
+accepted. Every listed name is a direct `files/share/xalia/` file. This is not a
+mode overlay: bytes and source modes remain unchanged. The private tool parent
+must be owned by the current user and exactly 0700, checked before staging,
+during filesystem guards and after publication. No chmod is applied to existing
+parents. A parent becoming readable by others stops the operation. The original
+full writer still has no such exception by default. This copy-only containment
+must not be treated as execution readiness; future launch checks must establish
+their own safe containment and all remaining runtime/process prerequisites.

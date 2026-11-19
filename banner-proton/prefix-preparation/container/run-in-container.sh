@@ -48,6 +48,7 @@ for test in \
     /input/prefix-preparation/test_preparation_installation.py \
     /input/prefix-preparation/test_preparation_tool_writer.py \
     /input/prefix-preparation/test_preparation_preflight.py \
+    /input/prefix-preparation/test_preparation_static_placement.py \
     /input/prefix-preparation/test_preparation_probe_recovery.py \
     /input/prefix-preparation/test_preparation_probe.py \
     /input/prefix-preparation/test_preparation_selection.py \

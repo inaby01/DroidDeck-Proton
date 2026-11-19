@@ -492,7 +492,8 @@ def _verify_registered_context(record, marker, exe, key, source, steam, receipt_
     step("probe-registration-stable", require, observed == source_digest, "registration changed during probe verification")
     return {"purpose": "registration-only-probe", "probe_id": record["probe_id"], "receipt_sha256": receipt_digest,
             "new_id_relative_to_baseline": True, "exe_matches_private_receipt": True, "prefix_absent": True,
-            "observed_registration_sha256": source_digest, "preparation_complete": False}
+            "observed_registration_sha256": source_digest, "source_archive_sha512": record["archive_sha512"],
+            "source_inventory_digest": record["inventory_digest"], "preparation_complete": False}
 
 
 def interactive_workflow(directory, renderer, config=None, *, input_stream=None, output_stream=None, environment=None,
@@ -510,8 +511,14 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
     if config is None or not config.get("probe_material", False):
         return selection.interactive_selection(directory, renderer, config, **options)
     selection.validate_selection_config(config)
-    print("1. 登録済み対象の読み取り検査・計画\n2. 新規登録用の検証ファイルを用意\n3. 未完了の検証用記録を全照合して復帰\nq. 取消", file=output)
+    print("1. 登録済み対象の読み取り検査・計画\n2. 新規登録用の検証ファイルを用意\n3. 未完了の検証用記録を全照合して復帰", file=output)
+    if "placement_review" in config:
+        print("4. 準備用Protonを別の新規フォルダーへ配置（起動しない）", file=output)
+    print("q. 取消", file=output)
     answer = stream.readline(32).strip()
+    if answer == "4" and "placement_review" in config:
+        from preparation_static_placement import interactive_static_placement
+        return interactive_static_placement(directory, renderer, config, **options)
     if answer == "1":
         return selection.interactive_selection(directory, renderer, config, **options)
     if answer == "3":
