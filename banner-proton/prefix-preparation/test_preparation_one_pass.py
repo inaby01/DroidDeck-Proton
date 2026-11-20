@@ -21,6 +21,11 @@ from preparation_common import Invalid
 from preparation_store import PrivateStore
 
 
+def game_records_dir():
+    import preparation_game_prefix
+    return preparation_game_prefix.RECORDS
+
+
 def record(status, phase='post-inspected'):
     return {'install_id': 'depinstall-' + '0' * 32, 'status': status, 'phase': phase}
 
@@ -53,6 +58,8 @@ class ActionTableTests(unittest.TestCase):
                 self.assertEqual(one_pass.softdenchi_action(*args)[0], expected)
         # Moving on from a record whose post-inspection never ran is noted as a separate read-only check.
         self.assertTrue(one_pass.softdenchi_action(record('needs-user', 'installer-exited'), 0, 'present-verified')[2])
+        self.assertTrue(one_pass.softdenchi_action(None, 0, 'present-verified')[2])
+        self.assertTrue(one_pass.softdenchi_action(record('cancelled-absent'), 0, 'present-verified')[2])
         self.assertFalse(one_pass.softdenchi_action(record('present-verified'), 0, 'present-verified')[2])
 
     def test_binding_rows(self):
@@ -108,6 +115,13 @@ class ActionTableTests(unittest.TestCase):
         dep._offer_session_proxy_stop(asked, io.StringIO('1\n'), io.StringIO(), str)
         self.assertEqual(asked.calls, [{}])
 
+    def test_next_step_after_an_unfinished_installation(self):
+        self.assertIn('もう一度 12', one_pass.installation_next_step(None))
+        self.assertEqual(one_pass.installation_next_step({'status': 'failed', 'post_state': None}), one_pass.FAILED_THEN_MENU9)
+        self.assertEqual(one_pass.installation_next_step({'status': 'needs-user', 'post_state': 'uninspected'}),
+                         one_pass.RESTART_THEN_12)
+        self.assertIn('メニュー9', one_pass.installation_next_step({'status': 'partial', 'post_state': 'partial'}))
+
     def test_silent_arguments_are_pinned_to_the_recipe_bootstrap(self):
         real = recipe_module.softdenchi_recipe()
         self.assertEqual(recipe_module.silent_arguments(real), ['/s', '/v/qn', '/vREBOOT=ReallySuppress'])
@@ -115,7 +129,9 @@ class ActionTableTests(unittest.TestCase):
         other['bootstrap']['sha256'] = '0' * 64
         with self.assertRaisesRegex(Invalid, 'silent launch not defined'):
             recipe_module.silent_arguments(other)
-        for arguments in (['/s', '/v"/qn REBOOT=ReallySuppress"'], [], ['s']):
+        self.assertEqual(recipe_module.silent_arguments(real, {'bootstrap_sha256': real['bootstrap']['sha256'],
+                                                               'arguments': ['/' + 'a' * 63]}), ['/' + 'a' * 63])
+        for arguments in (['/s', '/v"/qn REBOOT=ReallySuppress"'], [], ['s'], ['/' + 'a' * 64]):
             with self.subTest(arguments=arguments), self.assertRaises(Invalid):
                 recipe_module.silent_arguments(real, {'bootstrap_sha256': real['bootstrap']['sha256'], 'arguments': arguments})
 
@@ -211,6 +227,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         _, report, output, commands = self.run_menu('12\n1\n1\n1\nq\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['reason'], 'installation-declined')
+        self.assertEqual(report['stage'], 'softdenchi-interactive')
         self.assertFalse(report['binding_written'])
         self.assertEqual([item['status'] for item in self.installs()], ['cancelled-absent'])
         self.assertIn('画面ありで導入する場合は1', output)
@@ -316,6 +333,32 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertNotIn('準備が終わりました', output)
         self.assertEqual(commands, [])
         self.assertEqual(before, self.protected())
+
+    def test_blocked_dependency_or_missing_installer_stops_before_anything_is_written(self):
+        before = self.protected()
+        self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime', 'mfc42-candidate']
+        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        self.assertEqual((report['stage'], report['reason']), ('one-pass-precheck', 'dependency-blocked:mfc42-candidate'))
+        self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime']
+        (self.f.fixture.source.root / 'sdrt-fixture.exe').unlink()
+        _, report, output, commands = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['stage'], 'one-pass-precheck', report)
+        self.assertIn('asset:', report['reason'])
+        self.assertIn('sdrt-fixture.exe', output)
+        self.assertEqual(commands, [])
+        self.assertFalse(self.game_compat.exists())
+        self.assertEqual(before, self.protected())
+
+    def test_unreadable_game_prefix_record_does_not_hide_other_games(self):
+        directory = self.f.store_root / game_records_dir()
+        directory.mkdir(mode=0o700, exist_ok=True)
+        junk = directory / ('gprefix-' + '0' * 32 + '.json')
+        junk.write_text('{"not": "a record"}')
+        junk.chmod(0o600)
+        _, report, output, _ = self.run_menu('12\n1\n1\n1\n')
+        self.assertIn('読めない初期化記録が1件', output)
+        self.assertEqual(report['unreadable_game_prefix_records'], 1)
+        self.assertEqual(report['status'], 'ready-to-launch', report)
 
     def test_several_matching_profiles_are_asked(self):
         self.use_folder_dependency()

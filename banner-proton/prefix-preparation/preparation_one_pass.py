@@ -14,8 +14,8 @@ import hashlib
 import os
 from pathlib import Path
 
-from preparation_assets import digest_json, exe_identity
-from preparation_common import VERSION, require, safe_path
+from preparation_assets import digest_json, exe_identity, inspect_assets
+from preparation_common import VERSION, Invalid, require, safe_path
 from preparation_game_prefix import (
     NON_ASCII_NOTE,
     RECORDS,
@@ -94,6 +94,21 @@ def changed_items(confirmed, current, ignore=()):
     return [name for name in before if name not in ignore and before[name] != after[name]]
 
 
+FAILED_THEN_MENU9 = ("導入の記録が失敗として残りました。12をもう一度実行しても、この記録で止まります。"
+                     "メニュー9で導入状態を確認し、結果を戻してください。")
+
+
+def installation_next_step(result):
+    """What the operator does after an installation that did not end present-verified."""
+    if result is None:
+        return "ソフト電池は導入していません。導入する場合は、もう一度 12 を実行してください。"
+    if result["status"] == "failed":
+        return FAILED_THEN_MENU9
+    if result.get("post_state") in (None, "uninspected"):
+        return RESTART_THEN_12
+    return "ソフト電池の導入は完了していません（" + result["status"] + "）。修復はしていません。メニュー9で状態を確認してください。"
+
+
 def softdenchi_action(latest, invalid, current):
     """Design 5.1 step 3: history row first, then the current read-only state.
 
@@ -103,12 +118,12 @@ def softdenchi_action(latest, invalid, current):
         return "stop", "invalid-installation-record-present", False
     if latest is not None and latest["status"] == "failed":
         return "stop", "previous-installation-failed-review-required", False
-    separately = latest is not None and latest.get("phase") != "post-inspected"
     if latest is None or latest["status"] in RETRYABLE:
         if current == "absent":
             return "install", None, False
         if current == "present-verified":
-            return "skip", None, separately
+            # No verified post-inspection backs this state; only the read-only inspection of this run does.
+            return "skip", None, True
         return "stop", "dependency-state-" + current, False
     if latest["status"] == "present-verified" and latest.get("phase") == "post-inspected":
         if current == "present-verified":
@@ -117,13 +132,19 @@ def softdenchi_action(latest, invalid, current):
     return "stop", "previous-installation-" + latest["status"] + "-review-required", False
 
 
-def _game_records(management, key=None):
+def _game_records(management):
+    """Readable game prefix records and the count of unreadable ones.
+
+    An unreadable record cannot be attributed to a registration, so it does not block the
+    others: a registration whose prefix exists without a readable record is never offered as
+    new (the prefix check), and an existing prefix is never adopted.
+    """
     if not os.path.lexists(management):
-        return []
+        return [], 0
     with PrivateStore(management) as store:
         listed = store.inventory()["game_prefixes"]
-    require(not any(item.get("status") == "invalid" for item in listed), "invalid game prefix record present")
-    return [item for item in listed if key is None or item["app_id"] == key]
+    invalid = sum(item.get("status") == "invalid" for item in listed)
+    return [item for item in listed if item.get("status") != "invalid"], invalid
 
 
 def binding_history(store, key):
@@ -164,8 +185,7 @@ def binding_action(binding, history):
 
 
 def interactive_one_pass(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
-                         steam=None, settings=None, home=None, runtime_root=Path("/"), recipe=None, silent_launch=None,
-                         sender=None):
+                         steam=None, settings=None, home=None, runtime_root=Path("/"), recipe=None, silent_launch=None):
     import sys
 
     import preparation_selection as selection
@@ -182,7 +202,11 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
     )
     from preparation_probe import EXE
     from preparation_recheck import plan_recheck
-    from preparation_softdenchi_recipe import softdenchi_recipe, validate_recipe
+    from preparation_softdenchi_recipe import (
+        bind_asset,
+        softdenchi_recipe,
+        validate_recipe,
+    )
 
     stream = sys.stdin if input_stream is None else input_stream
     output = sys.stdout if output_stream is None else output_stream
@@ -191,7 +215,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
     steam = safe_path(steam if steam is not None else home / ".local/share/Steam")
     settings = safe_path(settings if settings is not None else home / ".local/share/droiddeck-compat")
     directory = safe_path(directory)
-    softdenchi = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
+    softdenchi = None
     management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
     text = selection._text
     protected, stage, started = [steam, settings], "one-pass-config", False
@@ -226,6 +250,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
 
     def interactive_fallback(record, record_digest):
         """Silent run installed nothing: offer the interactive installer under its own confirmation."""
+        nonlocal stage
+        stage = "softdenchi-interactive"
         def refresh():
             return plan_dependency_install(record=record, record_sha256=record_digest, source=source, games=catalog(),
                                            recipe=softdenchi, installer_mode="interactive", **common)
@@ -233,9 +259,9 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         plan = refresh()
         interactive_asset = {**asset, "mode": "interactive", "arguments": []}
         current = from_base(plan.recheck, interactive_asset, plan_binding(steam, settings, key, proton["directory"]).digest)
-        check_fixed(current, ("installer_mode",), "softdenchi-interactive")
+        check_fixed(current, ("installer_mode",))
         if plan.blockers:
-            raise Stopped("softdenchi-interactive", "dependency-plan-blocked:" + ",".join(plan.blockers))
+            raise Stopped(stage, "dependency-plan-blocked:" + ",".join(plan.blockers))
         print("画面なしの導入では、ソフト電池は入りませんでした（何も変更されていません）。", file=output)
         print("画面ありで導入する場合は1、やめる場合はq（画面が出るかをwinverで確かめてから、インストーラーを起動します）: ",
               end="", file=output, flush=True)
@@ -257,13 +283,14 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                           f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
                     _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
                     if session.record["installer"]["status"] == "exited-processes-remain":
-                        _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=RESTART_THEN_12)
+                        _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
         result = dict(session.record)
         report["steps"][-1]["record"] = result
         live.clear()
         return result
 
     try:
+        softdenchi = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
         selection.validate_selection_config(config)
         require(config.get("initialization_trial") is True and "placement_review" in config and
                 "game_preparation" in config and "dependency_installation" in config, "one-pass preparation not enabled")
@@ -272,8 +299,12 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         source, _, games = selection.registration_catalog(environment)
         protected.extend(Path(game["exe"]).parent for game in games.values())
         records = {}
-        for item in _game_records(management):
+        readable, unreadable = _game_records(management)
+        for item in readable:
             records.setdefault(item["app_id"], []).append(item)
+        if unreadable:
+            report["unreadable_game_prefix_records"] = unreadable
+            print(f"読めない初期化記録が{unreadable}件あります（どの登録のものか分からないため、一覧の判定には使いません）。", file=output)
         base_dir = steam / "steamapps/compatdata"
         candidates = []
         for key_, game in games.items():
@@ -332,6 +363,24 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         uses_softdenchi = any(recipes[dep]["handler"] == SOFTDENCHI for dep in profile["dependencies"])
         asset = (_asset(config, softdenchi, "silent", silent_launch) if uses_softdenchi else
                  {"spec": None, "mode": "none", "arguments": []})
+        stage = "one-pass-precheck"
+        blocked = [dep for dep in profile["dependencies"] if recipes[dep]["status"] != "ready"]
+        if blocked:
+            raise Stopped(stage, "dependency-blocked:" + ",".join(blocked),
+                          "この作品には未対応の依存があるため、割り当てまで進めません。何も変更していません。")
+        spec = config["dependency_installation"]["asset"] if uses_softdenchi else None
+        if uses_softdenchi and label == "新規":
+            # A new prefix always needs the installer: check it before anything is written.
+            checked = inspect_assets({"schema_version": 1, "assets": [spec]}, directory)[0]
+            problems = ["asset:" + reason for reason in checked["blockers"]]
+            try:
+                bind_asset(softdenchi, spec, checked["measured"])
+            except Invalid:
+                problems.append("asset-not-recipe-bootstrap")
+            if problems:
+                raise Stopped(stage, ",".join(sorted(problems)),
+                              "インストーラー（" + spec["filename"] + "）がprepare.shと同じフォルダーにないか、内容が違います。"
+                              "何も変更していません。")
 
         def refresh_init():
             return plan_game_prefix(source=source, games=catalog(), key=key, profile_id=profile_id, **common)
@@ -365,14 +414,16 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
               text(", ".join(profile["dependencies"])), file=output)
         print("prefix: " + text(str(compatdata)) + ("（新規作成）" if label == "新規" else "（初期化済み・続きから）"), file=output)
         print("準備用Proton: " + text(proton["directory"]), file=output)
+        if label == "新規":
+            print("専用work/HOME（新規）: " + text(paths[1]) + " / " + text(paths[2]), file=output)
         if label == "新規" and not init_plan.exe_path_ascii:
             print(NON_ASCII_NOTE, file=output)
         print("行うこと:", file=output)
         if label == "新規":
             print("  1) prefixを初期化（準備用Protonで cmd.exe /d /c exit 0。ゲームは起動しません）", file=output)
         if uses_softdenchi:
-            print("  2) ソフト電池が入っていなければ、インストーラー（" + text(config["dependency_installation"]["asset"]["filename"]) +
-                  "）を画面なしで実行（" + " ".join(asset["arguments"]) + "）", file=output)
+            print("  2) ソフト電池が入っていなければ、インストーラー（" + text(spec["filename"]) + "、SHA-256 " +
+                  spec["expected_sha256"][:16] + "…）を画面なしで実行（" + " ".join(asset["arguments"]) + "）", file=output)
             print("     インストーラーに同梱された使用許諾に同意したうえで導入します。この確認の1は、その同意を含みます。", file=output)
             print("     使用許諾を画面で読んでから導入したい場合は、ここでqを選び、メニュー8を使ってください。", file=output)
             print("     導入後にSdProxyが残った場合は、メニュー8と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。",
@@ -458,17 +509,15 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                         session.start_silent_installer()
                         _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
                         if session.record["installer"]["status"] == "exited-processes-remain":
-                            _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=RESTART_THEN_12)
+                            _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
                     result = dict(session.record)
                     report["steps"][-1]["record"] = result
                     live.clear()
                     if result["status"] == "cancelled-absent":
                         result = interactive_fallback(record, record_digest)
                     if result is None or result["status"] != "present-verified":
-                        status = "declined" if result is None else result["status"]
-                        raise Stopped(stage, "installation-" + status,
-                                      RESTART_THEN_12 if result is not None and result.get("post_state") in (None, "uninspected")
-                                      else "ソフト電池の導入は完了していません。")
+                        raise Stopped(stage, "installation-" + ("declined" if result is None else result["status"]),
+                                      installation_next_step(result))
             stage = "binding"
             bplan = plan_game_binding(record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,
                                       recipe=softdenchi, **common)
@@ -488,7 +537,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             else:
                 result = apply_game_binding(bplan, store, lambda: plan_game_binding(
                     record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,
-                    recipe=softdenchi, **common), bplan.digest, stop)
+                    recipe=softdenchi, **common), bplan.digest, stop, softdenchi)
                 report["steps"].append({"step": "binding", "result": result})
                 report["binding_written"] = result["status"] == "binding-verified"
                 if result["status"] != "binding-verified":

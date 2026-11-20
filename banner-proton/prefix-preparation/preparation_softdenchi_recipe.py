@@ -164,7 +164,7 @@ def silent_arguments(recipe, launch=None):
     arguments = launch["arguments"]
     require(launch["bootstrap_sha256"] == recipe["bootstrap"]["sha256"], "silent launch not defined for this bootstrap")
     require(type(arguments) is list and 0 < len(arguments) <= 8 and
-            all(type(a) is str and re.fullmatch(r"/[A-Za-z0-9/=_.-]{1,64}", a, re.ASCII) for a in arguments),
+            all(type(a) is str and re.fullmatch(r"/[A-Za-z0-9/=_.-]{1,63}", a, re.ASCII) for a in arguments),
             "invalid silent arguments")
     return list(arguments)
 
