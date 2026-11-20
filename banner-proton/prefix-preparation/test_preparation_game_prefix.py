@@ -100,8 +100,18 @@ class GamePrefixTests(DEP['InstallTests']):
         with patch('subprocess.Popen', side_effect=AssertionError('cancel never executes')):
             status, report, _ = self.menu('10\nq\n')
         self.assertEqual((status, report), (0, None))
+        # An unknown profile name is refused before anything is written.
+        with patch('subprocess.Popen', side_effect=AssertionError('refused input never executes')):
+            status, report, _ = self.menu('10\n1\nunknown-game\n')
+        self.assertEqual(report['reason'], 'invalid profile selection')
+        self.assertEqual(report['writes'], [{'scope': 'report-only', 'filename': report['writes'][0]['filename']}])
+        with patch('subprocess.Popen', side_effect=AssertionError('cancel never executes')):
+            status, report, output = self.menu('10\n1\n1\nq\n')
+        self.assertEqual((status, report), (0, None))
+        self.assertIn('作品プロファイル: ', output)
+        # The profile may be given by its number or, as operators type it from the list, by its name.
         with patch.object(trial, 'plan_launch', side_effect=self.launch_fixture):
-            status, report, output = self.menu('10\n1\n1\n1\n')
+            status, report, output = self.menu('10\n1\nexample-game\n1\n')
         self.assertEqual(status, 2, output)
         self.assertEqual(report['initialization']['status'], 'initialized-unverified')
         self.assertEqual(report['initialization']['scope'], game.SCOPE)

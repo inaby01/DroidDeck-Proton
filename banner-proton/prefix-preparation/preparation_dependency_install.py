@@ -41,6 +41,7 @@ from preparation_execution import plan_launch
 from preparation_processes import (
     SYSTEM_DIRECTORIES,
     WINE_INFRASTRUCTURE,
+    XALIA_IMAGE_SUFFIX,
     ProcessStopCheck,
     describe_image,
     inventory_processes,
@@ -87,6 +88,8 @@ def classify_process(process):
         return "wine-infrastructure"
     if image.startswith("\\") and not image.startswith("\\\\") and name == "wineserver":
         return "wineserver"
+    if not image.startswith("\\") and image.endswith(XALIA_IMAGE_SUFFIX):
+        return "proton-xalia"
     return "other"
 
 
@@ -145,6 +148,14 @@ def _view_is_explained(inventory):
     processes = inventory["processes"]
     require(all(p["prefix_consistent"] for p in processes), "conflicting prefix environment")
     require(all(classify_process(p) != "other" for p in processes), "unclassified process in prefix view")
+    # The xalia image is outside the Windows system directories; it is explained only as a child of explorer.exe.
+    by_pid = {p["pid"]: p for p in processes}
+    for process in processes:
+        if classify_process(process) == "proton-xalia":
+            parent = by_pid.get(process["parent"])
+            require(parent is not None and parent["started"] <= process["started"] and
+                    classify_process(parent) == "wine-infrastructure" and ntpath.basename(parent["image"]) == "explorer.exe",
+                    "unclassified process in prefix view")
 
 
 def signal_proxies(compatdata, targets, proc_root, sender=None, log=None):

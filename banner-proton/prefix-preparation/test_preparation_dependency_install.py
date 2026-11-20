@@ -595,6 +595,39 @@ class InstallTests(TRIAL['TrialTests']):
                     self.assertEqual(sent, [])
         self.clear_fake()
 
+    XALIA = 'Z:\\DUMMY_TOOL\\files\\share\\xalia\\xalia.exe'
+
+    def test_wine_and_proton_helpers_seen_on_the_device_are_explained(self):
+        # 0.26.2 device run: lsass.exe, tabtip.exe and Proton's xalia.exe stayed beside the SdProxy tree.
+        self.clear_fake()
+        targets = self.lingering_tree()
+        self.fake_process(900007, 'C:\\windows\\system32\\lsass.exe', 900002, 13)
+        self.fake_process(900008, 'C:\\windows\\system32\\tabtip.exe', 900003, 14)
+        self.fake_process(900009, self.XALIA, 900003, 15)
+        with self.f.store() as store:
+            summary, planned, reason = self.install_session(store).preview_proxy_stop()
+        self.assertEqual((sorted(planned), reason), (sorted(targets), None))
+        self.assertEqual(summary['roles'], {'wineserver': 1, 'wine-infrastructure': 4, 'proton-xalia': 1,
+                                            'softdenchi-service': 1, 'softdenchi-proxy': 2})
+        self.assertEqual({item['name']: item['place'] for item in summary['processes']}['xalia.exe'], 'proton-share-xalia')
+        self.assertNotIn('DUMMY_TOOL', json.dumps(summary))
+        self.clear_fake()
+
+    def test_helper_names_outside_their_expected_place_stay_unexplained(self):
+        cases = (('C:\\users\\DUMMY_PRIVATE\\lsass.exe', 900002), ('C:\\DUMMY_PRIVATE\\tabtip.exe', 900003),
+                 (self.XALIA, 900002), (self.XALIA, 900404), ('/DUMMY_TOOL/files/share/xalia/xalia.exe', 900003),
+                 ('C:\\DUMMY_PRIVATE\\xalia.exe', 900003))
+        for image, parent in cases:
+            with self.subTest(image=image, parent=parent):
+                self.clear_fake()
+                self.lingering_tree()
+                self.fake_process(900007, image, parent, 50)
+                with self.f.store() as store:
+                    _, planned, reason = self.install_session(store).preview_proxy_stop()
+                self.assertIsNone(planned)
+                self.assertEqual(reason, 'unclassified process in prefix view')
+        self.clear_fake()
+
     def test_conflicting_prefix_environment_or_executable_identity_refuses_the_stop(self):
         compat = self.f.steam / 'steamapps/compatdata/43'
         cases = ({'environ': b'STEAM_COMPAT_DATA_PATH=' + str(compat).encode() + b'\0WINEPREFIX=/DUMMY_OTHER/pfx\0'},

@@ -268,12 +268,15 @@ def interactive_game_prefix(directory, renderer, config, *, input_stream=None, o
         for number, profile_id in enumerate(ids, 1):
             print(f"{number}. {selection._text(profiles[profile_id]['title'])} / {profile_id} / "
                   f"{selection._text(profiles[profile_id]['edition'])}", file=output)
-        print("この登録に対応する作品プロファイルの番号（qで取消）: ", end="", file=output, flush=True)
+        print("この登録に対応する作品プロファイルの番号（例: 1。dc5ph のような名前でも可、qで取消）: ", end="", file=output, flush=True)
         answer = stream.readline(32).strip()
         if answer == "q":
             return 0, None
-        require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(ids), "invalid profile selection")
-        profile_id = ids[int(answer) - 1]
+        if answer in profiles:
+            profile_id = answer
+        else:
+            require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(ids), "invalid profile selection")
+            profile_id = ids[int(answer) - 1]
 
         def refresh():
             current, _, now = selection.registration_catalog(environment)

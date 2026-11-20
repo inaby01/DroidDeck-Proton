@@ -131,8 +131,11 @@ class ProcessStopCheck:
 
 
 SYSTEM_DIRECTORIES = frozenset((r"c:\windows\system32", r"c:\windows\syswow64"))
+# lsass.exe (service dispatcher) and tabtip.exe are made Wine system processes; only their system-directory images count.
 WINE_INFRASTRUCTURE = frozenset(("services.exe", "winedevice.exe", "explorer.exe", "plugplay.exe", "svchost.exe",
-                                 "rpcss.exe", "conhost.exe"))
+                                 "rpcss.exe", "conhost.exe", "lsass.exe", "tabtip.exe"))
+# Proton's UI automation helper, started by explorer.exe from the tool's files/share/xalia.
+XALIA_IMAGE_SUFFIX = r"\files\share\xalia\xalia.exe"
 MAX_ARGV0 = 4096
 
 
@@ -217,6 +220,8 @@ def describe_image(image):
         place = "native"
     elif directory in SYSTEM_DIRECTORIES:
         place = "windows-system"
+    elif image.endswith(XALIA_IMAGE_SUFFIX):
+        place = "proton-share-xalia"
     elif directory == r"c:\program files (x86)\softdenchi":
         place = "softdenchi-x86"
     else:

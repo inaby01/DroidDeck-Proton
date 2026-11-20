@@ -718,8 +718,12 @@ The SoftDenchi service is started at installation and can keep Wine running in t
 managed prefix after the bootstrap exits. When the visible process view of that
 prefix is not clear, the installation record and menu 9 keep a process inventory:
 PID, start time, parent, a role (`wineserver`, `wine-infrastructure`,
-`softdenchi-service`, `softdenchi-proxy`, `other`) and the image basename with a
-coarse place. Environment values, arguments and other paths are not kept.
+`proton-xalia`, `softdenchi-service`, `softdenchi-proxy`, `other`) and the image
+basename with a coarse place. Environment values, arguments and other paths are not
+kept. `lsass.exe` and `tabtip.exe` count as Wine infrastructure only from the Windows
+system directories; Proton's `xalia.exe` counts only with a `files\share\xalia` image and
+an `explorer.exe` parent in the same view. Both were left beside SdProxy on the device
+and otherwise refuse the stop as unclassified.
 
 After an explicit confirmation, SIGTERM is sent only to SdProxy processes whose
 parent chain reaches UCManSvc under `services.exe`, with consistent start times and
