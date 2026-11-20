@@ -770,7 +770,8 @@ Menu 11 binds one initialized registered-game prefix to the reviewed preparation
 only when every dependency of the profile bound at initialization is live
 `present-verified` (offline inspection with a clear process view before and after).
 A `blocked` recipe (MFC today) or an unverified dependency is reported and nothing is
-written. A profile changed since initialization refuses the plan. After an exact
+written. A profile changed since initialization refuses the plan (0.27.0 accepts only a later
+revision of the same profile pinned to the initialized EXE hash; see below). After an exact
 confirmation the existing guarded target-only writer changes this game's entries in
 `games.json`, `config.vdf` and `state.json`, keeps other games' pending choices and the
 default, and stores a private backup and record. Before each file write the
@@ -835,3 +836,32 @@ the record keeps the unreadable PIDs of the last view (`stop.unreadable_pids`, a
 16; process summaries also carry `unreadable_pids`). Menu 8 now prints why a stop was
 refused or aborted, how many SIGTERMs were sent, and, unless the post-inspection passed,
 to restart DroidDeck and check the prefix with menu 9 when no post-inspection ran.
+
+## Game-folder file dependencies and profile revisions (0.27.0)
+
+Some games import a runtime DLL that their own folder already provides (for example an
+x86 executable importing the ANSI `MFC42.DLL`), while the 32-bit MFC140 and VC++
+2015-2019 runtime that SoftDenchi's in-process components load are installed by the
+SoftDenchi bootstrap during menu 8. A new recipe handler,
+`game-folder-file`, declares such a file by name, size, SHA-256 and PE architecture
+together with the EXE hash and import it was derived from; the profile must pin that
+EXE hash. It is the only handler besides the SoftDenchi installer that may be `ready`.
+Menu 11 checks it read-only: exactly one single-link regular file of that name
+(case-insensitive) directly in the registered EXE's folder, matching size, hash and
+architecture, is `present-verified`; none is `absent`; a symlink, several case
+variants or other content is `incompatible`; unreadable is `uninspected`. The check
+runs again in the readiness callback before each binding write. Nothing is copied,
+moved, installed or loaded; whether the game loads the file is only observable at
+launch. `mfc-local` (placing MFC into the prefix) stays blocked.
+
+Menu 11 also accepts a later revision of the profile bound at initialization: same
+profile ID, a strictly higher revision, and a pinned EXE hash equal to the one measured
+at initialization (which the recheck still verifies live). Dependencies are evaluated
+live, so a revision that only refines them needs no new prefix. The plan and result
+record both revisions and digests; any other change still refuses. Profile title and
+edition are not in the record and cannot be compared.
+
+Menus 10 and 11 report whether the registered EXE path is ASCII and warn otherwise: a
+game in a folder named with non-ASCII characters has been observed to exit right after
+start while an ASCII-named copy with the same kind of prefix proceeded (the failing
+call was not observed).

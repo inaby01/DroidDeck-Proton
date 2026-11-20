@@ -2,10 +2,14 @@
 """Registered-game new prefix: native surrogate only, never Wine, vendor binaries or real games."""
 
 import copy
+import hashlib
 import json
+import os
 import runpy
 import shutil
+import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -27,7 +31,85 @@ RECIPES = [{'dependency_id': 'softdenchi-runtime', 'revision': 1, 'handler': 'so
             'reason': 'terms and layout unresolved'}]
 
 
+def synthetic_pe(machine=0x14C, extra=b''):
+    """Smallest header the asset reader accepts; never executed."""
+    data = bytearray(0x200)
+    data[0:2] = b'MZ'
+    struct.pack_into('<I', data, 0x3C, 0x80)
+    data[0x80:0x84] = b'PE\0\0'
+    struct.pack_into('<H', data, 0x84, machine)
+    struct.pack_into('<H', data, 0x94, 0xE0 if machine == 0x14C else 0xF0)
+    struct.pack_into('<H', data, 0x98, 0x10B if machine == 0x14C else 0x20B)
+    return bytes(data) + extra
+
+
+DLL = synthetic_pe(extra=b'synthetic runtime library')
+EXE_HASH = 'a' * 64
+
+
+def folder_recipe(exe_hash=EXE_HASH, data=DLL, status='ready', name='mfc42.dll'):
+    return {'dependency_id': 'mfc42-game-folder', 'revision': 1, 'handler': 'game-folder-file', 'status': status,
+            'reason': 'synthetic game-folder check',
+            'file': {'name': name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(), 'pe_machine': 'x86'},
+            'required_by': {'exe_sha256': exe_hash, 'import': 'MFC42.DLL'}}
+
+
 class ConfigTests(unittest.TestCase):
+    def test_game_folder_recipe_is_ready_only_with_a_pinned_profile_exe(self):
+        profile = {**PROFILE, 'dependencies': ['softdenchi-runtime', 'mfc42-game-folder'], 'exe_sha256': EXE_HASH}
+        _profiles, recipes = game.validate_game_config({'profiles': [profile], 'recipes': RECIPES + [folder_recipe()]})
+        self.assertEqual(recipes['mfc42-game-folder']['status'], 'ready')
+        broken_recipes = (
+            {k: v for k, v in folder_recipe().items() if k != 'file'},
+            {**folder_recipe(), 'file': {**folder_recipe()['file'], 'name': '../mfc42.dll'}},
+            {**folder_recipe(), 'file': {**folder_recipe()['file'], 'name': 'mfc42.exe'}},
+            {**folder_recipe(), 'file': {**folder_recipe()['file'], 'pe_machine': 'arm64'}},
+            {**folder_recipe(), 'file': {**folder_recipe()['file'], 'sha256': 'x'}},
+            {**folder_recipe(), 'required_by': {'exe_sha256': EXE_HASH}},
+            {**RECIPES[1], 'file': folder_recipe()['file']})
+        for recipe in broken_recipes:
+            with self.subTest(recipe=recipe), self.assertRaises(Invalid):
+                game.validate_game_config({'profiles': [profile], 'recipes': RECIPES + [recipe]})
+        for changed in ({**profile, 'exe_sha256': None}, {**profile, 'exe_sha256': 'b' * 64}):
+            with self.subTest(profile=changed), self.assertRaisesRegex(Invalid, 'game-folder dependency requires'):
+                game.validate_game_config({'profiles': [changed], 'recipes': RECIPES + [folder_recipe()]})
+
+    def test_game_folder_file_is_only_read_and_matched_exactly(self):
+        spec = folder_recipe()['file']
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            folder = root / 'Game'
+            folder.mkdir()
+            exe = folder / 'Game.exe'
+            exe.write_bytes(synthetic_pe())
+            self.assertEqual(game.inspect_game_folder_file(exe, spec)['state'], 'absent')
+            (folder / 'MFC42.DLL').write_bytes(DLL)
+            before = sorted((p.name, p.stat().st_mtime_ns) for p in folder.iterdir())
+            self.assertEqual(game.inspect_game_folder_file(exe, spec), {'state': 'present-verified'})
+            self.assertEqual(before, sorted((p.name, p.stat().st_mtime_ns) for p in folder.iterdir()))
+            (folder / 'MFC42.DLL').write_bytes(DLL + b'changed')
+            self.assertEqual(game.inspect_game_folder_file(exe, spec)['state'], 'incompatible')
+            (folder / 'MFC42.DLL').write_bytes(synthetic_pe(0x8664))
+            self.assertEqual(game.inspect_game_folder_file(exe, {**spec, 'size': len(synthetic_pe(0x8664))})['state'],
+                             'incompatible')
+            (folder / 'MFC42.DLL').unlink()
+            (root / 'elsewhere.dll').write_bytes(DLL)
+            (folder / 'mfc42.dll').symlink_to(root / 'elsewhere.dll')
+            self.assertEqual(game.inspect_game_folder_file(exe, spec)['state'], 'incompatible')
+            (folder / 'mfc42.dll').unlink()
+            os.link(root / 'elsewhere.dll', folder / 'mfc42.dll')
+            self.assertEqual(game.inspect_game_folder_file(exe, spec)['state'], 'incompatible')
+            (folder / 'mfc42.dll').unlink()
+            (folder / 'mfc42.dll').write_bytes(DLL)
+            (folder / 'MFC42.dll').write_bytes(DLL)
+            if len({p.name for p in folder.iterdir()}) == 3:  # case-sensitive filesystem
+                self.assertEqual(game.inspect_game_folder_file(exe, spec)['state'], 'incompatible')
+
+    def test_non_ascii_executable_paths_are_flagged(self):
+        self.assertTrue(game.exe_path_ascii('/root/Games/Example Game/Game.exe'))
+        self.assertFalse(game.exe_path_ascii('/root/Games/Example Game - \u30b3\u30d4\u30fc (2)/Game.exe'))
+
+
     def test_game_config_rejects_unsafe_declarations(self):
         profiles, _recipes = game.validate_game_config({'profiles': [PROFILE], 'recipes': RECIPES})
         self.assertEqual(list(profiles), ['example-game'])
@@ -191,6 +273,71 @@ class GamePrefixTests(DEP['InstallTests']):
         self.config['game_preparation']['profiles'][0]['revision'] = 2
         with self.assertRaisesRegex(Invalid, 'game profile changed'):
             self.binding_plan(record, digest)
+
+    def exe_hash(self):
+        return hashlib.sha256(self.f.exe.read_bytes()).hexdigest()
+
+    def use_folder_dependency(self, revision=1):
+        profile = self.config['game_preparation']['profiles'][0]
+        profile.update(revision=revision, exe_sha256=self.exe_hash(), dependencies=['softdenchi-runtime', 'mfc42-game-folder'])
+        self.config['game_preparation']['recipes'].append(folder_recipe(self.exe_hash()))
+
+    def test_game_folder_dependency_gates_binding_and_is_rechecked_before_writing(self):
+        self.use_folder_dependency()
+        record, digest = self.initialize()
+        self.install_dependency(record, digest)
+        dll = self.f.exe.parent / 'mfc42.dll'
+        plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ('dependency-not-verified:mfc42-game-folder',))
+        self.assertEqual(plan.dependencies[1]['state'], 'absent')
+        dll.write_bytes(DLL)
+        plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ())
+        self.assertIsNone(plan.summary()['profile_revision_change'])
+        before = self.protected()
+        lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
+        # Changed after planning: the plan digest no longer matches, nothing is written.
+        dll.write_bytes(DLL + b'changed')
+        with PrivateStore(self.f.store_root) as store, store.locked(lock), self.assertRaises(Invalid):
+            game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,
+                                    ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+        self.assertEqual(before, self.protected())
+        dll.write_bytes(DLL)
+        with PrivateStore(self.f.store_root) as store, store.locked(lock):
+            result = game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,
+                                             ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+        self.assertEqual(result['status'], 'binding-verified')
+        self.assertEqual(dll.read_bytes(), DLL)
+        dll.unlink()
+
+    def test_later_profile_revision_with_the_initialized_exe_is_accepted(self):
+        record, digest = self.initialize()
+        self.install_dependency(record, digest)
+        (self.f.exe.parent / 'mfc42.dll').write_bytes(DLL)
+        self.use_folder_dependency(revision=2)
+        plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ())
+        change = plan.summary()['profile_revision_change']
+        self.assertEqual((change['initialized_revision'], change['current_revision']), (1, 2))
+        self.assertEqual(change['initialized_digest'], record['profile']['profile_digest'])
+        with patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe):
+            status, report, output = self.menu('11\n1\nq\n')
+        self.assertEqual((status, report), (0, None))
+        self.assertIn('初期化時の改訂1から改訂2へ', output)
+        self.assertIn('mfc42-game-folder / present-verified', output)
+        profile = self.config['game_preparation']['profiles'][0]
+        for changed in ({'revision': 1}, {'exe_sha256': 'b' * 64}):
+            with self.subTest(changed=changed):
+                saved = dict(profile)
+                profile.update(changed)
+                if 'exe_sha256' in changed:
+                    self.config['game_preparation']['recipes'][-1]['required_by']['exe_sha256'] = changed['exe_sha256']
+                with self.assertRaisesRegex(Invalid, 'game profile changed'):
+                    self.binding_plan(record, digest)
+                profile.clear()
+                profile.update(saved)
+                self.config['game_preparation']['recipes'][-1]['required_by']['exe_sha256'] = self.exe_hash()
+        (self.f.exe.parent / 'mfc42.dll').unlink()
 
     def install_dependency(self, record, digest):
         source, _, games = DEP['TRIAL']['BASE']['selection'].registration_catalog(self.environment)

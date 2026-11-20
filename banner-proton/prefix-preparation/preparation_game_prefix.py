@@ -12,12 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import preparation_trial as trial
-from preparation_assets import digest_json, exe_identity
+from preparation_assets import digest_json, exe_identity, measure_stream
 from preparation_common import (
     SHA256,
     VERSION,
     fields,
     identifier,
+    regular_open,
     require,
     revision,
     safe_path,
@@ -32,7 +33,14 @@ from preparation_store import PrivateStore
 SCOPE = "registered-game-new-prefix"
 RECORDS = "game-prefixes"
 ID_PREFIX = "gprefix-"
-HANDLERS = ("softdenchi-interactive", "mfc-local")
+HANDLERS = ("softdenchi-interactive", "mfc-local", "game-folder-file")
+# Handlers whose recipes may be declared ready: the guarded SoftDenchi installer, and a read-only
+# check of a file already in the registered game's folder (nothing is copied or installed).
+READY_HANDLERS = ("softdenchi-interactive", "game-folder-file")
+GAME_FOLDER_FILE_LIMIT = 64 * 1024 * 1024
+NON_ASCII_NOTE = ("注意: 登録EXEのパスにASCII以外の文字（日本語など）が含まれます。"
+                  "このようなフォルダー名で、ゲームが起動直後に終了した実機記録があります（原因は未確定）。")
+PE_MACHINES = ("x86", "x86_64")
 
 
 def _directory_identity(path):
@@ -73,13 +81,16 @@ def validate_game_config(value):
     recipes = {}
     require(type(value["recipes"]) is list and 0 < len(value["recipes"]) <= 64, "invalid recipe list")
     for item in value["recipes"]:
-        fields(item, ("dependency_id", "revision", "handler", "status", "reason"))
+        folder_file = item.get("handler") == "game-folder-file"
+        fields(item, ("dependency_id", "revision", "handler", "status", "reason") + (("file", "required_by") if folder_file else ()))
         key = identifier(item["dependency_id"])
         require(key not in recipes, "duplicate recipe")
         revision(item["revision"])
         require(item["handler"] in HANDLERS and item["status"] in ("ready", "blocked"), "invalid recipe")
-        require(item["handler"] == "softdenchi-interactive" or item["status"] == "blocked", "only SoftDenchi can be ready")
+        require(item["handler"] in READY_HANDLERS or item["status"] == "blocked", "only SoftDenchi or a game-folder check can be ready")
         string(item["reason"])
+        if folder_file:
+            _validate_game_folder_file(item)
         recipes[key] = item
     profiles = {}
     require(type(value["profiles"]) is list and 0 < len(value["profiles"]) <= 64, "invalid profile list")
@@ -96,8 +107,62 @@ def validate_game_config(value):
                 all(identifier(dep) in recipes for dep in item["dependencies"]), "profile references unknown dependency")
         require(item["exe_sha256"] is None or type(item["exe_sha256"]) is str and SHA256.fullmatch(item["exe_sha256"]),
                 "invalid expected EXE hash")
+        # A game-folder file is checked for the executable it was derived from; the profile must pin that executable.
+        require(all(recipes[dep]["handler"] != "game-folder-file" or
+                    item["exe_sha256"] == recipes[dep]["required_by"]["exe_sha256"] for dep in item["dependencies"]),
+                "game-folder dependency requires the profile EXE hash it was derived from")
         profiles[key] = item
     return profiles, recipes
+
+
+def _validate_game_folder_file(item):
+    spec, origin = item["file"], item["required_by"]
+    fields(spec, ("name", "size", "sha256", "pe_machine"))
+    fields(origin, ("exe_sha256", "import"))
+    name = string(spec["name"])
+    require(name.isascii() and name == name.strip() and "/" not in name and "\\" not in name and name not in (".", "..") and
+            name.lower().endswith(".dll") and len(name) <= 64, "invalid game-folder file name")
+    require(type(spec["size"]) is int and 0 < spec["size"] <= GAME_FOLDER_FILE_LIMIT, "invalid game-folder file size")
+    require(type(spec["sha256"]) is str and SHA256.fullmatch(spec["sha256"]) is not None, "invalid game-folder file hash")
+    require(spec["pe_machine"] in PE_MACHINES, "invalid game-folder file architecture")
+    require(type(origin["exe_sha256"]) is str and SHA256.fullmatch(origin["exe_sha256"]) is not None, "invalid game-folder origin")
+    string(origin["import"])
+
+
+def inspect_game_folder_file(exe, spec):
+    """Read-only: the declared file directly in the registered EXE's folder (name case-insensitive).
+
+    ``present-verified`` means exactly one single-link regular file of that name with the
+    declared size, SHA-256 and PE architecture. Nothing is copied, moved or loaded; whether
+    the game actually loads it is only observable at launch.
+    """
+    folder = safe_path(exe).parent
+    try:
+        with os.scandir(folder) as entries:
+            matches = [entry for entry in entries if entry.name.lower() == spec["name"].lower()]
+    except OSError as error:
+        return {"state": "uninspected", "reason": "game folder unreadable: " + type(error).__name__}
+    if not matches:
+        return {"state": "absent", "reason": "file not found in the game folder"}
+    if len(matches) > 1:
+        return {"state": "incompatible", "reason": "several files differ only in case"}
+    if matches[0].is_symlink():
+        return {"state": "incompatible", "reason": "symbolic link"}
+    try:
+        with regular_open(folder / matches[0].name, GAME_FOLDER_FILE_LIMIT) as stream:
+            measured = measure_stream(stream, GAME_FOLDER_FILE_LIMIT, "pe")
+    except OSError as error:
+        return {"state": "uninspected", "reason": "file unreadable: " + type(error).__name__}
+    except ValueError as error:
+        return {"state": "incompatible", "reason": str(error)}
+    if (measured["size"], measured["sha256"], measured["pe_machine"]) != (spec["size"], spec["sha256"], spec["pe_machine"]):
+        return {"state": "incompatible", "reason": "size, hash or architecture differs"}
+    return {"state": "present-verified"}
+
+
+def exe_path_ascii(exe):
+    """Recorded on device: a non-ASCII game folder name made an ANSI MFC42 game exit right after start."""
+    return str(exe).isascii()
 
 
 @dataclass(frozen=True)
@@ -119,6 +184,7 @@ class GamePrefixPlan:
     selection: str
     dependencies: tuple
     registration: dict = field(repr=False)
+    exe_path_ascii: bool = True
 
     @property
     def digest(self):
@@ -133,8 +199,8 @@ class GamePrefixPlan:
         base.update(scope=SCOPE, profile={key: self.profile[key] for key in ("profile_id", "revision", "title", "edition",
                                                                               "edition_status")},
                     profile_selection=self.selection, executable={"sha256": self.exe["sha256"], "size": self.exe["size"]},
-                    dependencies=list(self.dependencies), binding_written=False, dependencies_installed=False,
-                    existing_prefix_modified=False)
+                    dependencies=list(self.dependencies), exe_path_ascii=self.exe_path_ascii, binding_written=False,
+                    dependencies_installed=False, existing_prefix_modified=False)
         return base
 
 
@@ -202,7 +268,7 @@ def plan_game_prefix(*, config, directory, renderer, source, games, key, profile
                  "compatdata": str(compatdata), "baseline": baseline, "profile": profile_digest, "exe": identity["sha256"],
                  "registration": registration, "dependencies": list(dependencies)}
     plan = trial.TrialPlan(digest_json(signature), placement, home, work, private_home, compatdata, baseline)
-    return GamePrefixPlan(plan, profile, profile_digest, identity, selection, dependencies, registration)
+    return GamePrefixPlan(plan, profile, profile_digest, identity, selection, dependencies, registration, exe_path_ascii(exe))
 
 
 class GamePrefixSession(trial.TrialSession):
@@ -268,7 +334,7 @@ def interactive_game_prefix(directory, renderer, config, *, input_stream=None, o
         for number, profile_id in enumerate(ids, 1):
             print(f"{number}. {selection._text(profiles[profile_id]['title'])} / {profile_id} / "
                   f"{selection._text(profiles[profile_id]['edition'])}", file=output)
-        print("この登録に対応する作品プロファイルの番号（例: 1。dc5ph のような名前でも可、qで取消）: ", end="", file=output, flush=True)
+        print("この登録に対応する作品プロファイルの番号（例: 1。一覧の名前でも可、qで取消）: ", end="", file=output, flush=True)
         answer = stream.readline(32).strip()
         if answer == "q":
             return 0, None
@@ -294,6 +360,8 @@ def interactive_game_prefix(directory, renderer, config, *, input_stream=None, o
               file=output)
         for dep in preview["dependencies"]:
             print("  依存: " + selection._text(dep["dependency_id"] + " / " + dep["status"]), file=output)
+        if not plan.exe_path_ascii:
+            print(NON_ASCII_NOTE, file=output)
         print(f"出荷時prefix見積 {plan.trial.baseline_bytes / 1024**2:.1f} MiB + 余裕1 GiB。実増分の上限は未測定です。", file=output)
         print("実行: 準備用Proton run cmd.exe /d /c exit 0（ゲーム・installerは起動しません。依存導入・割り当ても行いません）", file=output)
         print("新規prefix、専用work/HOME、私有記録/lock、設定の協調lock、結果JSONを書きます。既存prefix・ゲームフォルダーは変更しません。", file=output)
@@ -353,16 +421,19 @@ class GameBindingPlan:
     binding: object = field(repr=False)
     blockers: tuple
     recipes: dict = field(repr=False)
+    profile_revision_change: object = None
+    exe_path_ascii: bool = True
 
     def summary(self):
         return {"scope": "registered-game-target-only-binding", "input_digest": self.digest, "app_id": self.base.record["app_id"],
                 "origin": self.base.record["trial_id"], "profile_id": self.profile["profile_id"],
+                "profile_revision_change": self.profile_revision_change, "exe_path_ascii": self.exe_path_ascii,
                 "dependencies": list(self.dependencies), "binding": self.binding.summary(),
                 "tool_directory": self.base.customization.directory, "blockers": list(self.blockers),
                 "game_launched": False, "authentication_performed": False, "preparation_complete": False, "writes": []}
 
 
-def _dependency_states(profile, recipes, compatdata, recipe, stop_check):
+def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe):
     """Live, offline dependency states. A view that is not clear makes every check uninspected."""
     from preparation_dependency_state import inspect_dependency_state
     clear = stop_check.check()["clear_in_view"]
@@ -373,6 +444,8 @@ def _dependency_states(profile, recipes, compatdata, recipe, stop_check):
             states.append({"dependency_id": dependency, "state": "blocked", "reason": item["reason"]})
         elif not clear:
             states.append({"dependency_id": dependency, "state": "uninspected", "reason": "target-process-view-not-clear"})
+        elif item["handler"] == "game-folder-file":
+            states.append({"dependency_id": dependency, **inspect_game_folder_file(exe, item["file"])})
         else:
             states.append({"dependency_id": dependency, "state": inspect_dependency_state(compatdata, recipe)["state"]})
     if clear and not stop_check.check()["clear_in_view"]:
@@ -393,16 +466,37 @@ def plan_game_binding(*, record, record_sha256, config, directory, renderer, sou
                         runtime_root=runtime_root, records=RECORDS)
     profiles, recipes = validate_game_config(config.get("game_preparation"))
     profile = profiles.get(record["profile"]["profile_id"])
-    require(profile is not None and digest_json(profile) == record["profile"]["profile_digest"],
-            "game profile changed since initialization")
+    require(profile is not None, "game profile changed since initialization")
+    revision_change = profile_revision_change(profile, record["profile"])
     require(isinstance(stop_check, ProcessStopCheck) and stop_check.compatdata == base.compatdata, "matching process observation required")
-    dependencies = _dependency_states(profile, recipes, base.compatdata, recipe, stop_check)
+    exe = base.target.exe
+    dependencies = _dependency_states(profile, recipes, base.compatdata, recipe, stop_check, exe)
     blockers = sorted({("dependency-blocked:" if item["state"] == "blocked" else "dependency-not-verified:") + item["dependency_id"]
                        for item in dependencies if item["state"] != "present-verified"})
     binding = plan_binding(steam, settings, record["app_id"], base.customization.directory)
     signature = {"version": VERSION, "base": base.digest, "profile": record["profile"]["profile_digest"],
-                 "dependencies": list(dependencies), "binding": binding.digest, "blockers": blockers}
-    return GameBindingPlan(digest_json(signature), base, profile, dependencies, binding, tuple(blockers), recipes)
+                 "current_profile": digest_json(profile), "dependencies": list(dependencies), "binding": binding.digest,
+                 "blockers": blockers}
+    return GameBindingPlan(digest_json(signature), base, profile, dependencies, binding, tuple(blockers), recipes,
+                           revision_change, exe_path_ascii(exe))
+
+
+def profile_revision_change(profile, recorded):
+    """The profile bound at initialization, or a later revision of it that only refines dependencies.
+
+    A later revision is accepted only for the same profile ID with a strictly higher
+    revision that pins the EXE hash measured at initialization (still checked live by the
+    recheck). Its dependencies are evaluated live at binding, so they need no pinning here.
+    Title and edition are not part of the record and cannot be compared.
+    """
+    current = digest_json(profile)
+    if current == recorded["profile_digest"]:
+        return None
+    require(profile["profile_id"] == recorded["profile_id"] and profile["revision"] > recorded["revision"] and
+            profile["exe_sha256"] is not None and profile["exe_sha256"] == recorded["exe_sha256"],
+            "game profile changed since initialization")
+    return {"initialized_revision": recorded["revision"], "initialized_digest": recorded["profile_digest"],
+            "current_revision": profile["revision"], "current_digest": current}
 
 
 def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=None):
@@ -422,7 +516,7 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
     require(refresh().digest == plan.digest, "game binding plan changed")
     base = plan.base
     tool = safe_path(base.target.steam / "compatibilitytools.d" / base.customization.directory, base.target.steam)
-    # Only the SoftDenchi recipe can be ready (validate_game_config); MFC stays blocked.
+    # Only SoftDenchi and read-only game-folder checks can be ready (validate_game_config); mfc-local stays blocked.
     require(plan.dependencies and all(item["state"] == "present-verified" for item in plan.dependencies),
             "dependencies not verified")
 
@@ -433,7 +527,7 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
         require_initialized_directories(base.compatdata, base.record)
         require(_prefix(base.compatdata) == base.prefix_version, "game prefix version changed")
         # Same check as planning: an unclear view before or after inspection is never verified.
-        states = _dependency_states(plan.profile, plan.recipes, base.compatdata, recipe, stop_check)
+        states = _dependency_states(plan.profile, plan.recipes, base.compatdata, recipe, stop_check, base.target.exe)
         require(all(item["state"] == "present-verified" for item in states), "dependency postconditions changed")
         return {"target": True, "dependencies": True, "payload": True, "stopped": True}
     return apply_binding(plan.binding, base.target.steam, base.settings, store, ready)
@@ -484,8 +578,16 @@ def interactive_game_binding(directory, renderer, config, *, input_stream=None, 
         print("prefix・tool・依存をWineを起動せず照合し、割り当て計画を作っています。", file=output, flush=True)
         plan = refresh()
         summary = plan.summary()
+        change = summary["profile_revision_change"]
+        if change is not None:
+            print(f"作品プロファイル: 初期化時の改訂{change['initialized_revision']}から改訂{change['current_revision']}へ"
+                  "（同じEXEハッシュ。依存はこの場で検査します）", file=output)
         for item in summary["dependencies"]:
-            print("  依存: " + selection._text(item["dependency_id"] + " / " + item["state"]), file=output)
+            print("  依存: " + selection._text(item["dependency_id"] + " / " + item["state"] +
+                                              (" / " + item["reason"] if item.get("reason") and item["state"] != "blocked" else "")),
+                  file=output)
+        if not summary["exe_path_ascii"]:
+            print(NON_ASCII_NOTE, file=output)
         print("割り当て先: " + selection._text(summary["tool_directory"]), file=output)
         print("変更予定: " + selection._text(", ".join(summary["binding"]["planned_files"]) or "なし") +
               f"（他ゲームの保留選択 {summary['binding']['other_pending_count']}件は変更しません）", file=output)
