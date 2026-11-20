@@ -6,11 +6,13 @@ and external link targets remain separate from this inventory.
 
 import gzip
 import hashlib
+import importlib.util
 import os
 import posixpath
 import re
 import stat
 import struct
+import sys
 import tarfile
 import zlib
 from dataclasses import dataclass, field
@@ -312,7 +314,10 @@ def _verify_tree(root, inventory, overlays=None, runtime_entry=None, redist=None
                 require(len(seen) < MAX_MEMBERS, "too many installed payload objects")
                 name = _relative(relative + child.name)
                 if redist is not None and child.name == PYCACHE and name not in expected and name not in seen:
-                    redist.setdefault("python_caches", {})[name] = _python_cache(directory_fd, relative, expected)
+                    cache = _python_cache(directory_fd, relative, expected)
+                    total += cache.pop("bytes")
+                    require(total <= MAX_EXPANDED, "installed payload too large")
+                    redist.setdefault("python_caches", {})[name] = cache
                     seen[name] = None
                     continue
                 if redist is not None and name in REDIST_MARKERS and name not in expected and name not in seen:
@@ -399,7 +404,8 @@ def _verify_tree(root, inventory, overlays=None, runtime_entry=None, redist=None
 PYCACHE = "__pycache__"
 MAX_PYCACHE_FILES = 256
 PYC_LIMIT = 16 * 1024 * 1024
-_PYC_NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_]{0,127})\.cpython-3[0-9]{1,2}\.pyc")
+# Module file stems may start with a digit or contain '-' (for example per-game fix modules).
+_PYC_NAME = re.compile(r"([A-Za-z0-9_-]{1,128})\.(cpython-3[0-9]{1,2})\.pyc")
 
 
 def _python_cache(parent_fd, relative, expected):
@@ -428,19 +434,23 @@ def _python_cache(parent_fd, relative, expected):
                 source = match and expected.get(relative + match.group(1) + ".py")
                 if len(files) >= MAX_PYCACHE_FILES or not source or source.get("kind") not in ("file", "hardlink"):
                     raise TreeMismatch("python-cache", location)
-                files[entry.name] = _pyc(fd, entry.name, parent_fd, match.group(1) + ".py", location)
+                files[entry.name] = _pyc(fd, entry.name, parent_fd, match.group(1) + ".py", match.group(2), location)
         unchanged(info, os.fstat(fd))
     finally:
         os.close(fd)
-    return {"files": len(files), "digest": digest_json(files)}
+    return {"files": len(files), "digest": digest_json(files), "bytes": sum(item["size"] for item in files.values())}
 
 
-def _pyc(cache_fd, name, parent_fd, source_name, location):
+def _pyc(cache_fd, name, parent_fd, source_name, tag, location):
+    path = location + "/" + name
     info = os.stat(name, dir_fd=cache_fd, follow_symlinks=False)
     if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 16 <= info.st_size <= PYC_LIMIT and
             not stat.S_IMODE(info.st_mode) & 0o7133):
-        raise TreeMismatch("python-cache", location + "/" + name, ("kind", "mode", "size"), actual_mode=stat.S_IMODE(info.st_mode))
-    source = os.stat(source_name, dir_fd=parent_fd, follow_symlinks=False)
+        raise TreeMismatch("python-cache", path, ("kind", "mode", "size"), actual_mode=stat.S_IMODE(info.st_mode))
+    try:
+        source = os.stat(source_name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        raise TreeMismatch("python-cache", path, ("source-missing",)) from None
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=cache_fd)
     with os.fdopen(fd, "rb") as stream:
         unchanged(info, os.fstat(stream.fileno()))
@@ -448,9 +458,14 @@ def _pyc(cache_fd, name, parent_fd, source_name, location):
         stream.seek(0)
         digest = _hash(stream, info.st_size)
         unchanged(info, os.fstat(stream.fileno()))
+    # A CPython magic ends with \r\n; for this interpreter's own tag it must be its magic number.
+    if header[2:4] != b"\r\n" or (tag == sys.implementation.cache_tag and header[:4] != importlib.util.MAGIC_NUMBER):
+        raise TreeMismatch("python-cache", path, ("pyc-magic",))
     flags, mtime, size = struct.unpack("<III", header[4:16])
-    if flags != 0 or mtime != int(source.st_mtime) & 0xFFFFFFFF or size != source.st_size & 0xFFFFFFFF:
-        raise TreeMismatch("python-cache", location + "/" + name, ("source-mtime-or-size",))
+    if flags != 0:
+        raise TreeMismatch("python-cache", path, ("pyc-flags",))
+    if mtime != int(source.st_mtime) & 0xFFFFFFFF or size != source.st_size & 0xFFFFFFFF:
+        raise TreeMismatch("python-cache", path, ("source-mtime-or-size",))
     return {"size": info.st_size, "sha256": digest, "magic": header[:4].hex()}
 
 

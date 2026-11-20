@@ -961,3 +961,21 @@ The plan refuses if that path exists, and each spawn checks again that it is sti
 Game launches by DroidDeck are not affected and keep the weakening described in 0.27.4.
 Standard-library caches are not used by these launches either, which may make them
 slower.
+
+## Cache rule refinements (0.27.6)
+
+- Cache names: the module stem may start with a digit or contain `-` (per-game fix
+  modules use such names); it must still be a `.py` of the archive in the same
+  directory.
+- Header: the magic must end with `\r\n`; a cache tagged for the verifying interpreter
+  (`sys.implementation.cache_tag`) must carry its magic number. Caches of other CPython
+  versions are accepted by header and hash only, since CPython does not read them.
+- Cache bytes count toward the installed-size bound.
+- Diagnostics name the failing field (`pyc-magic`, `pyc-flags`, `source-mtime-or-size`,
+  `source-missing`) with the cache's location.
+
+Recovery: a stop with `python-cache` (for example a stale cache after the sources were
+copied without their mtimes, a leftover temporary file after an interrupted write, an
+`-O` cache, or group-writable files) is cleared by removing the reported `__pycache__`
+directory of the slot; launching a game from the slot once recreates valid caches. Tool
+launches never write them (`PYTHONDONTWRITEBYTECODE`, 0.27.5).

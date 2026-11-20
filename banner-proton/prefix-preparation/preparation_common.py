@@ -7,7 +7,7 @@ import re
 import stat
 from pathlib import Path
 
-VERSION = "0.27.5"
+VERSION = "0.27.6"
 MAX_JSON = 1024 * 1024
 MAX_REPORT = 1024 * 1024
 MAX_DEPTH = 16

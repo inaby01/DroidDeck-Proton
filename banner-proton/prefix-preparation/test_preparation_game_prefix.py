@@ -378,8 +378,9 @@ class GamePrefixTests(DEP['InstallTests']):
         info = source.stat()
         cache = tool / '__pycache__'
         cache.mkdir(mode=0o755, exist_ok=True)
-        pyc = cache / 'user_settings.cpython-314.pyc'
-        pyc.write_bytes(b'\x2b\x0e\r\n' + struct.pack('<III', 0, int(info.st_mtime), info.st_size) + body)
+        import importlib.util
+        pyc = cache / ('user_settings.' + sys.implementation.cache_tag + '.pyc')
+        pyc.write_bytes(importlib.util.MAGIC_NUMBER + struct.pack('<III', 0, int(info.st_mtime), info.st_size) + body)
         pyc.chmod(0o644)
         return tool, pyc
 

@@ -285,7 +285,8 @@ class PayloadTests(unittest.TestCase):
         self.installed.chmod(0o755)
         (self.installed / 'files/share/fex-emu').mkdir(parents=True)
         (self.installed / 'pkg').mkdir()
-        sources = {'tool.py': b'VALUE = 1\n', 'pkg/mod.py': b'def f():\n    return 2\n'}
+        sources = {'tool.py': b'VALUE = 1\n', 'pkg/mod.py': b'def f():\n    return 2\n', 'pkg/1234.py': b'X = 1\n',
+                   'pkg/umu-x.py': b'Y = 1\n'}
         for name, data in sources.items():
             (self.installed / name).write_bytes(data)
             (self.installed / name).chmod(0o644)
@@ -295,15 +296,16 @@ class PayloadTests(unittest.TestCase):
         (self.installed / payload.FEX_RUNTIME_DIRECTORY).mkdir(mode=0o700)
         return self.inspect()
 
-    def write_pyc(self, source, name=None, flags=0, mtime=None, size=None, mode=0o644):
+    def write_pyc(self, source, name=None, flags=0, mtime=None, size=None, mode=0o644, magic=None):
+        import importlib.util
         import struct
         source = self.installed / source
         info = source.stat()
         cache = source.parent / '__pycache__'
         cache.mkdir(mode=0o755, exist_ok=True)
-        path = cache / (name or source.stem + '.cpython-314.pyc')
-        header = b'\x2b\x0e\r\n' + struct.pack('<III', flags, int(info.st_mtime) if mtime is None else mtime,
-                                                    info.st_size if size is None else size)
+        path = cache / (name or source.stem + '.' + sys.implementation.cache_tag + '.pyc')
+        header = (importlib.util.MAGIC_NUMBER if magic is None else magic) + struct.pack(
+            '<III', flags, int(info.st_mtime) if mtime is None else mtime, info.st_size if size is None else size)
         path.write_bytes(header + b'synthetic bytecode, never executed')
         path.chmod(mode)
         return path
@@ -313,11 +315,15 @@ class PayloadTests(unittest.TestCase):
         self.assertIsNone(payload.verify_fex_runtime_tree(self.installed, inventory)['python_caches'])
         self.write_pyc('tool.py')
         self.write_pyc('pkg/mod.py')
+        # Module stems that start with a digit or contain '-', and a cache of another CPython version.
+        self.write_pyc('pkg/1234.py')
+        self.write_pyc('pkg/umu-x.py')
+        self.write_pyc('pkg/mod.py', name='mod.cpython-39.pyc', magic=b'\x61\x0d\r\n')
         result = payload.verify_fex_runtime_tree(self.installed, inventory)
         caches = result['python_caches']
         self.assertEqual(caches['contract'], payload.PYTHON_CACHE_CONTRACT)
         self.assertEqual({name: item['files'] for name, item in caches['directories'].items()},
-                         {'__pycache__': 1, 'pkg/__pycache__': 1})
+                         {'__pycache__': 1, 'pkg/__pycache__': 4})
         self.assertEqual(payload.runtime_writes(result), {'python_caches': caches})
         with self.assertRaises(Invalid):
             payload.verify_tree(self.installed, inventory)
@@ -326,6 +332,8 @@ class PayloadTests(unittest.TestCase):
         cases = {
             'no reviewed source': {'source': 'tool.py', 'name': 'other.cpython-314.pyc'},
             'optimized name': {'source': 'tool.py', 'name': 'tool.cpython-314.opt-1.pyc'},
+            'not a CPython magic': {'source': 'tool.py', 'magic': b'\x00\x00\x00\x00'},
+            'other magic for this tag': {'source': 'tool.py', 'magic': b'\x01\x00\r\n'},
             'hash-based pyc': {'source': 'tool.py', 'flags': 1},
             'other source mtime': {'source': 'tool.py', 'mtime': 1},
             'other source size': {'source': 'tool.py', 'size': 1},
@@ -338,6 +346,10 @@ class PayloadTests(unittest.TestCase):
                 with self.assertRaises(payload.TreeMismatch) as caught:
                     payload.verify_fex_runtime_tree(self.installed, inventory)
                 self.assertEqual(caught.exception.tree_diagnostic['check'], 'python-cache')
+                expected_field = {'hash-based pyc': 'pyc-flags', 'not a CPython magic': 'pyc-magic',
+                                  'other magic for this tag': 'pyc-magic', 'other source mtime': 'source-mtime-or-size'}
+                if label in expected_field:
+                    self.assertEqual(caught.exception.tree_diagnostic['differing_fields'], [expected_field[label]])
                 self.tearDown()
                 self.setUp()
         inventory = self.pycache_fixture()
