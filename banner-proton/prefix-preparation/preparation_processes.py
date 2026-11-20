@@ -208,6 +208,7 @@ def xalia_images(tool):
 
 
 MAX_ARGV0 = 4096
+MAX_UNREADABLE_PIDS = 16
 
 
 def windows_image(value):
@@ -222,10 +223,11 @@ def inventory_processes(compatdata, proc_root=Path("/proc")):
     """Same-owner processes of one prefix: identity, parent and argv[0] image only.
 
     No environment values, arguments, command lines or other prefixes are kept.
-    Anything that cannot be read consistently is counted as unreadable.
+    Anything that cannot be read consistently is counted as unreadable; the first
+    ``MAX_UNREADABLE_PIDS`` of their PIDs are kept for diagnosis.
     """
     compatdata, proc_root = safe_path(compatdata), safe_path(proc_root)
-    processes, unreadable = [], 0
+    processes, unreadable, unreadable_pids = [], 0, []
     root_fd = os.open(proc_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         own_fd = os.open(str(os.getpid()), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
@@ -258,6 +260,7 @@ def inventory_processes(compatdata, proc_root=Path("/proc")):
                     after = _parent_identity(_read(descriptor, "stat", 8192), entry.name)
                     if after[2] != before[2] or after[0] in ("Z", "X") or not argv0 or len(argv0) > MAX_ARGV0:
                         unreadable += 1
+                        unreadable_pids.append(int(entry.name))
                         continue
                     image = windows_image(os.fsdecode(argv0))
                     processes.append({"pid": int(entry.name), "started": after[2], "parent": after[1], "image": image,
@@ -266,13 +269,15 @@ def inventory_processes(compatdata, proc_root=Path("/proc")):
                     continue
                 except (OSError, ValueError, UnicodeError):
                     unreadable += 1
+                    unreadable_pids.append(int(entry.name))
                 finally:
                     if descriptor is not None:
                         os.close(descriptor)
     finally:
         os.close(root_fd)
     return {"scope": "same-proc-directory-owner-as-self", "processes": sorted(processes, key=lambda p: (p["pid"], p["started"])),
-            "unreadable_count": unreadable, "device_namespace_verified": False}
+            "unreadable_count": unreadable, "unreadable_pids": sorted(unreadable_pids)[:MAX_UNREADABLE_PIDS],
+            "device_namespace_verified": False}
 
 
 def _parent_identity(raw, pid):

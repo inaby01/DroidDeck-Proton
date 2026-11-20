@@ -12,6 +12,7 @@ import hashlib
 import ntpath
 import os
 import secrets
+import select
 import signal
 import stat
 import subprocess
@@ -76,6 +77,11 @@ SERVICE_IMAGE = r"c:\program files (x86)\softdenchi\ucmansvc.exe"
 PROXY_IMAGE = r"c:\program files (x86)\softdenchi\sdproxy.exe"
 SERVICES_IMAGE = r"c:\windows\system32\services.exe"
 PROXY_STOP_WAIT = 30
+# After each SIGTERM: wait this long for the signaled SdProxy to exit, then up to this long
+# for the prefix view to be fully readable and explained again before the next send.
+SIGNAL_EXIT_WAIT = 5
+SIGNAL_SETTLE_WAIT = 5
+SIGNAL_SETTLE_INTERVAL = 0.25
 INSTALLER_OBSERVATION_INTERVAL = 0.5
 # The installer window needs the operator's attention; ask "wait again?" only after this long,
 # so the SdProxy attribution keeps observing while the operator works in that window.
@@ -124,7 +130,8 @@ def summarize_lingering(inventory, scope=NO_SCOPE):
     for item in processes:
         roles[item["role"]] = roles.get(item["role"], 0) + 1
     return {"processes": processes, "roles": roles, "unreadable_count": inventory["unreadable_count"],
-            "scope": inventory["scope"], "device_namespace_verified": False}
+            "unreadable_pids": list(inventory.get("unreadable_pids", [])), "scope": inventory["scope"],
+            "device_namespace_verified": False}
 
 
 def proxy_stop_origins(first, second, scope=NO_SCOPE):
@@ -205,21 +212,52 @@ def _view_is_explained(inventory, scope=NO_SCOPE):
                     ntpath.basename(parent["image"]) == "explorer.exe", "unclassified process in prefix view")
 
 
-def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=NO_SCOPE):
+def _await_exit(descriptor, timeout):
+    """Wait until the pinned process has exited (its pidfd turns readable) or the timeout passes."""
+    try:
+        poller = select.poll()
+        poller.register(descriptor, select.POLLIN)
+        poller.poll(int(timeout * 1000))
+    except (OSError, ValueError):
+        pass  # The settle loop below still decides from fresh views.
+
+
+def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=NO_SCOPE, detail=None):
     """Pin the confirmed batch with pidfds, revalidate everything, then send SIGTERM one by one.
 
     After pinning, two fresh inventories must yield exactly the confirmed batch under
-    the full stop conditions. Before each later send the view is read again: anything
-    unreadable, unclassified, with a conflicting prefix, or a SdProxy outside the batch
-    aborts. A pinned target that has already exited is recorded as gone. ``log`` is
-    filled per target as it happens, so a partial result survives an exception.
-    ``sender`` replaces the kernel call in tests; production always uses pidfds.
+    the full stop conditions. After each send the signaled SdProxy is given time to
+    exit, and before the next send a fresh view must be fully readable and explained:
+    nothing unreadable, unclassified, with a conflicting prefix, or a SdProxy outside
+    the batch. A view that is not yet so is read again for a bounded time (a process
+    that is exiting is briefly unreadable); if none qualifies, the stop aborts and the
+    unreadable PIDs of the last view go to ``detail``. A pinned target that has already
+    exited is recorded as gone. ``log`` is filled per target as it happens, so a partial
+    result survives an exception. ``sender`` replaces the kernel call in tests;
+    production always uses pidfds.
     """
     log = [] if log is None else log
+    detail = {} if detail is None else detail
     open_pidfd, send = getattr(os, "pidfd_open", None), getattr(signal, "pidfd_send_signal", None)
     require(sender is not None or (callable(open_pidfd) and callable(send)), "pidfd API unavailable")
     batch = sorted(targets, key=lambda key: key[1])
     descriptors = {}
+
+    def revalidate(current, key):
+        _view_is_explained(current, scope)
+        by_key = {(p["pid"], p["started"]): p for p in current["processes"]}
+        proxies = {k for k, p in by_key.items() if classify_process(p, scope) == "softdenchi-proxy"}
+        require(proxies <= set(batch), "new SdProxy appeared")
+        if key not in by_key:
+            return None
+        # Only the parent may change (re-parenting after the parent exited); the
+        # image, prefix consistency and executable identity must be as confirmed.
+        now, then = by_key[key], confirmed[key]
+        require(now["image"] == then["image"] == PROXY_IMAGE and now["prefix_consistent"] and
+                now["executable_id"] is not None and now["executable_id"] == then["executable_id"],
+                "target changed before signal")
+        return now
+
     try:
         if sender is None:
             for key in batch:
@@ -227,22 +265,26 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
         first, second = inventory_processes(compatdata, proc_root), inventory_processes(compatdata, proc_root)
         require(proxy_stop_targets(first, second, scope) == batch, "stop candidates changed")
         confirmed = {(p["pid"], p["started"]): p for p in second["processes"] if (p["pid"], p["started"]) in batch}
-        for index, key in enumerate(batch):
-            if index:
-                current = inventory_processes(compatdata, proc_root)
-                _view_is_explained(current, scope)
-                by_key = {(p["pid"], p["started"]): p for p in current["processes"]}
-                proxies = {k for k, p in by_key.items() if classify_process(p, scope) == "softdenchi-proxy"}
-                require(proxies <= set(batch), "new SdProxy appeared")
-                if key not in by_key:
+        last_sent = None
+        for key in batch:
+            if last_sent is not None:
+                if sender is None:
+                    _await_exit(descriptors[last_sent], SIGNAL_EXIT_WAIT)
+                deadline = time.monotonic() + SIGNAL_SETTLE_WAIT
+                while True:
+                    current = inventory_processes(compatdata, proc_root)
+                    try:
+                        present = revalidate(current, key)
+                        break
+                    except Invalid:
+                        if time.monotonic() >= deadline:
+                            if current["unreadable_pids"]:
+                                detail["unreadable_pids"] = list(current["unreadable_pids"])
+                            raise
+                        time.sleep(SIGNAL_SETTLE_INTERVAL)
+                if present is None:
                     log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal"})
                     continue
-                # Only the parent may change (re-parenting after the parent exited); the
-                # image, prefix consistency and executable identity must be as confirmed.
-                now, then = by_key[key], confirmed[key]
-                require(now["image"] == then["image"] == PROXY_IMAGE and now["prefix_consistent"] and
-                        now["executable_id"] is not None and now["executable_id"] == then["executable_id"],
-                        "target changed before signal")
             try:
                 if sender is None:
                     send(descriptors[key], signal.SIGTERM, None, 0)
@@ -252,6 +294,7 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
                 log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal"})
                 continue
             log.append({"pid": key[0], "started": key[1], "result": "sigterm-sent"})
+            last_sent = key
     finally:
         for descriptor in descriptors.values():
             os.close(descriptor)
@@ -653,7 +696,8 @@ class DependencyInstallSession:
                              "signal": "SIGTERM", "forced_kill": False}
             self._save()
             try:
-                entry["stop"]["sent"] = signal_proxies(compatdata, targets, proc_root, sender, entry["stop"]["signals"], scope)
+                entry["stop"]["sent"] = signal_proxies(compatdata, targets, proc_root, sender, entry["stop"]["signals"], scope,
+                                                     entry["stop"])
             except (OSError, ValueError) as error:
                 entry["stop"].update(result="aborted", **describe_error(error, "lingering-proxy-signal"))
                 return self._save()
@@ -1091,6 +1135,8 @@ def _print_lingering(summary, output, text):
         print("  " + text(item["role"] + " / " + item["name"] + " [" + item["place"] + "] pid " + str(item["pid"])), file=output)
 
 
+RESTART_THEN_MENU9 = "DroidDeckを完全に終了して起動し直してから、メニュー9でこのprefixの導入状態を確認してください。"
+
 ORIGIN_TEXT = {"ucmansvc": "UCManSvcから起動されたもの", "installer-run": "今回のインストーラーの実行中にその子孫と確認したもの"}
 
 
@@ -1116,7 +1162,17 @@ def _offer_session_proxy_stop(session, stream, output, text):
         session._save()
         return
     result = session.stop_lingering_proxies()
+    stop = (result.get("lingering") or {}).get("stop") or {}
+    sent = sum(item["result"] == "sigterm-sent" for item in stop.get("signals", []))
+    if stop.get("result") == "refused":
+        print("SdProxy限定の停止条件を満たしません: " + text(stop["reason"]) + "。何もしません。", file=output)
+    elif stop.get("result") == "aborted":
+        print(f"停止を中止しました（{text(stop.get('reason') or stop.get('error_class') or '')}）。送信済み {sent}件。", file=output)
+    elif stop.get("result") == "sigterm-sent-processes-remain":
+        print(f"SIGTERMを{sent}件送りましたが、待機時間内にこのprefixのプロセスが終了しませんでした。", file=output)
     print("停止後の状態: " + text(result["status"]), file=output)
+    if result["status"] != "present-verified":
+        print("導入後の検査は済んでいません。" + RESTART_THEN_MENU9, file=output)
 
 
 def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sender=None):
@@ -1139,11 +1195,13 @@ def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sende
     entry["stop"] = {"result": "sending", "planned": len(targets), "signals": [], "signal": "SIGTERM", "forced_kill": False}
     try:
         RecheckSession(base, store, None, None, stop)._guard()
-        entry["stop"]["sent"] = signal_proxies(base.compatdata, targets, stop.proc_root, sender, entry["stop"]["signals"], scope)
+        entry["stop"]["sent"] = signal_proxies(base.compatdata, targets, stop.proc_root, sender, entry["stop"]["signals"],
+                                               scope, entry["stop"])
     except (OSError, ValueError) as error:
         entry["stop"].update(result="aborted", **describe_error(error, "lingering-proxy-signal"))
         sent = sum(item["result"] == "sigterm-sent" for item in entry["stop"]["signals"])
         print(f"停止を中止しました（{text(entry['stop']['reason'] or entry['stop']['error_class'])}）。送信済み {sent}件。", file=output)
+        print(RESTART_THEN_MENU9, file=output)
         return entry
     entry["stop"]["result"] = "sigterm-sent"
     try:

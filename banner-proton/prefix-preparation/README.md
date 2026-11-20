@@ -735,7 +735,8 @@ descendant of the installer process while it ran; see 0.26.3), from two identica
 unclassified or prefix-conflicting processes (both prefix variables, when present,
 must name this prefix). The batch is pinned with pidfds and the full conditions are
 evaluated again after pinning; before each further signal the view is read again
-and anything new or unexplained aborts; each later target must keep its confirmed image,
+(after a bounded wait for the previous target to exit and for the view to settle; see
+0.26.4) and anything new or unexplained aborts; each later target must keep its confirmed image,
 prefix consistency and executable identity (only its parent may change). A target that
 already exited is recorded as gone, and every per-target result is kept even when the
 stop or a later step fails (0.24.1, 0.24.2). There is no SIGKILL,
@@ -817,3 +818,18 @@ nothing unreadable, unclassified or prefix-conflicting, pidfd pinning and revali
 SIGTERM only) are unchanged. Menu 9 keeps the UCManSvc-only rule because it has no
 installer run to attribute the origin. The menu 10 profile prompt also accepts the
 profile name.
+
+## Sending to the second SdProxy after the first exits (0.26.4)
+
+On the device (0.26.3) the stop conditions held and SIGTERM reached the first SdProxy,
+but the view read before the second send contained an unreadable process, so the stop
+aborted; minutes later, without a restart, no process of the prefix remained. A process
+that is exiting is briefly unreadable (empty argv or a state change between reads). Now,
+after each SIGTERM, the tool waits up to 5 s for the signaled SdProxy to exit (its pidfd
+turns readable), then reads the view again every 0.25 s for up to 5 s until it is fully
+readable and explained; only such a view allows the next send, and a target that has
+exited meanwhile is recorded as gone. If no view qualifies, the stop aborts as before and
+the record keeps the unreadable PIDs of the last view (`stop.unreadable_pids`, at most
+16; process summaries also carry `unreadable_pids`). Menu 8 now prints why a stop was
+refused or aborted, how many SIGTERMs were sent, and, unless the post-inspection passed,
+to restart DroidDeck and check the prefix with menu 9.

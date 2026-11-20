@@ -647,6 +647,78 @@ class InstallTests(TRIAL['TrialTests']):
         dep.validate_install_record(result)
         self.clear_fake()
 
+    def _dying_first_proxy(self, targets, sent, vanish_after=None):
+        """Sender for the device 0.26.3 case: the signaled SdProxy is briefly unreadable while it exits."""
+        reads = {'after': None}
+        real_inventory = dep.inventory_processes
+
+        def sender(key):
+            sent.append(key)
+            if key == targets[0]:
+                (self.f.proc / str(key[0]) / 'cmdline').write_bytes(b'')
+                reads['after'] = 0
+            else:
+                self.clear_fake()
+
+        def inventory(*args, **kwargs):
+            if reads['after'] is not None:
+                reads['after'] += 1
+                if vanish_after is not None and reads['after'] > vanish_after and (self.f.proc / str(targets[0][0])).exists():
+                    self.remove_fake(targets[0][0])
+            return real_inventory(*args, **kwargs)
+        return sender, inventory
+
+    def test_signaled_proxy_briefly_unreadable_while_exiting_does_not_abort_the_next_send(self):
+        sent = []
+        self.clear_fake()
+        real_signal = dep.signal_proxies
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep, 'process_start_time', return_value=3), patch.object(dep, 'PROXY_STOP_WAIT', 2), \
+                patch.object(dep, 'SIGNAL_SETTLE_INTERVAL', 0):
+            session, targets = self.installer_with_attributed_proxies(store)
+            sender, inventory = self._dying_first_proxy(targets, sent, vanish_after=2)
+            output = io.StringIO()
+            with patch.object(dep, 'inventory_processes', side_effect=inventory), \
+                    patch.object(dep, 'signal_proxies', lambda *args: real_signal(*args[:3], sender, *args[4:])):
+                dep._offer_session_proxy_stop(session, io.StringIO('1\n'), output, str)
+            result = dict(session.record)
+        self.assertEqual(sent, targets)
+        self.assertEqual([item['result'] for item in result['lingering']['stop']['signals']], ['sigterm-sent'] * 2)
+        self.assertEqual(result['lingering']['stop']['result'], 'sigterm-sent')
+        self.assertNotIn('unreadable_pids', result['lingering']['stop'])
+        self.assertEqual(result['status'], 'present-verified')
+        self.assertIn('停止後の状態: present-verified', output.getvalue())
+        self.assertNotIn('導入後の検査は済んでいません', output.getvalue())
+        dep.validate_install_record(result)
+        self.clear_fake()
+
+    def test_view_still_unreadable_after_the_settle_wait_aborts_and_names_the_pid(self):
+        sent = []
+        self.clear_fake()
+        real_signal = dep.signal_proxies
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep, 'process_start_time', return_value=3), \
+                patch.object(dep, 'SIGNAL_SETTLE_WAIT', 0.2), patch.object(dep, 'SIGNAL_SETTLE_INTERVAL', 0.01):
+            session, targets = self.installer_with_attributed_proxies(store)
+            sender, inventory = self._dying_first_proxy(targets, sent)
+            output = io.StringIO()
+            with patch.object(dep, 'inventory_processes', side_effect=inventory), \
+                    patch.object(dep, 'signal_proxies', lambda *args: real_signal(*args[:3], sender, *args[4:])):
+                dep._offer_session_proxy_stop(session, io.StringIO('1\n'), output, str)
+            result = dict(session.record)
+        self.assertEqual(sent, [targets[0]])
+        stop = result['lingering']['stop']
+        self.assertEqual((stop['result'], stop['reason']), ('aborted', 'unreadable process in prefix view'))
+        self.assertEqual(stop['unreadable_pids'], [targets[0][0]])
+        self.assertEqual(result['lingering']['before_stop']['unreadable_pids'], [])
+        self.assertEqual(result['status'], 'needs-user')
+        self.assertIsNone(result['post_state'])
+        text = output.getvalue()
+        self.assertIn('停止を中止しました（unreadable process in prefix view）。送信済み 1件。', text)
+        self.assertIn('導入後の検査は済んでいません。DroidDeckを完全に終了して起動し直してから、メニュー9', text)
+        dep.validate_install_record(result)
+        self.clear_fake()
+
     def test_parentless_proxy_not_attributed_to_this_installer_is_refused(self):
         self.clear_fake()
         # Without the installer start time nothing is attributed.
