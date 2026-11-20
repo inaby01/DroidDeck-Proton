@@ -134,6 +134,91 @@ class PayloadTests(unittest.TestCase):
         with self.assertRaises(Invalid):
             payload.verify_fex_runtime_tree(self.installed, self.inspect())
 
+    REG = b'WINE REGISTRY Version 2\n;; All keys relative to \\\\Machine\n\n[Software\\\\Wine] 1\n"Version"="synthetic"\n'
+    TAIL = (b'\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\CommonRedist\\\\vcredist\\\\2019] 1795176401\n'
+            b'"x86 14.28.29334.0"=dword:00000001\n'
+            b'\n[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\x86] 1795176401\n'
+            b'"Installed"=dword:00000001\n"Version"="v14.51.36247.00"\n')
+
+    def redist_fixture(self):
+        """FEX contract tree plus a default prefix template, as DroidDeck sees the preparation slot."""
+        self.installed.chmod(0o755)
+        template = self.installed / payload.REDIST_TEMPLATE
+        template.mkdir(parents=True)
+        (template / 'system.reg').write_bytes(self.REG)
+        (template / 'system.reg').chmod(0o644)
+        (self.installed / 'files/share/fex-emu').mkdir()
+        self.make_archive(MEMBERS + [('files/share', 'directory', None, 0o755),
+                                    ('files/share/fex-emu', 'directory', None, 0o755),
+                                    ('files/share/default_pfx_arm64', 'directory', None, 0o755),
+                                    (payload.REDIST_REGISTRY, 'file', self.REG, 0o644)])
+        (self.installed / payload.FEX_RUNTIME_DIRECTORY).mkdir(mode=0o700)
+        return template, self.inspect()
+
+    def droiddeck_redist_step(self, template, tail=None):
+        with open(template / 'system.reg', 'ab') as handle:
+            handle.write(self.TAIL if tail is None else tail)
+        (template / '.droiddeck-redists').write_bytes(b'synthetic marker list\n')
+        (template / '.droiddeck-redists').chmod(0o644)
+        (template / '.droiddeck-redists-checked').write_bytes(b'')
+        (template / '.droiddeck-redists-checked').chmod(0o644)
+
+    def test_runtime_contract_accepts_only_droiddeck_redist_markers_and_strict_verifier_stays_strict(self):
+        template, inventory = self.redist_fixture()
+        self.assertIsNone(payload.verify_fex_runtime_tree(self.installed, inventory)['droiddeck_redist'])
+        self.droiddeck_redist_step(template)
+        before = self.snapshot()
+        result = payload.verify_fex_runtime_tree(self.installed, inventory)['droiddeck_redist']
+        self.assertEqual(result['contract'], payload.DROIDDECK_REDIST_CONTRACT)
+        self.assertEqual((result['registry_sections'], result['registry_appended_bytes']), (2, len(self.TAIL)))
+        self.assertEqual(sorted(result['markers']), ['.droiddeck-redists', '.droiddeck-redists-checked'])
+        self.assertEqual(before, self.snapshot())
+        with self.assertRaises(Invalid):
+            payload.verify_tree(self.installed, inventory)
+        # The checked marker may still be missing right after the step.
+        (template / '.droiddeck-redists-checked').unlink()
+        payload.verify_fex_runtime_tree(self.installed, inventory)
+
+    def test_runtime_contract_refuses_other_registry_changes_and_unsafe_markers(self):
+        cases = {
+            'other key': b'\n[Software\\\\Wine\\\\DllOverrides] 1\n"mfc42"="native"\n',
+            'other value type': b'\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\CommonRedist\\\\DirectX] 1\n"x"=hex:01\n',
+            'value before any section': b'\n"Version"="v1"\n',
+            'no trailing newline': self.TAIL[:-1],
+        }
+        for label, tail in cases.items():
+            with self.subTest(label=label):
+                template, inventory = self.redist_fixture()
+                self.droiddeck_redist_step(template, tail)
+                with self.assertRaises(Invalid):
+                    payload.verify_fex_runtime_tree(self.installed, inventory)
+                self.tearDown()
+                self.setUp()
+        template, inventory = self.redist_fixture()
+        # Archive bytes changed in place, with an allowed tail appended.
+        (template / 'system.reg').write_bytes(self.REG.replace(b'synthetic', b'Synthetic') + self.TAIL)
+        (template / '.droiddeck-redists').write_bytes(b'x')
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        # An allowed tail without DroidDeck's marker file.
+        (template / 'system.reg').write_bytes(self.REG + self.TAIL)
+        (template / '.droiddeck-redists').unlink()
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        # Unsafe markers: executable, symlink, another name.
+        (template / '.droiddeck-redists').write_bytes(b'x')
+        (template / '.droiddeck-redists').chmod(0o755)
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        (template / '.droiddeck-redists').unlink()
+        (template / '.droiddeck-redists').symlink_to(self.root)
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        (template / '.droiddeck-redists').unlink()
+        (template / '.droiddeck-other').write_bytes(b'x')
+        with self.assertRaises(Invalid):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+
     def test_difference_audit_aggregates_changes_extras_and_missing_without_adoption(self):
         self.installed.chmod(0o755)
         (self.installed / "proton").write_bytes(b"changed-content")

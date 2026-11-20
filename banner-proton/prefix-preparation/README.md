@@ -865,3 +865,25 @@ Menus 10 and 11 report whether the registered EXE path is ASCII and warn otherwi
 game in a folder named with non-ASCII characters has been observed to exit right after
 start while an ASCII-named copy with the same kind of prefix proceeded (the failing
 call was not observed).
+
+## DroidDeck's redistributable markers in the preparation slot (0.27.1)
+
+On the device, the first DroidDeck game session after the preparation slot was placed
+appended Steam CommonRedist "installed" flags (DirectX, .NET 4.5.2, VC++ 2017/2019/2022)
+and VC++ runtime version keys to the slot's `files/share/default_pfx_arm64/system.reg`
+(keeping its mtime) and added `.droiddeck-redists` and `.droiddeck-redists-checked`
+beside it. The regular SoftDenchi slot had received the identical block once, two days
+earlier, and has not changed since. Every step that verified the slot then stopped.
+
+The runtime-contract verifier (`verify_fex_runtime_tree`, used by the reuse plan of the
+preparation slot, trials, recheck, dependency steps and binding) now accepts exactly
+this, and nothing else: the archive bytes of that `system.reg` must remain a byte-for-byte
+prefix with the same mode, followed by at most 64 KiB of sections whose keys are
+`Software\[Wow6432Node\]Valve\Steam\Apps\CommonRedist\...` (one to three path parts) or
+`Software\[Wow6432Node\]Microsoft\VisualStudio\14.0\VC\Runtimes\{x86,x64,arm64}`, with
+only `dword` values or a `"v<digits/dots>"` string; such a tail requires the
+`.droiddeck-redists` marker. The two markers must be small single-link regular files
+without execute or group/other write bits; their content is only hashed and reported
+(`droiddeck_redist` in the verifier result). The ordinary strict `verify_tree` is
+unchanged. Prefixes created from such a template inherit these registry entries; whether
+that makes the SoftDenchi bootstrap skip its VC++ runtime is not verified.
