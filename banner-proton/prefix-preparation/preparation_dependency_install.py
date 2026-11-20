@@ -77,6 +77,9 @@ PROXY_IMAGE = r"c:\program files (x86)\softdenchi\sdproxy.exe"
 SERVICES_IMAGE = r"c:\windows\system32\services.exe"
 PROXY_STOP_WAIT = 30
 INSTALLER_OBSERVATION_INTERVAL = 0.5
+# The installer window needs the operator's attention; ask "wait again?" only after this long,
+# so the SdProxy attribution keeps observing while the operator works in that window.
+INSTALLER_QUIET_WAIT = 600
 POST_STATUS = {"present-verified": "present-verified", "present-unverified": "installed-unverified", "partial": "partial",
                "incompatible": "incompatible", "absent": "cancelled-absent", "uninspected": "needs-user"}
 
@@ -1040,8 +1043,9 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                         if stream.readline(32).strip() == "1":
                             stage = "dependency-installer"
                             session.start_installer()
-                            print("インストーラの画面で操作してください。完了を待っています。", file=output, flush=True)
-                            _wait_loop(session.wait_installer, stream, output, "installer")
+                            print("インストーラの画面で操作してください。完了を待っています"
+                                  f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
+                            _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
                             if session.record["installer"]["status"] == "exited-processes-remain":
                                 _offer_session_proxy_stop(session, stream, output, selection._text)
                         else:
@@ -1065,11 +1069,16 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
     return _save_result(selection, directory, home, report, protected, output)
 
 
-def _wait_loop(wait, stream, output, section):
+def _wait_loop(wait, stream, output, section, quiet=0):
+    waited = 0
     while True:
-        outcome = wait(30)
+        step = 30 if waited >= quiet else min(120, quiet - waited)
+        outcome = wait(step)
+        waited += step
         if outcome["status"] != "needs-user" or outcome[section]["status"] == "exited-processes-remain":
             return outcome
+        if waited < quiet:
+            continue
         print("未完了です。強制終了していません。1で再待機、qで記録を残して戻る: ", end="", file=output, flush=True)
         if stream.readline(32).strip() != "1":
             return outcome

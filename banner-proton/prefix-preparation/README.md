@@ -808,7 +808,10 @@ ancestry (PID and start time at every step) reaches that process is kept in
 whose first SdProxy lost its parent is accepted when that first SdProxy is in this list
 and the chain shares the executable identity of the one `services.exe` in the view. A
 SdProxy started by any other launch, or one missed between polls, is not attributed and
-refuses the stop. The confirmation and the record state each target's origin
+refuses the stop. While the installer runs, menu 8 waits without asking for the first
+10 minutes (in steps of up to 120 s), so the operator can work in the installer window
+while the attribution keeps observing; after that it asks every 30 s as before. The
+confirmation and the record state each target's origin
 (`ucmansvc` or `installer-run`). All other conditions (two identical inventories,
 nothing unreadable, unclassified or prefix-conflicting, pidfd pinning and revalidation,
 SIGTERM only) are unchanged. Menu 9 keeps the UCManSvc-only rule because it has no

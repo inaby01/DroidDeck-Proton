@@ -714,6 +714,25 @@ class InstallTests(TRIAL['TrialTests']):
         with self.assertRaisesRegex(Invalid, 'invalid installer start time'):
             dep.validate_install_record({**record, 'gui_check': {**record['gui_check'], 'spawned_started': 3}})
 
+    def test_installer_wait_keeps_observing_without_prompting_at_first(self):
+        steps = []
+
+        def wait(timeout):
+            steps.append(timeout)
+            done = sum(steps) >= 700
+            state = {'status': 'exited' if done else 'waiting'}
+            return {'status': 'running' if done else 'needs-user', 'installer': state, 'gui_check': state}
+        output = io.StringIO()
+        outcome = dep._wait_loop(wait, io.StringIO('1\n1\n1\n1\n'), output, 'installer', 600)
+        self.assertEqual(outcome['status'], 'running')
+        self.assertEqual(steps, [120, 120, 120, 120, 120, 30, 30, 30, 30])
+        self.assertEqual(output.getvalue().count('未完了です'), 4)  # first asked after the quiet 600 s
+        steps.clear()
+        output = io.StringIO()
+        dep._wait_loop(wait, io.StringIO('q\n'), output, 'gui_check')
+        self.assertEqual(steps, [30])
+        self.assertEqual(output.getvalue().count('未完了です'), 1)
+
     def tool_xalia(self):
         tool = dep._tool_directory(self.install_plan().recheck)
         return 'Z:' + str(tool / 'files/share/xalia/xalia.exe').replace('/', '\\')
