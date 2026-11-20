@@ -979,3 +979,13 @@ copied without their mtimes, a leftover temporary file after an interrupted writ
 `-O` cache, or group-writable files) is cleared by removing the reported `__pycache__`
 directory of the slot; launching a game from the slot once recreates valid caches. Tool
 launches never write them (`PYTHONDONTWRITEBYTECODE`, 0.27.5).
+
+## Final-review fixes (0.27.7)
+
+- Stop: before every later SIGTERM the view must only have shrunk relative to the
+  confirmed view (no new process, no changed image, prefix consistency or executable
+  identity, no unreadable PID outside it), also when the view would otherwise pass the
+  stop conditions (for example a restarted service or another launch); otherwise the
+  stop aborts at once (`not-shrinking`).
+- Menu 10: the initialization guard right before spawn requires the runtime writes of the
+  preparation slot (`tool_runtime_writes`) to equal those of the plan.

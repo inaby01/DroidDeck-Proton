@@ -292,15 +292,17 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
                     current = inventory_processes(compatdata, proc_root)
                     reads += 1
                     unreadable_seen.update(current["unreadable_pids"])
+                    # The view may only shrink: every readable process and every unreadable PID was in
+                    # the confirmed view, unchanged. Anything new or changed aborts at once, even when the
+                    # view would otherwise pass (a restarted service, another launch).
+                    new_pids = sorted({p["pid"] for p in current["processes"] if changed(p)} |
+                                      (set(current["unreadable_pids"]) - confirmed_pids))
+                    settling = current["unreadable_count"] == len(current["unreadable_pids"]) and not new_pids
                     try:
                         present = revalidate(current, key)
+                        require(settling, "new or changed process in prefix view")
                         break
                     except Invalid:
-                        # Read again only while the view merely shrinks: every readable process and
-                        # every unreadable PID was in the confirmed view. Anything new aborts at once.
-                        new_pids = sorted({p["pid"] for p in current["processes"] if changed(p)} |
-                                          (set(current["unreadable_pids"]) - confirmed_pids))
-                        settling = current["unreadable_count"] == len(current["unreadable_pids"]) and not new_pids
                         if not settling or time.monotonic() >= deadline:
                             detail["revalidation"] = {
                                 "result": "timeout" if settling else "not-shrinking", "reads": reads,

@@ -996,6 +996,34 @@ class InstallTests(TRIAL['TrialTests']):
                 self.assertEqual((detail['revalidation']['result'], detail['revalidation']['reads']), ('not-shrinking', 1))
         self.clear_fake()
 
+    def test_new_or_changed_known_process_after_a_send_aborts_even_if_the_view_passes(self):
+        plan = self.install_plan().recheck
+        for case in ('new explorer', 'service loader changed'):
+            with self.subTest(case=case):
+                self.clear_fake()
+                targets = self.lingering_tree()
+
+                def sender(key, case=case, targets=targets):
+                    if key != targets[0]:
+                        self.fail('second send after a new or changed process')
+                    if case == 'new explorer':
+                        self.fake_process(900008, 'C:\\windows\\system32\\explorer.exe', 900002, 60)
+                    else:
+                        exe = self.f.proc / '900004' / 'exe'
+                        exe.unlink()
+                        other = self.home / 'fake-other-loader'
+                        if not other.exists():
+                            other.write_bytes(b'different synthetic loader')
+                        exe.symlink_to(other)
+                log, detail = [], {}
+                with patch.object(dep, 'SIGNAL_SETTLE_WAIT', 30), patch.object(dep, 'SIGNAL_SETTLE_INTERVAL', 0), \
+                        self.assertRaisesRegex(Invalid, 'new or changed process'):
+                    dep.signal_proxies(plan.compatdata, targets, self.f.proc, sender, log, dep.NO_SCOPE, detail)
+                self.assertEqual([item['result'] for item in log], ['sigterm-sent'])
+                self.assertEqual((detail['revalidation']['result'], detail['revalidation']['reads']), ('not-shrinking', 1))
+                self.assertEqual(detail['revalidation']['new_pids'], [900008 if case == 'new explorer' else 900004])
+        self.clear_fake()
+
     def test_more_unreadable_pids_than_reported_abort_at_once(self):
         plan = self.install_plan().recheck
         targets = self.lingering_tree()

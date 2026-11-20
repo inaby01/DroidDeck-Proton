@@ -33,7 +33,7 @@ from preparation_execution import (
     plan_launch,
     require_no_bytecode_cache,
 )
-from preparation_payload import verify_fex_runtime_tree
+from preparation_payload import runtime_writes, verify_fex_runtime_tree
 from preparation_processes import ProcessStopCheck
 from preparation_static_placement import (
     StaticPlacementPlan,
@@ -240,7 +240,11 @@ class TrialSession:
         policy = _private_xalia_context(installation, p.placement.review)
         if policy is not None:
             policy.guard()
-        verify_fex_runtime_tree(safe_path(installation.summary()["destination"]), installation.inventory, installation.customization.overlays)
+        summary = installation.summary()
+        # The template and caches the plan accepted must still be the ones used right before spawn.
+        require(runtime_writes(verify_fex_runtime_tree(safe_path(summary["destination"]), installation.inventory,
+                                                       installation.customization.overlays)) == summary.get("tool_runtime_writes"),
+                "tool runtime writes changed")
         require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
         _aliases(installation.target.steam, installation.target.registration_id)
         if self.settings_identity is not None:

@@ -412,6 +412,22 @@ class GamePrefixTests(DEP['InstallTests']):
         self.assertNotEqual(self.binding_plan(record, digest).digest, plan.digest)
         (self.f.exe.parent / 'mfc42.dll').unlink()
 
+    def test_initialization_guard_refuses_runtime_writes_changed_after_planning(self):
+        tool, pyc = self.tool_pyc()
+        appconfig = tool / 'files/share/fex-emu/AppConfig'
+        if not appconfig.exists():
+            appconfig.mkdir(mode=0o700)
+        plan = self.game_plan()
+        lock = __import__('hashlib').sha256(str(plan.compatdata).encode()).hexdigest()
+        with PrivateStore(self.f.store_root, create=True) as store, store.locked(lock):
+            session = game.GamePrefixSession(plan, store, self.game_plan, plan.digest,
+                                             ProcessStopCheck(plan.compatdata, self.f.proc))
+            session._guard()
+            pyc.write_bytes(pyc.read_bytes()[:16] + b'rewritten after planning')
+            with self.assertRaisesRegex(Invalid, 'tool runtime writes changed'):
+                session._guard()
+        self.assertFalse(self.game_compat.exists())
+
     def test_later_profile_revision_with_the_initialized_exe_is_accepted(self):
         record, digest = self.initialize()
         self.install_dependency(record, digest)
