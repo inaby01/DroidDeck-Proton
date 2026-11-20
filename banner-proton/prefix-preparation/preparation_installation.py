@@ -76,13 +76,14 @@ def _tree_variants(directory, inventory, archive_name, mode, helper, renderer, l
     for mask in (0o022, 0o077):
         candidate = plan_customizations(inventory, archive_name, mode, helper, renderer, label=label, umask=mask, tool_slot=tool_slot)
         try:
-            verifier(directory, inventory, candidate.overlays)
+            verified = verifier(directory, inventory, candidate.overlays)
         except (OSError, Invalid) as error:
             diagnostic = getattr(error, "tree_diagnostic", {"check": "tree-validation-rejected", "error_class": type(error).__name__,
                                                           "errno": getattr(error, "errno", None)})
             observations.append({"creation_umask": format(mask, "04o"), "tree_matches": False, **diagnostic})
             continue
-        observations.append({"creation_umask": format(mask, "04o"), "tree_matches": True})
+        observations.append({"creation_umask": format(mask, "04o"), "tree_matches": True,
+                             "droiddeck_redist": verified.get("droiddeck_redist")})
         matches.append((mask, candidate))
     return matches, {"directory": directory.name, "strict_match": len(matches) == 1, "variants": observations,
                      "runtime_contract": FEX_RUNTIME_CONTRACT if tool_slot == "preparation" else None,
@@ -105,7 +106,7 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
     # and the tree must never be installed inside that game's directory.
     require(not target.exe.is_relative_to(destination) and not destination.is_relative_to(target.exe.parent),
             "tool and game paths overlap")
-    action, reused_mask = "install-new", None
+    action, reused_mask, tool_redist = "install-new", None, None
     if destination.exists():
         require(destination.is_dir(), "installation destination must be a directory")
         # The old installer did not record its creation mask. Accept only these
@@ -117,6 +118,7 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
             raise error
         mask, customization = matches[0]
         reused_mask, action = format(mask, "04o"), "reuse-verified-tree"
+        tool_redist = next(item.get("droiddeck_redist") for item in observation["variants"] if item["tree_matches"])
     legacy_observation = None
     if tool_slot == "preparation":
         legacy = plan_customizations(inventory, safe_path(archive).name, mode, helper, renderer,
@@ -147,13 +149,13 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
         blockers.append("insufficient-estimated-installation-capacity")
     signature = {"inventory": inventory.digest, "archive_sha512": sha512, "customization": customization.digest,
                  "runtime": runtime.identity_digest, "target": target.digest, "destination": str(destination),
-                 "action": action, "prefix": prefix, "mode": mode, "tool_slot": tool_slot}
+                 "action": action, "prefix": prefix, "mode": mode, "tool_slot": tool_slot, "tool_droiddeck_redist": tool_redist}
     digest = digest_json(signature)
     # Recheck mutable identity inputs before publishing a composed report.
     target.verify()
     runtime.verify(parent_environment)
     report = {"input_digest": digest, "action": action, "destination": str(destination), "mode": mode, "tool_slot": tool_slot,
-              "legacy_tool_observation": legacy_observation,
+              "legacy_tool_observation": legacy_observation, "tool_droiddeck_redist": tool_redist,
               "reused_creation_umask": reused_mask, "payload": inventory.summary(),
               "customization": customization.summary(), "runtime": runtime.summary(),
               "target_pin_digest": target.digest, "prefix": prefix, "capacity": capacity,

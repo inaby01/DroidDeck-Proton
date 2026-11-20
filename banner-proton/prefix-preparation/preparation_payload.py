@@ -228,7 +228,7 @@ _REDIST_VALUE = re.compile(rb'"[A-Za-z0-9 ._-]{1,64}"=(?:dword:[0-9a-f]{8}|"v[0-
 
 
 def _redist_registry_tail(stream, expected, size):
-    """Archive bytes unchanged, then only DroidDeck's redist sections; returns the section count."""
+    """Archive bytes unchanged, then only DroidDeck's redist sections; returns the section count and tail hash."""
     require(expected["kind"] == "file" and size > expected["size"] and size - expected["size"] <= REDIST_TAIL_LIMIT,
             "unexpected registry growth")
     stream.seek(0)
@@ -245,7 +245,7 @@ def _redist_registry_tail(stream, expected, size):
         else:
             require(current and _REDIST_VALUE.fullmatch(line) is not None, "unexpected registry tail")
     require(sections > 0, "unexpected registry tail")
-    return sections
+    return sections, hashlib.sha256(tail).hexdigest()
 
 
 class _Bounded:
@@ -314,7 +314,8 @@ def _verify_tree(root, inventory, overlays=None, runtime_entry=None, redist=None
                         want = expected[name]
                         if (redist is not None and name == REDIST_REGISTRY and want.get("kind") == "file" and
                                 entry["mode"] == want["mode"] and entry["sha256"] != want["sha256"]):
-                            redist["registry_sections"] = _redist_registry_tail(stream, want, info.st_size)
+                            redist["registry_sections"], redist["registry_tail_sha256"] = _redist_registry_tail(
+                                stream, want, info.st_size)
                             redist["registry_appended_bytes"] = info.st_size - want["size"]
                             entry.update(size=want["size"], sha256=want["sha256"])
                         unchanged(info, os.fstat(stream.fileno()))

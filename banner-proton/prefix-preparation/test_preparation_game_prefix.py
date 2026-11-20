@@ -294,6 +294,7 @@ class GamePrefixTests(DEP['InstallTests']):
         plan = self.binding_plan(record, digest)
         self.assertEqual(plan.blockers, ())
         self.assertIsNone(plan.summary()['profile_revision_change'])
+        self.assertIsNone(plan.summary()['tool_droiddeck_redist'])
         before = self.protected()
         lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
         # Changed after planning: the plan digest no longer matches, nothing is written.
@@ -308,6 +309,28 @@ class GamePrefixTests(DEP['InstallTests']):
                                              ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
         self.assertEqual(result['status'], 'binding-verified')
         self.assertEqual(dll.read_bytes(), DLL)
+        dll.unlink()
+
+    def test_recipe_content_is_part_of_the_binding_plan_and_result(self):
+        self.use_folder_dependency()
+        record, digest = self.initialize()
+        self.install_dependency(record, digest)
+        dll = self.f.exe.parent / 'mfc42.dll'
+        dll.write_bytes(DLL)
+        first = self.binding_plan(record, digest)
+        state = first.summary()['dependencies'][1]
+        self.assertEqual(state['declared_file'], folder_recipe(self.exe_hash())['file'])
+        self.assertEqual((state['recipe_revision'], state['state']), (1, 'present-verified'))
+        # Same dependency ID and revision, another declared file (and that file in place): still ready,
+        # but the plan digest and the recorded declaration change.
+        other = synthetic_pe(extra=b'another synthetic runtime library')
+        dll.write_bytes(other)
+        self.config['game_preparation']['recipes'][-1] = folder_recipe(self.exe_hash(), other)
+        second = self.binding_plan(record, digest)
+        self.assertEqual(second.blockers, ())
+        self.assertNotEqual(first.digest, second.digest)
+        self.assertNotEqual(second.summary()['dependencies'][1]['recipe_digest'], state['recipe_digest'])
+        self.assertEqual(second.summary()['dependencies'][1]['declared_file']['sha256'], hashlib.sha256(other).hexdigest())
         dll.unlink()
 
     def test_later_profile_revision_with_the_initialized_exe_is_accepted(self):

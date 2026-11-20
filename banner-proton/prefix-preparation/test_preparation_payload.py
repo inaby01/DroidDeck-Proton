@@ -171,6 +171,7 @@ class PayloadTests(unittest.TestCase):
         result = payload.verify_fex_runtime_tree(self.installed, inventory)['droiddeck_redist']
         self.assertEqual(result['contract'], payload.DROIDDECK_REDIST_CONTRACT)
         self.assertEqual((result['registry_sections'], result['registry_appended_bytes']), (2, len(self.TAIL)))
+        self.assertEqual(result['registry_tail_sha256'], hashlib.sha256(self.TAIL).hexdigest())
         self.assertEqual(sorted(result['markers']), ['.droiddeck-redists', '.droiddeck-redists-checked'])
         self.assertEqual(before, self.snapshot())
         with self.assertRaises(Invalid):

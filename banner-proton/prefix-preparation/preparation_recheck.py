@@ -91,12 +91,15 @@ class RecheckPlan:
     prefix_version: str
     # Journal of the origin record: probe trials, or registered-game new prefixes.
     records: str = "trials"
+    # DroidDeck's redist markers accepted in the tool template by the runtime contract (None if absent).
+    tool_redist: object = None
 
     def summary(self):
         return {"scope": SCOPE, "input_digest": self.digest, "trial_id": self.record["trial_id"],
                 "origin_status": self.record["status"], "app_id": self.record["app_id"],
                 "prefix": str(self.compatdata), "command": ["runinprefix", "cmd.exe", "/d", "/c", "exit", "0"],
-                "runtime_contract": FEX_RUNTIME_CONTRACT, "prefix_reinitialized": False,
+                "runtime_contract": FEX_RUNTIME_CONTRACT, "tool_droiddeck_redist": self.tool_redist,
+                "prefix_reinitialized": False,
                 "old_trial_record_updated": False, "execution_authorized": False,
                 "device_namespace_verified": False, "preparation_complete": False, "writes": []}
 
@@ -171,7 +174,7 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
         renderer, label=runtime.label, umask=int(runtime.umask, 8), tool_slot="preparation")
     progress.append("recheck-fex-tool-tree")
     tool = safe_path(steam / "compatibilitytools.d" / custom.directory, steam)
-    verify_fex_runtime_tree(tool, inventory, custom.overlays)
+    tool_redist = verify_fex_runtime_tree(tool, inventory, custom.overlays)["droiddeck_redist"]
     progress.append("recheck-payload-permissions")
     policy = reviewed_payload_permissions(inventory, steam, review)
     if policy is not None:
@@ -196,9 +199,9 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
     signature = {"version": VERSION, "scope": SCOPE, "records": records, "record": record_sha256, "archive": inventory.archive_sha512,
                  "inventory": inventory.digest, "customization": custom.digest, "runtime": runtime.identity_digest,
                  "target": target.digest, "prefix_version": version, "work": str(work), "home": str(private_home),
-                 "contract": FEX_RUNTIME_CONTRACT, "settings": _settings(steam, settings)}
+                 "contract": FEX_RUNTIME_CONTRACT, "settings": _settings(steam, settings), "tool_droiddeck_redist": tool_redist}
     return RecheckPlan(digest_json(signature), record, record_sha256, store_root, probe_store, inventory, custom,
-                      runtime, target, review, settings, work, private_home, compatdata, version, records)
+                      runtime, target, review, settings, work, private_home, compatdata, version, records, tool_redist)
 
 
 def validate_recheck_record(record):
@@ -255,7 +258,8 @@ class RecheckSession:
         policy = reviewed_payload_permissions(p.inventory, p.target.steam, p.review)
         if policy is not None:
             policy.guard()
-        verify_fex_runtime_tree(safe_path(p.target.steam / "compatibilitytools.d" / p.customization.directory), p.inventory, p.customization.overlays)
+        require(verify_fex_runtime_tree(safe_path(p.target.steam / "compatibilitytools.d" / p.customization.directory), p.inventory,
+                                        p.customization.overlays)["droiddeck_redist"] == p.tool_redist, "tool template changed")
         _private_existing(p.compatdata, p.target.steam)
         _aliases(p.target.steam, p.record["app_id"])
         require(_prefix(p.compatdata) == p.prefix_version, "managed prefix version changed")

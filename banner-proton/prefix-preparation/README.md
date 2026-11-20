@@ -887,3 +887,20 @@ without execute or group/other write bits; their content is only hashed and repo
 (`droiddeck_redist` in the verifier result). The ordinary strict `verify_tree` is
 unchanged. Prefixes created from such a template inherit these registry entries; whether
 that makes the SoftDenchi bootstrap skip its VC++ runtime is not verified.
+
+## Review fixes (0.27.2)
+
+- Stop: a fresh view is read before every later SIGTERM, also when the previous target
+  had already exited at its send (0.26.4 skipped the read in that case). An abort
+  records `revalidation` (`timeout` or `not-shrinking`, number of reads, the target,
+  PIDs not in the confirmed view, counts of the last view); each later signal entry
+  records its reads and the unreadable PIDs seen while settling.
+- Binding: each dependency state carries its recipe revision and digest, and a
+  `game-folder-file` state also its declared file, so the plan digest and the result
+  change when a recipe changes under the same dependency ID.
+- Tool template: the accepted DroidDeck redist state (sections, appended bytes, tail
+  SHA-256, marker hashes) is reported as `tool_droiddeck_redist` in the reuse plan, the
+  menu 10 preview, the recheck plan and the binding plan, is part of their digests, and
+  the recheck readiness check and the binding readiness check before each write require
+  it to be unchanged (the menu 10 initialization guard re-verifies the tree but does not
+  compare this state).

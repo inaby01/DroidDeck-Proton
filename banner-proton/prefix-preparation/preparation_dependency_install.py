@@ -82,6 +82,7 @@ PROXY_STOP_WAIT = 30
 SIGNAL_EXIT_WAIT = 5
 SIGNAL_SETTLE_WAIT = 5
 SIGNAL_SETTLE_INTERVAL = 0.25
+MAX_REPORTED_PIDS = 16
 INSTALLER_OBSERVATION_INTERVAL = 0.5
 # The installer window needs the operator's attention; ask "wait again?" only after this long,
 # so the SdProxy attribution keeps observing while the operator works in that window.
@@ -229,11 +230,14 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
     the full stop conditions. After each send the signaled SdProxy is given time to
     exit, and before the next send a fresh view must be fully readable and explained:
     nothing unreadable, unclassified, with a conflicting prefix, or a SdProxy outside
-    the batch. A view that is not yet so is read again for a bounded time only while it
+    the batch (a view is read before every later send, even when the previous target was
+    already gone). A view that is not yet so is read again for a bounded time only while it
     merely shrinks (every readable process and every unreadable PID was in the confirmed
     view; a process that is exiting is briefly unreadable); anything new, or no
     qualifying view in time, aborts and the unreadable PIDs of the last view go to
-    ``detail``. A pinned target that has already
+    ``detail`` with the abort kind (``timeout`` or ``not-shrinking``), the number of reads
+    and the PIDs that were not in the confirmed view. Each later log entry carries its reads
+    and the unreadable PIDs seen while settling. A pinned target that has already
     exited is recorded as gone. ``log`` is filled per target as it happens, so a partial
     result survives an exception. ``sender`` replaces the kernel call in tests;
     production always uses pidfds.
@@ -270,39 +274,53 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
         confirmed_keys = {(p["pid"], p["started"]) for p in second["processes"]}
         confirmed_pids = {p["pid"] for p in second["processes"]}
         last_sent = None
-        for key in batch:
-            if last_sent is not None:
-                if sender is None:
+        for index, key in enumerate(batch):
+            if index:
+                # Every later send is preceded by a fresh view, also when nothing was sent yet.
+                if last_sent is not None and sender is None:
                     _await_exit(descriptors[last_sent], SIGNAL_EXIT_WAIT)
-                deadline = time.monotonic() + SIGNAL_SETTLE_WAIT
+                deadline, reads = time.monotonic() + SIGNAL_SETTLE_WAIT, 0
+                unreadable_seen = set()
                 while True:
                     current = inventory_processes(compatdata, proc_root)
+                    reads += 1
+                    unreadable_seen.update(current["unreadable_pids"])
                     try:
                         present = revalidate(current, key)
                         break
                     except Invalid:
                         # Read again only while the view merely shrinks: every readable process and
                         # every unreadable PID was in the confirmed view. Anything new aborts at once.
-                        settling = (current["unreadable_count"] == len(current["unreadable_pids"]) and
-                                    {(p["pid"], p["started"]) for p in current["processes"]} <= confirmed_keys and
-                                    set(current["unreadable_pids"]) <= confirmed_pids)
+                        new_pids = sorted({p["pid"] for p in current["processes"]
+                                           if (p["pid"], p["started"]) not in confirmed_keys} |
+                                          (set(current["unreadable_pids"]) - confirmed_pids))
+                        settling = current["unreadable_count"] == len(current["unreadable_pids"]) and not new_pids
                         if not settling or time.monotonic() >= deadline:
+                            detail["revalidation"] = {
+                                "result": "timeout" if settling else "not-shrinking", "reads": reads,
+                                "target": {"pid": key[0], "started": key[1]},
+                                "new_pids": new_pids[:MAX_REPORTED_PIDS],
+                                "unreadable_count": current["unreadable_count"],
+                                "processes": len(current["processes"])}
                             if current["unreadable_pids"]:
                                 detail["unreadable_pids"] = list(current["unreadable_pids"])
                             raise
                         time.sleep(SIGNAL_SETTLE_INTERVAL)
+                revalidated = {"reads": reads, "unreadable_seen": sorted(unreadable_seen)[:MAX_REPORTED_PIDS]}
                 if present is None:
-                    log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal"})
+                    log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal", **revalidated})
                     continue
+            else:
+                revalidated = {}
             try:
                 if sender is None:
                     send(descriptors[key], signal.SIGTERM, None, 0)
                 else:
                     sender(key)
             except ProcessLookupError:
-                log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal"})
+                log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal", **revalidated})
                 continue
-            log.append({"pid": key[0], "started": key[1], "result": "sigterm-sent"})
+            log.append({"pid": key[0], "started": key[1], "result": "sigterm-sent", **revalidated})
             last_sent = key
     finally:
         for descriptor in descriptors.values():

@@ -684,6 +684,9 @@ class InstallTests(TRIAL['TrialTests']):
             result = dict(session.record)
         self.assertEqual(sent, targets)
         self.assertEqual([item['result'] for item in result['lingering']['stop']['signals']], ['sigterm-sent'] * 2)
+        second = result['lingering']['stop']['signals'][1]
+        self.assertGreater(second['reads'], 1)
+        self.assertEqual(second['unreadable_seen'], [targets[0][0]])
         self.assertEqual(result['lingering']['stop']['result'], 'sigterm-sent')
         self.assertNotIn('unreadable_pids', result['lingering']['stop'])
         self.assertEqual(result['status'], 'present-verified')
@@ -710,6 +713,9 @@ class InstallTests(TRIAL['TrialTests']):
         stop = result['lingering']['stop']
         self.assertEqual((stop['result'], stop['reason']), ('aborted', 'unreadable process in prefix view'))
         self.assertEqual(stop['unreadable_pids'], [targets[0][0]])
+        self.assertEqual(stop['revalidation']['result'], 'timeout')
+        self.assertGreater(stop['revalidation']['reads'], 1)
+        self.assertEqual(stop['revalidation']['new_pids'], [])
         self.assertEqual(result['lingering']['before_stop']['unreadable_pids'], [])
         self.assertEqual(result['status'], 'needs-user')
         self.assertIsNone(result['post_state'])
@@ -750,6 +756,22 @@ class InstallTests(TRIAL['TrialTests']):
                 self.assertEqual(reads, [1])
                 self.assertEqual([item['result'] for item in log], ['sigterm-sent'])
                 self.assertEqual(detail.get('unreadable_pids'), [900008] if case == 'new-unreadable-pid' else None)
+                self.assertEqual(detail['revalidation']['result'], 'not-shrinking')
+                self.assertEqual(detail['revalidation']['new_pids'], [900008 if case == 'new-unreadable-pid' else 900007])
+        # The first target already gone at its send: the view is still read before the next send.
+        self.clear_fake()
+        targets = self.lingering_tree()
+
+        def gone_first(key, targets=targets):
+            if key != targets[0]:
+                self.fail('a view with something new must not allow the next send')
+            self.fake_process(900007, 'C:\\users\\DUMMY_PRIVATE\\tool.exe', 900002, 50)
+            raise ProcessLookupError
+        log, detail = [], {}
+        with self.assertRaisesRegex(Invalid, 'unclassified process'):
+            dep.signal_proxies(plan.compatdata, targets, self.f.proc, gone_first, log, dep.NO_SCOPE, detail)
+        self.assertEqual([item['result'] for item in log], ['gone-before-signal'])
+        self.assertEqual(detail['revalidation']['result'], 'not-shrinking')
         self.clear_fake()
 
     def test_menu8_names_the_missing_inspection_only_when_it_did_not_run(self):

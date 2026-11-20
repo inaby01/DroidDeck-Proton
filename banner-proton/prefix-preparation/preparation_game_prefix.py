@@ -199,7 +199,8 @@ class GamePrefixPlan:
         base.update(scope=SCOPE, profile={key: self.profile[key] for key in ("profile_id", "revision", "title", "edition",
                                                                               "edition_status")},
                     profile_selection=self.selection, executable={"sha256": self.exe["sha256"], "size": self.exe["size"]},
-                    dependencies=list(self.dependencies), exe_path_ascii=self.exe_path_ascii, binding_written=False,
+                    dependencies=list(self.dependencies), exe_path_ascii=self.exe_path_ascii,
+                    tool_droiddeck_redist=self.trial.placement.installation.summary().get("tool_droiddeck_redist"), binding_written=False,
                     dependencies_installed=False, existing_prefix_modified=False)
         return base
 
@@ -428,6 +429,7 @@ class GameBindingPlan:
         return {"scope": "registered-game-target-only-binding", "input_digest": self.digest, "app_id": self.base.record["app_id"],
                 "origin": self.base.record["trial_id"], "profile_id": self.profile["profile_id"],
                 "profile_revision_change": self.profile_revision_change, "exe_path_ascii": self.exe_path_ascii,
+                "tool_droiddeck_redist": self.base.tool_redist,
                 "dependencies": list(self.dependencies), "binding": self.binding.summary(),
                 "tool_directory": self.base.customization.directory, "blockers": list(self.blockers),
                 "game_launched": False, "authentication_performed": False, "preparation_complete": False, "writes": []}
@@ -440,14 +442,18 @@ def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe):
     states = []
     for dependency in profile["dependencies"]:
         item = recipes[dependency]
+        # What was checked is part of the state, so the plan digest and the result change with the recipe.
+        declared = {"dependency_id": dependency, "recipe_revision": item["revision"], "recipe_digest": digest_json(item)}
+        if item["handler"] == "game-folder-file":
+            declared["declared_file"] = dict(item["file"])
         if item["status"] != "ready":
-            states.append({"dependency_id": dependency, "state": "blocked", "reason": item["reason"]})
+            states.append({**declared, "state": "blocked", "reason": item["reason"]})
         elif not clear:
-            states.append({"dependency_id": dependency, "state": "uninspected", "reason": "target-process-view-not-clear"})
+            states.append({**declared, "state": "uninspected", "reason": "target-process-view-not-clear"})
         elif item["handler"] == "game-folder-file":
-            states.append({"dependency_id": dependency, **inspect_game_folder_file(exe, item["file"])})
+            states.append({**declared, **inspect_game_folder_file(exe, item["file"])})
         else:
-            states.append({"dependency_id": dependency, "state": inspect_dependency_state(compatdata, recipe)["state"]})
+            states.append({**declared, "state": inspect_dependency_state(compatdata, recipe)["state"]})
     if clear and not stop_check.check()["clear_in_view"]:
         states = [{**item, "state": "uninspected", "reason": "concurrent-process-observed"} if item["state"] != "blocked" else item
                   for item in states]
@@ -523,7 +529,8 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
     def ready():
         base.target.verify()
         base.runtime.verify()
-        verify_fex_runtime_tree(tool, base.inventory, base.customization.overlays)
+        require(verify_fex_runtime_tree(tool, base.inventory, base.customization.overlays)["droiddeck_redist"] == base.tool_redist,
+                "tool template changed")
         require_initialized_directories(base.compatdata, base.record)
         require(_prefix(base.compatdata) == base.prefix_version, "game prefix version changed")
         # Same check as planning: an unclear view before or after inspection is never verified.
