@@ -47,6 +47,55 @@ def process_start_time(pid, proc_root=Path("/proc")):
         os.close(root_fd)
 
 
+def process_parents(proc_root=Path("/proc")):
+    """Same-owner processes: PID -> (parent PID, start time). Unreadable entries are left out."""
+    proc_root = safe_path(proc_root)
+    result = {}
+    root_fd = os.open(proc_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        own_fd = os.open(str(os.getpid()), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            owner = os.fstat(own_fd).st_uid
+        finally:
+            os.close(own_fd)
+        with os.scandir(root_fd) as entries:
+            for index, entry in enumerate(entries):
+                require(index < MAX_PROCESSES, "too many proc entries")
+                if not entry.name.isascii() or not entry.name.isdecimal():
+                    continue
+                descriptor = None
+                try:
+                    descriptor = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                    if os.fstat(descriptor).st_uid == owner:
+                        _, parent, started = _parent_identity(_read(descriptor, "stat", 8192), entry.name)
+                        result[int(entry.name)] = (parent, started)
+                except (OSError, ValueError, UnicodeError):
+                    continue
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+    finally:
+        os.close(root_fd)
+    return result
+
+
+def descends_from(parents, key, root, limit=256):
+    """True when the process ``key`` (pid, start) has ``root`` (pid, start) as an ancestor in ``parents``."""
+    cursor, seen = key, set()
+    for _ in range(limit):
+        info = parents.get(cursor[0])
+        if info is None or info[1] != cursor[1] or cursor[0] in seen:
+            return False
+        seen.add(cursor[0])
+        parent = parents.get(info[0])
+        if parent is None or parent[1] > cursor[1]:
+            return False
+        if (info[0], parent[1]) == tuple(root):
+            return True
+        cursor = (info[0], parent[1])
+    return False
+
+
 def _matches(raw, compatdata):
     return _prefix_fields(raw, compatdata)[0]
 
@@ -149,6 +198,15 @@ WINE_INFRASTRUCTURE = frozenset(("services.exe", "winedevice.exe", "explorer.exe
                                  "rpcss.exe", "conhost.exe", "lsass.exe", "tabtip.exe"))
 # Proton's UI automation helper, started by explorer.exe from the tool's files/share/xalia.
 XALIA_IMAGE_SUFFIX = r"\files\share\xalia\xalia.exe"
+
+
+def xalia_images(tool):
+    """DOS image forms of the selected compatibility tool's xalia.exe (as given and resolved)."""
+    path = Path(tool) / "files/share/xalia/xalia.exe"
+    unix = {str(path), os.path.realpath(path)}
+    return frozenset(windows_image(prefix + name) for name in unix for prefix in ("z:", "\\\\?\\unix", "\\??\\unix"))
+
+
 MAX_ARGV0 = 4096
 
 
@@ -234,6 +292,7 @@ def describe_image(image):
     elif directory in SYSTEM_DIRECTORIES:
         place = "windows-system"
     elif image.endswith(XALIA_IMAGE_SUFFIX):
+        # Report-only place; classification requires the selected tool's exact path.
         place = "proton-share-xalia"
     elif directory == r"c:\program files (x86)\softdenchi":
         place = "softdenchi-x86"

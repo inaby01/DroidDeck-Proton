@@ -721,16 +721,17 @@ PID, start time, parent, a role (`wineserver`, `wine-infrastructure`,
 `proton-xalia`, `softdenchi-service`, `softdenchi-proxy`, `other`) and the image
 basename with a coarse place. Environment values, arguments and other paths are not
 kept. `lsass.exe` and `tabtip.exe` count as Wine infrastructure only from the Windows
-system directories; Proton's `xalia.exe` counts only with a `files\share\xalia` image and
-an `explorer.exe` parent in the same view. Both were left beside SdProxy on the device
-and otherwise refuse the stop as unclassified.
+system directories; `xalia.exe` counts only as the selected tool's own
+`files/share/xalia/xalia.exe` (its `Z:` or `\\?\unix` DOS forms, as given or resolved)
+with an `explorer.exe` parent in the same view. Any other image ending in
+`files\share\xalia\xalia.exe` is reported with the place `proton-share-xalia` but stays
+unclassified and refuses the stop.
 
 After an explicit confirmation, SIGTERM is sent only to SdProxy processes whose
 parent chain reaches UCManSvc under `services.exe`, with consistent start times and
 one shared executable identity (in menu 8 right after the installer run, also a chain
-whose first SdProxy has no parent left in the view, if it started no earlier than the
-process this tool spawned for the installer and shares the identity of the single
-`services.exe`; see 0.26.3), from two identical inventories without unreadable,
+whose first SdProxy has no parent left in the view, if that SdProxy was observed as a
+descendant of the installer process while it ran; see 0.26.3), from two identical inventories without unreadable,
 unclassified or prefix-conflicting processes (both prefix variables, when present,
 must name this prefix). The batch is pinned with pidfds and the full conditions are
 evaluated again after pinning; before each further signal the view is read again
@@ -800,12 +801,16 @@ is not detected by these identities.
 On the device (0.26.2) the bootstrap started SdProxy before UCManSvc and exited, so the
 first SdProxy had no parent left in the prefix view, and `lsass.exe`, `tabtip.exe` and
 Proton's `xalia.exe` stayed beside it. Menu 8 now records the start time of the process
-it spawns for the installer (`installer.spawned_started`, from `/proc/PID/stat`; absent
-if it could not be read) and, in that same session only, also accepts a SdProxy chain
-whose first SdProxy lost its parent when that SdProxy started no earlier than the
-installer spawn and every process in the chain shares the executable identity of the
-one `services.exe` in the view. All other conditions (two identical inventories,
+it spawns for the installer (`installer.spawned_started`, from `/proc/PID/stat`) and,
+while the installer runs, polls every 0.5 s: a SdProxy of this prefix whose same-owner
+ancestry (PID and start time at every step) reaches that process is kept in
+`installer.installer_proxies` (at most 64). In the same session only, a SdProxy chain
+whose first SdProxy lost its parent is accepted when that first SdProxy is in this list
+and the chain shares the executable identity of the one `services.exe` in the view. A
+SdProxy started by any other launch, or one missed between polls, is not attributed and
+refuses the stop. The confirmation and the record state each target's origin
+(`ucmansvc` or `installer-run`). All other conditions (two identical inventories,
 nothing unreadable, unclassified or prefix-conflicting, pidfd pinning and revalidation,
 SIGTERM only) are unchanged. Menu 9 keeps the UCManSvc-only rule because it has no
-installer run to bound the origin. The menu 10 profile prompt also accepts the profile
-name.
+installer run to attribute the origin. The menu 10 profile prompt also accepts the
+profile name.

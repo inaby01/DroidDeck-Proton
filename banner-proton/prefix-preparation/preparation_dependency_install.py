@@ -41,11 +41,13 @@ from preparation_execution import plan_launch
 from preparation_processes import (
     SYSTEM_DIRECTORIES,
     WINE_INFRASTRUCTURE,
-    XALIA_IMAGE_SUFFIX,
     ProcessStopCheck,
+    descends_from,
     describe_image,
     inventory_processes,
+    process_parents,
     process_start_time,
+    xalia_images,
 )
 from preparation_recheck import RecheckSession, plan_recheck, validate_recheck_record
 from preparation_softdenchi_recipe import (
@@ -74,11 +76,27 @@ SERVICE_IMAGE = r"c:\program files (x86)\softdenchi\ucmansvc.exe"
 PROXY_IMAGE = r"c:\program files (x86)\softdenchi\sdproxy.exe"
 SERVICES_IMAGE = r"c:\windows\system32\services.exe"
 PROXY_STOP_WAIT = 30
+INSTALLER_OBSERVATION_INTERVAL = 0.5
 POST_STATUS = {"present-verified": "present-verified", "present-unverified": "installed-unverified", "partial": "partial",
                "incompatible": "incompatible", "absent": "cancelled-absent", "uninspected": "needs-user"}
 
 
-def classify_process(process):
+@dataclass(frozen=True)
+class StopScope:
+    """What explains processes of one prefix beyond the fixed Wine and SoftDenchi images.
+
+    ``xalia_images``: DOS forms of the selected tool's xalia.exe. ``installer_proxies``:
+    (pid, start) of SdProxy observed as descendants of this tool's installer process.
+    """
+    xalia_images: frozenset = frozenset()
+    installer_proxies: frozenset = frozenset()
+
+
+NO_SCOPE = StopScope()
+MAX_INSTALLER_PROXIES = 64
+
+
+def classify_process(process, scope=NO_SCOPE):
     image = process["image"]
     directory, name = ntpath.split(image)
     if image == PROXY_IMAGE:
@@ -89,14 +107,14 @@ def classify_process(process):
         return "wine-infrastructure"
     if image.startswith("\\") and not image.startswith("\\\\") and name == "wineserver":
         return "wineserver"
-    if not image.startswith("\\") and image.endswith(XALIA_IMAGE_SUFFIX):
+    if image in scope.xalia_images:
         return "proton-xalia"
     return "other"
 
 
-def summarize_lingering(inventory):
+def summarize_lingering(inventory, scope=NO_SCOPE):
     """Exportable view: identity, parent, role and image basename/place only."""
-    processes = [{"pid": p["pid"], "started": p["started"], "parent": p["parent"], "role": classify_process(p),
+    processes = [{"pid": p["pid"], "started": p["started"], "parent": p["parent"], "role": classify_process(p, scope),
                   "prefix_consistent": p["prefix_consistent"], "executable_id_known": p["executable_id"] is not None,
                   **describe_image(p["image"])} for p in inventory["processes"]]
     roles = {}
@@ -106,28 +124,28 @@ def summarize_lingering(inventory):
             "scope": inventory["scope"], "device_namespace_verified": False}
 
 
-def proxy_stop_targets(first, second, installer_started=None):
-    """SdProxy processes descending from UCManSvc under services.exe, and nothing unexplained.
+def proxy_stop_origins(first, second, scope=NO_SCOPE):
+    """Each stoppable SdProxy with its origin: ``ucmansvc`` or ``installer-run``.
 
     Two identical consecutive inventories are required. Any unreadable or
     unclassified process of this prefix refuses the stop instead of guessing.
-    Right after an installer run (``installer_started``: the start time of the process
-    this tool spawned for the installer), a SdProxy chain whose first SdProxy has no
-    parent left in the view is also accepted when that SdProxy started after the
-    installer was spawned; the installer starts SdProxy before UCManSvc and exits.
+    A chain must reach UCManSvc under services.exe; or, when its first SdProxy has no
+    parent left in the view, that SdProxy must have been observed as a descendant of
+    this tool's installer process while the installer ran (``scope.installer_proxies``).
     Every chain must share the executable identity of this prefix's services.exe.
     """
     require(first["processes"] == second["processes"], "process inventory unstable")
     require(first["unreadable_count"] == 0 and second["unreadable_count"] == 0, "unreadable process in prefix view")
     processes = second["processes"]
     by_pid = {p["pid"]: p for p in processes}
-    _view_is_explained(second)
-    proxies = [p for p in processes if classify_process(p) == "softdenchi-proxy"]
+    _view_is_explained(second, scope)
+    proxies = [p for p in processes if classify_process(p, scope) == "softdenchi-proxy"]
     require(proxies, "no SdProxy remaining")
     services_images = [p for p in processes if p["image"] == SERVICES_IMAGE]
+    origins = {}
     for proxy in proxies:
         cursor, seen, chain = proxy, set(), []
-        while classify_process(cursor) == "softdenchi-proxy":
+        while classify_process(cursor, scope) == "softdenchi-proxy":
             require(cursor["pid"] not in seen, "proxy origin not confirmed")
             seen.add(cursor["pid"])
             chain.append(cursor)
@@ -136,41 +154,55 @@ def proxy_stop_targets(first, second, installer_started=None):
                 break
             require(parent["started"] <= cursor["started"], "proxy origin not confirmed")
             cursor = parent
-        if classify_process(cursor) == "softdenchi-proxy":
-            # The starter is gone from the view: only an installer-run SdProxy is explained.
-            require(installer_started is not None and cursor["started"] >= installer_started, "proxy origin not confirmed")
+        if classify_process(cursor, scope) == "softdenchi-proxy":
+            # Its starter is gone from the view: only a SdProxy attributed to this installer run is explained.
+            require((cursor["pid"], cursor["started"]) in scope.installer_proxies, "proxy origin not confirmed")
             require(len(services_images) == 1, "service origin not confirmed")
             chain.append(services_images[0])
+            origin = "installer-run"
         else:
-            require(classify_process(cursor) == "softdenchi-service", "proxy origin not confirmed")
+            require(classify_process(cursor, scope) == "softdenchi-service", "proxy origin not confirmed")
             services = by_pid.get(cursor["parent"])
             require(services is not None and services["started"] <= cursor["started"] and services["image"] == SERVICES_IMAGE,
                     "service origin not confirmed")
             chain += [cursor, services]
+            origin = "ucmansvc"
         # The Windows processes of one prefix share the loader; an unreadable or different
         # executable identity is not explained by this tree.
         identities = {item["executable_id"] for item in chain}
         require(None not in identities and len(identities) == 1, "executable identity not confirmed")
-    return sorted(((p["pid"], p["started"]) for p in proxies), key=lambda key: key[1])
+        origins[(proxy["pid"], proxy["started"])] = origin
+    return dict(sorted(origins.items(), key=lambda item: item[0][1]))
 
 
-def _view_is_explained(inventory):
+def proxy_stop_targets(first, second, scope=NO_SCOPE):
+    return list(proxy_stop_origins(first, second, scope))
+
+
+def count_origins(origins):
+    counts = {}
+    for origin in origins.values():
+        counts[origin] = counts.get(origin, 0) + 1
+    return counts
+
+
+def _view_is_explained(inventory, scope=NO_SCOPE):
     """Nothing unreadable, unclassified or with a conflicting prefix environment."""
     require(inventory["unreadable_count"] == 0, "unreadable process in prefix view")
     processes = inventory["processes"]
     require(all(p["prefix_consistent"] for p in processes), "conflicting prefix environment")
-    require(all(classify_process(p) != "other" for p in processes), "unclassified process in prefix view")
-    # The xalia image is outside the Windows system directories; it is explained only as a child of explorer.exe.
+    require(all(classify_process(p, scope) != "other" for p in processes), "unclassified process in prefix view")
+    # The selected tool's xalia.exe is explained only as a child of explorer.exe in this view.
     by_pid = {p["pid"]: p for p in processes}
     for process in processes:
-        if classify_process(process) == "proton-xalia":
+        if classify_process(process, scope) == "proton-xalia":
             parent = by_pid.get(process["parent"])
             require(parent is not None and parent["started"] <= process["started"] and
-                    classify_process(parent) == "wine-infrastructure" and ntpath.basename(parent["image"]) == "explorer.exe",
-                    "unclassified process in prefix view")
+                    classify_process(parent, scope) == "wine-infrastructure" and
+                    ntpath.basename(parent["image"]) == "explorer.exe", "unclassified process in prefix view")
 
 
-def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, installer_started=None):
+def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=NO_SCOPE):
     """Pin the confirmed batch with pidfds, revalidate everything, then send SIGTERM one by one.
 
     After pinning, two fresh inventories must yield exactly the confirmed batch under
@@ -190,14 +222,14 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, instal
             for key in batch:
                 descriptors[key] = open_pidfd(key[0], 0)
         first, second = inventory_processes(compatdata, proc_root), inventory_processes(compatdata, proc_root)
-        require(proxy_stop_targets(first, second, installer_started) == batch, "stop candidates changed")
+        require(proxy_stop_targets(first, second, scope) == batch, "stop candidates changed")
         confirmed = {(p["pid"], p["started"]): p for p in second["processes"] if (p["pid"], p["started"]) in batch}
         for index, key in enumerate(batch):
             if index:
                 current = inventory_processes(compatdata, proc_root)
-                _view_is_explained(current)
+                _view_is_explained(current, scope)
                 by_key = {(p["pid"], p["started"]): p for p in current["processes"]}
-                proxies = {k for k, p in by_key.items() if classify_process(p) == "softdenchi-proxy"}
+                proxies = {k for k, p in by_key.items() if classify_process(p, scope) == "softdenchi-proxy"}
                 require(proxies <= set(batch), "new SdProxy appeared")
                 if key not in by_key:
                     log.append({"pid": key[0], "started": key[1], "result": "gone-before-signal"})
@@ -255,18 +287,29 @@ def validate_install_record(record):
     require(record["previous_install_id"] is None or _install_id(record["previous_install_id"]), "invalid previous installation")
     require(record["phase"] in PHASES and record["status"] in STATUSES, "invalid installation state")
     for section in ("gui_check", "installer"):
-        fields(record[section], ("status", "unix_exit_status"), ("display_confirmed", "staged_unchanged", "spawned_started"))
+        fields(record[section], ("status", "unix_exit_status"), ("display_confirmed", "staged_unchanged", "spawned_started",
+                                                               "installer_proxies"))
         require(record[section]["unix_exit_status"] is None or type(record[section]["unix_exit_status"]) is int,
                 "invalid exit status")
     require("spawned_started" not in record["gui_check"] and
             ("spawned_started" not in record["installer"] or
              type(record["installer"]["spawned_started"]) is int and record["installer"]["spawned_started"] >= 0),
             "invalid installer start time")
+    attributed = record["installer"].get("installer_proxies")
+    require("installer_proxies" not in record["gui_check"] and
+            (attributed is None or "spawned_started" in record["installer"] and type(attributed) is list and
+             0 < len(attributed) <= MAX_INSTALLER_PROXIES and
+             all(type(item) is list and len(item) == 2 and all(type(v) is int and v >= 0 for v in item) for item in attributed) and
+             len({tuple(item) for item in attributed}) == len(attributed)), "invalid installer SdProxy attribution")
     require(record["pre_state"] in ("absent",) and record["post_state"] in (None, "uninspected", "absent", "partial", "incompatible",
             "present-unverified", "present-verified"), "invalid dependency state")
     require(all(record[name] is False for name in ("runtime_execution_verified", "device_namespace_verified",
                                                    "preparation_complete")), "installation cannot grant full readiness")
     return record
+
+
+def _tool_directory(recheck):
+    return safe_path(recheck.target.steam / "compatibilitytools.d" / recheck.customization.directory)
 
 
 def _capacity(needs):
@@ -465,7 +508,7 @@ class DependencyInstallSession:
         p = self.plan.recheck
         entries = {**p.inventory.entries, **p.customization.overlays}
         hashes = {name: entries[name]["sha256"] if name in entries else None for name in ("proton", "version", "user_settings.py")}
-        return plan_launch(tool=safe_path(p.target.steam / "compatibilitytools.d" / p.customization.directory),
+        return plan_launch(tool=_tool_directory(p),
             steam=p.target.steam, registration_id=p.record["app_id"], install=p.target.exe.parent, work=p.work, home=p.private_home,
             runtime_environment=p.runtime.environment, expected_hashes=hashes, payload_inventory=p.inventory,
             payload_overlays=p.customization.overlays, target_pin=p.target, runtime_plan=p.runtime, operation="probe",
@@ -506,15 +549,44 @@ class DependencyInstallSession:
         p = self.plan.recheck
         return _settings(p.target.steam, p.settings) == self.base_guard.settings_identity
 
+    def _observe_installer_tree(self):
+        """While the installer runs, remember SdProxy whose ancestry reaches the spawned installer process.
+
+        Only these may later be stopped after their starter has exited. Observation gaps
+        leave a SdProxy unattributed, which refuses rather than widens the stop.
+        """
+        started = self.record["installer"].get("spawned_started")
+        if started is None or self.process is None:
+            return
+        try:
+            parents = process_parents(self.stop.proc_root)
+            view = inventory_processes(self.plan.recheck.compatdata, self.stop.proc_root)
+        except (OSError, ValueError):
+            return
+        known = {tuple(item) for item in self.record["installer"].get("installer_proxies", [])}
+        root = (self.process.pid, started)
+        found = {(p["pid"], p["started"]) for p in view["processes"] if classify_process(p) == "softdenchi-proxy" and
+                 descends_from(parents, (p["pid"], p["started"]), root)}
+        if found - known and len(known | found) <= MAX_INSTALLER_PROXIES:
+            self.record["installer"]["installer_proxies"] = sorted([list(key) for key in known | found],
+                                                                   key=lambda key: (key[1], key[0]))
+            self._save()
+
     def _wait_child(self, section, timeout):
         require(type(timeout) is int and 1 <= timeout <= 120 and self.process is not None, "bounded wait required")
-        try:
-            code = self.process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self.record[section]["status"] = "waiting"
-            self.record["status"] = "needs-user"
-            self._save()
-            return False
+        deadline = time.monotonic() + timeout
+        while True:
+            if section == "installer":
+                self._observe_installer_tree()
+            code = self.process.poll()
+            if code is not None:
+                break
+            if time.monotonic() >= deadline:
+                self.record[section]["status"] = "waiting"
+                self.record["status"] = "needs-user"
+                self._save()
+                return False
+            time.sleep(min(INSTALLER_OBSERVATION_INTERVAL, max(0, deadline - time.monotonic())))
         self.record[section].update(status="exited", unix_exit_status=code)
         self.record.update(phase="gui-check-exited" if section == "gui_check" else "installer-exited", status="running")
         self._save()
@@ -537,20 +609,25 @@ class DependencyInstallSession:
         self.process = None
         return True
 
+    def stop_scope(self):
+        return StopScope(xalia_images=xalia_images(_tool_directory(self.plan.recheck)),
+                         installer_proxies=frozenset(tuple(item) for item in self.record["installer"].get("installer_proxies", [])))
+
     def lingering(self):
-        return summarize_lingering(inventory_processes(self.plan.recheck.compatdata, self.stop.proc_root))
+        return summarize_lingering(inventory_processes(self.plan.recheck.compatdata, self.stop.proc_root), self.stop_scope())
 
     def preview_proxy_stop(self):
-        """Read-only: the targets a confirmed stop would signal, or the refusal reason."""
+        """Read-only: the targets a confirmed stop would signal (with their origins), or the refusal reason."""
+        scope = self.stop_scope()
         first = inventory_processes(self.plan.recheck.compatdata, self.stop.proc_root)
         second = inventory_processes(self.plan.recheck.compatdata, self.stop.proc_root)
+        summary = summarize_lingering(second, scope)
         try:
-            return summarize_lingering(second), proxy_stop_targets(first, second, self._installer_started()), None
+            origins = proxy_stop_origins(first, second, scope)
         except Invalid as error:
-            return summarize_lingering(second), None, str(error)
-
-    def _installer_started(self):
-        return self.record["installer"].get("spawned_started")
+            return summary, None, str(error)
+        summary["stop_origins"] = count_origins(origins)
+        return summary, list(origins), None
 
     def stop_lingering_proxies(self, sender=None):
         """Operator-confirmed: SIGTERM only to SdProxy explained by proxy_stop_targets, then post-checks."""
@@ -561,18 +638,19 @@ class DependencyInstallSession:
             self._guard()
             compatdata, proc_root = self.plan.recheck.compatdata, self.stop.proc_root
             first, second = inventory_processes(compatdata, proc_root), inventory_processes(compatdata, proc_root)
-            entry["before_stop"] = summarize_lingering(second)
+            scope = self.stop_scope()
+            entry["before_stop"] = summarize_lingering(second, scope)
             try:
-                targets = proxy_stop_targets(first, second, self._installer_started())
+                origins = proxy_stop_origins(first, second, scope)
             except Invalid as error:
                 entry["stop"] = {"result": "refused", "reason": str(error)}
                 return self._save()
-            entry["stop"] = {"result": "sending", "planned": len(targets), "signals": [], "signal": "SIGTERM",
-                             "forced_kill": False}
+            targets = list(origins)
+            entry["stop"] = {"result": "sending", "planned": len(targets), "origins": count_origins(origins), "signals": [],
+                             "signal": "SIGTERM", "forced_kill": False}
             self._save()
             try:
-                entry["stop"]["sent"] = signal_proxies(compatdata, targets, proc_root, sender, entry["stop"]["signals"],
-                                                       self._installer_started())
+                entry["stop"]["sent"] = signal_proxies(compatdata, targets, proc_root, sender, entry["stop"]["signals"], scope)
             except (OSError, ValueError) as error:
                 entry["stop"].update(result="aborted", **describe_error(error, "lingering-proxy-signal"))
                 return self._save()
@@ -1004,8 +1082,13 @@ def _print_lingering(summary, output, text):
         print("  " + text(item["role"] + " / " + item["name"] + " [" + item["place"] + "] pid " + str(item["pid"])), file=output)
 
 
-def _confirm_proxy_stop(count, stream, output):
-    print(f"UCManSvcから起動されたSdProxy {count}件だけにSIGTERMを送り、Wineの終了を待ちます。", file=output)
+ORIGIN_TEXT = {"ucmansvc": "UCManSvcから起動されたもの", "installer-run": "今回のインストーラーの実行中にその子孫と確認したもの"}
+
+
+def _confirm_proxy_stop(count, stream, output, origins=None):
+    origins = origins or {"ucmansvc": count}
+    detail = "、".join(f"{ORIGIN_TEXT[name]} {number}件" for name, number in sorted(origins.items()))
+    print(f"このprefixのSdProxy {count}件（{detail}）だけにSIGTERMを送り、Wineの終了を待ちます。", file=output)
     print("ほかのプロセス・ほかのprefix・ゲームには送りません。強制終了（SIGKILL）はしません。", file=output)
     print("送る場合は1、何もしないで記録を残す場合はq: ", end="", file=output, flush=True)
     return stream.readline(32).strip() == "1"
@@ -1019,7 +1102,7 @@ def _offer_session_proxy_stop(session, stream, output, text):
         session.record.setdefault("lingering", {"section": "installer"})["stop"] = {"result": "refused", "reason": reason}
         session._save()
         return
-    if not _confirm_proxy_stop(len(targets), stream, output):
+    if not _confirm_proxy_stop(len(targets), stream, output, summary.get("stop_origins")):
         session.record.setdefault("lingering", {"section": "installer"})["stop"] = {"result": "declined"}
         session._save()
         return
@@ -1031,11 +1114,12 @@ def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sende
     """Menu 9: when the prefix view is not clear, optionally stop UCManSvc-descended SdProxy only."""
     if stop.check()["clear_in_view"]:
         return None
+    scope = StopScope(xalia_images=xalia_images(_tool_directory(base)))
     first, second = inventory_processes(base.compatdata, stop.proc_root), inventory_processes(base.compatdata, stop.proc_root)
-    entry = {"observed": summarize_lingering(second)}
+    entry = {"observed": summarize_lingering(second, scope)}
     _print_lingering(entry["observed"], output, text)
     try:
-        targets = proxy_stop_targets(first, second)
+        targets = proxy_stop_targets(first, second, scope)
     except Invalid as error:
         entry["stop"] = {"result": "refused", "reason": str(error)}
         print("SdProxy限定の停止条件を満たしません: " + text(str(error)) + "。何もしません。", file=output)
@@ -1046,7 +1130,7 @@ def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sende
     entry["stop"] = {"result": "sending", "planned": len(targets), "signals": [], "signal": "SIGTERM", "forced_kill": False}
     try:
         RecheckSession(base, store, None, None, stop)._guard()
-        entry["stop"]["sent"] = signal_proxies(base.compatdata, targets, stop.proc_root, sender, entry["stop"]["signals"])
+        entry["stop"]["sent"] = signal_proxies(base.compatdata, targets, stop.proc_root, sender, entry["stop"]["signals"], scope)
     except (OSError, ValueError) as error:
         entry["stop"].update(result="aborted", **describe_error(error, "lingering-proxy-signal"))
         sent = sum(item["result"] == "sigterm-sent" for item in entry["stop"]["signals"])
@@ -1061,7 +1145,7 @@ def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sende
             observation = stop.check()
         entry["stop"]["result"] = "stopped" if observation["clear_in_view"] else "sigterm-sent-processes-remain"
         if not observation["clear_in_view"]:
-            entry["after_stop"] = summarize_lingering(inventory_processes(base.compatdata, stop.proc_root))
+            entry["after_stop"] = summarize_lingering(inventory_processes(base.compatdata, stop.proc_root), scope)
     except (OSError, ValueError) as error:
         entry["stop"]["observation_error"] = describe_error(error, "lingering-proxy-observation")
     return entry

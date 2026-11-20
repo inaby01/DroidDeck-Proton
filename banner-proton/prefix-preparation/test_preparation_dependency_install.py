@@ -420,12 +420,13 @@ class InstallTests(TRIAL['TrialTests']):
 
     def test_timeout_and_lingering_processes_never_kill(self):
         fake = unittest.mock.Mock()
-        fake.wait.side_effect = [subprocess.TimeoutExpired('DUMMY_PRIVATE', 1), 0]
+        fake.poll.return_value = None
         busy = {'clear_in_view': False, 'active_count': 1, 'unknown_count': 0, 'device_namespace_verified': False}
         with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
                 patch.object(dep.subprocess, 'Popen', return_value=fake):
             session = self.install_session(store).start_gui_check()
             self.assertEqual(session.wait_gui_check(1)['status'], 'needs-user')
+            fake.poll.return_value = 0
             with patch.object(ProcessStopCheck, 'check', return_value=busy):
                 result = session.wait_gui_check(1)
             self.assertEqual(result['status'], 'needs-user')
@@ -595,8 +596,32 @@ class InstallTests(TRIAL['TrialTests']):
                     self.assertEqual(sent, [])
         self.clear_fake()
 
-    def test_installer_run_proxy_whose_starter_exited_is_stopped_only_after_the_installer_spawn(self):
-        # 0.26.2 device run: the first SdProxy started before UCManSvc and its starter had left the view.
+    def remove_fake(self, pid):
+        folder = self.f.proc / str(pid)
+        for item in folder.iterdir():
+            item.unlink()
+        folder.rmdir()
+
+    def installer_with_attributed_proxies(self, store):
+        """The installer's launcher starts the SdProxy tree while it runs, then exits (device 0.26.2)."""
+        session = self.install_session(store).start_gui_check()
+        session.wait_gui_check(10)
+        session.confirm_display(True)
+        session.start_installer()
+        session.process.wait(timeout=10)
+        root = session.process.pid
+        # The launcher itself carries no prefix variables, so it is outside the prefix view.
+        self.fake_process(root, '/opt/fixture/DUMMY_LAUNCHER', 1, 3, environ=b'DUMMY=1\0')
+        self.lingering_tree(proxy_parent=root)
+        result = session.wait_installer(1)
+        self.assertEqual(result['installer']['status'], 'exited-processes-remain')
+        # The starter is gone: the first SdProxy is re-parented outside the view.
+        self.remove_fake(root)
+        self.clear_fake()
+        targets = self.lingering_tree(proxy_parent=900404)
+        return session, targets
+
+    def test_installer_run_proxy_attributed_while_the_installer_ran_is_stopped(self):
         sent = []
 
         def sender(key):
@@ -604,38 +629,52 @@ class InstallTests(TRIAL['TrialTests']):
             self.clear_fake()
         self.clear_fake()
         with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
-                patch.object(dep, 'process_start_time', return_value=25), patch.object(dep, 'PROXY_STOP_WAIT', 2):
-            session, targets = self.installed_with_lingering(store, proxy_parent=900404)
-            self.assertEqual(session.record['installer']['spawned_started'], 25)
-            _summary, planned, reason = session.preview_proxy_stop()
-            self.assertEqual((sorted(planned), reason), (sorted(targets), None))
+                patch.object(dep, 'process_start_time', return_value=3), patch.object(dep, 'PROXY_STOP_WAIT', 2):
+            session, targets = self.installer_with_attributed_proxies(store)
+            self.assertEqual(session.record['installer']['spawned_started'], 3)
+            self.assertEqual(session.record['installer']['installer_proxies'], [list(key) for key in targets])
+            summary, planned, reason = session.preview_proxy_stop()
+            self.assertEqual((planned, reason), (targets, None))
+            self.assertEqual(summary['stop_origins'], {'installer-run': 2})
+            output = io.StringIO()
+            self.assertFalse(dep._confirm_proxy_stop(2, io.StringIO('q\n'), output, summary['stop_origins']))
+            self.assertIn('今回のインストーラーの実行中にその子孫と確認したもの 2件', output.getvalue())
             result = session.stop_lingering_proxies(sender)
         self.assertEqual(sent, [targets[0]])
+        self.assertEqual(result['lingering']['stop']['origins'], {'installer-run': 2})
         self.assertEqual(result['lingering']['stop']['result'], 'sigterm-sent')
         self.assertEqual(result['status'], 'present-verified')
         dep.validate_install_record(result)
         self.clear_fake()
 
-    def test_parentless_proxy_without_an_earlier_installer_spawn_is_refused(self):
+    def test_parentless_proxy_not_attributed_to_this_installer_is_refused(self):
         self.clear_fake()
+        # Without the installer start time nothing is attributed.
         with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
                 patch.object(dep, 'process_start_time', side_effect=OSError('no start time')):
             session, _ = self.installed_with_lingering(store, proxy_parent=900404)
             self.assertNotIn('spawned_started', session.record['installer'])
+            self.assertNotIn('installer_proxies', session.record['installer'])
             result = session.stop_lingering_proxies(lambda key: self.fail('refused stop must not signal'))
         self.assertEqual(result['lingering']['stop'], {'result': 'refused', 'reason': 'proxy origin not confirmed'})
         compat = self.install_plan().recheck.compatdata
-        for bound, extra, reason in ((31, False, 'proxy origin not confirmed'), (25, True, 'service origin not confirmed')):
-            with self.subTest(bound=bound):
+        attributed = dep.StopScope(installer_proxies=frozenset({(900005, 30), (900006, 40)}))
+        cases = ((attributed, 900404, 31, 'proxy origin not confirmed'),     # a later SdProxy from another launch
+                 (attributed, None, None, 'service origin not confirmed'),     # a second services.exe
+                 (dep.StopScope(installer_proxies=frozenset({(900005, 29)})), None, None, 'proxy origin not confirmed'))
+        for scope, other_parent, other_started, reason in cases:
+            with self.subTest(reason=reason, scope=scope):
                 self.clear_fake()
                 self.lingering_tree(proxy_parent=900404)
-                if extra:
+                if other_started is not None:
+                    self.fake_process(900011, self.PROXY, other_parent, other_started)
+                elif reason == 'service origin not confirmed':
                     self.fake_process(900010, self.SERVICES, 1, 11)
                 first, second = (dep.inventory_processes(compat, self.f.proc) for _ in range(2))
                 self.assertEqual(dep.process_start_time(900005, self.f.proc), 30)
                 with self.assertRaisesRegex(Invalid, reason):
-                    dep.proxy_stop_targets(first, second, bound)
-        # Menu 9 has no installer run to bound the origin: the same tree is refused.
+                    dep.proxy_stop_targets(first, second, scope)
+        # Menu 9 has no installer run to attribute the origin: the same tree is refused.
         self.clear_fake()
         plan = self.install_plan().recheck
         self.lingering_tree(proxy_parent=900404)
@@ -646,19 +685,38 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(entry['stop'], {'result': 'refused', 'reason': 'proxy origin not confirmed'})
         self.clear_fake()
 
-    def test_installer_start_time_is_validated_in_the_record(self):
+    def test_ancestry_attribution_requires_matching_start_times(self):
+        parents = {10: (1, 3), 20: (10, 5), 30: (20, 7), 40: (99, 8)}
+        self.assertTrue(dep.descends_from(parents, (30, 7), (10, 3)))
+        self.assertFalse(dep.descends_from(parents, (30, 7), (10, 4)))      # root PID reused
+        self.assertFalse(dep.descends_from(parents, (30, 6), (10, 3)))      # target PID reused
+        self.assertFalse(dep.descends_from(parents, (40, 8), (10, 3)))      # parent outside the map
+        self.assertFalse(dep.descends_from({20: (10, 5), 10: (20, 6)}, (20, 5), (1, 1)))  # parent newer than child
+        self.assertFalse(dep.descends_from({20: (20, 5)}, (20, 5), (1, 1)))
+
+    def test_installer_attribution_is_validated_in_the_record(self):
         with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
-                patch.object(dep, 'process_start_time', return_value=25):
-            session, _ = self.installed_with_lingering(store)
+                patch.object(dep, 'process_start_time', return_value=3):
+            session, _ = self.installer_with_attributed_proxies(store)
             record = dict(session.record)
         self.clear_fake()
-        for broken in ({**record, 'installer': {**record['installer'], 'spawned_started': -1}},
-                       {**record, 'installer': {**record['installer'], 'spawned_started': '25'}},
-                       {**record, 'gui_check': {**record['gui_check'], 'spawned_started': 25}}):
-            with self.assertRaisesRegex(Invalid, 'invalid installer start time'):
-                dep.validate_install_record(broken)
+        installer = record['installer']
+        without_start = {k: v for k, v in installer.items() if k != 'spawned_started'}
+        cases = (({**installer, 'spawned_started': -1}, 'invalid installer start time'),
+                 ({**installer, 'spawned_started': '3'}, 'invalid installer start time'),
+                 (without_start, 'invalid installer SdProxy attribution'),
+                 ({**installer, 'installer_proxies': []}, 'invalid installer SdProxy attribution'),
+                 ({**installer, 'installer_proxies': [[900005, 30], [900005, 30]]}, 'invalid installer SdProxy attribution'),
+                 ({**installer, 'installer_proxies': [[900005, -1]]}, 'invalid installer SdProxy attribution'))
+        for broken, reason in cases:
+            with self.subTest(broken=broken), self.assertRaisesRegex(Invalid, reason):
+                dep.validate_install_record({**record, 'installer': broken})
+        with self.assertRaisesRegex(Invalid, 'invalid installer start time'):
+            dep.validate_install_record({**record, 'gui_check': {**record['gui_check'], 'spawned_started': 3}})
 
-    XALIA = 'Z:\\DUMMY_TOOL\\files\\share\\xalia\\xalia.exe'
+    def tool_xalia(self):
+        tool = dep._tool_directory(self.install_plan().recheck)
+        return 'Z:' + str(tool / 'files/share/xalia/xalia.exe').replace('/', '\\')
 
     def test_wine_and_proton_helpers_seen_on_the_device_are_explained(self):
         # 0.26.2 device run: lsass.exe, tabtip.exe and Proton's xalia.exe stayed beside the SdProxy tree.
@@ -666,20 +724,22 @@ class InstallTests(TRIAL['TrialTests']):
         targets = self.lingering_tree()
         self.fake_process(900007, 'C:\\windows\\system32\\lsass.exe', 900002, 13)
         self.fake_process(900008, 'C:\\windows\\system32\\tabtip.exe', 900003, 14)
-        self.fake_process(900009, self.XALIA, 900003, 15)
+        self.fake_process(900009, self.tool_xalia(), 900003, 15)
         with self.f.store() as store:
             summary, planned, reason = self.install_session(store).preview_proxy_stop()
         self.assertEqual((sorted(planned), reason), (sorted(targets), None))
         self.assertEqual(summary['roles'], {'wineserver': 1, 'wine-infrastructure': 4, 'proton-xalia': 1,
                                             'softdenchi-service': 1, 'softdenchi-proxy': 2})
+        self.assertEqual(summary['stop_origins'], {'ucmansvc': 2})
         self.assertEqual({item['name']: item['place'] for item in summary['processes']}['xalia.exe'], 'proton-share-xalia')
-        self.assertNotIn('DUMMY_TOOL', json.dumps(summary))
+        self.assertNotIn(str(self.f.steam), json.dumps(summary))
         self.clear_fake()
 
     def test_helper_names_outside_their_expected_place_stay_unexplained(self):
+        xalia = self.tool_xalia()
         cases = (('C:\\users\\DUMMY_PRIVATE\\lsass.exe', 900002), ('C:\\DUMMY_PRIVATE\\tabtip.exe', 900003),
-                 (self.XALIA, 900002), (self.XALIA, 900404), ('/DUMMY_TOOL/files/share/xalia/xalia.exe', 900003),
-                 ('C:\\DUMMY_PRIVATE\\xalia.exe', 900003))
+                 (xalia, 900002), (xalia, 900404), (xalia.replace('Z:', '', 1).replace('\\', '/'), 900003),
+                 ('C:\\unrelated\\files\\share\\xalia\\xalia.exe', 900003), ('C:\\DUMMY_PRIVATE\\xalia.exe', 900003))
         for image, parent in cases:
             with self.subTest(image=image, parent=parent):
                 self.clear_fake()
