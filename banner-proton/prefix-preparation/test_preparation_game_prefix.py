@@ -307,7 +307,7 @@ class GamePrefixTests(DEP['InstallTests']):
         plan = self.binding_plan(record, digest)
         self.assertEqual(plan.blockers, ())
         self.assertIsNone(plan.summary()['profile_revision_change'])
-        self.assertIsNone(plan.summary()['tool_droiddeck_redist'])
+        self.assertIsNone(plan.summary()['tool_runtime_writes'])
         before = self.protected()
         lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
         # Changed after planning: the plan digest no longer matches, nothing is written.

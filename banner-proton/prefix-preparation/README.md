@@ -908,7 +908,8 @@ does not check VC++ runtime files.
   `game-folder-file` state also its declared file, so the plan digest and the result
   change when a recipe changes under the same dependency ID.
 - Tool template: the accepted DroidDeck redist state (sections, appended bytes, tail
-  SHA-256, marker hashes) is reported as `tool_droiddeck_redist` in the reuse plan, the
+  SHA-256, marker hashes) is reported as `tool_droiddeck_redist` (renamed to
+  `tool_runtime_writes` in 0.27.4) in the reuse plan, the
   menu 10 preview, the recheck plan and the binding plan, is part of their digests, and
   the recheck readiness check and the binding readiness check before each write require
   it to be unchanged (the menu 10 initialization guard re-verifies the tree but does not
@@ -923,3 +924,28 @@ does not check VC++ runtime files.
   its inspection is `uninspected`.
 - Binding: non-object recipe entries are refused by validation; ready handlers are
   dispatched explicitly.
+
+## CPython caches written into the preparation slot (0.27.4)
+
+Once a game is bound to the preparation slot and launched, CPython writes bytecode caches
+for the tool's own modules (for example `__pycache__/user_settings.cpython-314.pyc` and
+`protonfixes/__pycache__/*.pyc`) into the slot, after which every strict tree check
+stopped with `unexpected-object`. The runtime-contract verifier now also accepts a
+`__pycache__` directory (no group/other write) only in an archive directory that holds
+reviewed `.py` sources, containing only `<stem>.cpython-3NN.pyc` for a `<stem>.py` of the
+archive in that directory: single-link regular files without execute or group/other write
+bits, at most 16 MiB and 256 per directory, timestamp-based (flags 0) with the source
+mtime and size of the installed, verified source. Anything else in it, a cache elsewhere,
+or a changed source is refused with a located `python-cache` diagnostic.
+
+This weakens the tree check: the bytecode is hashed and reported but not compared with
+the source, so a cache rewritten with a matching header would run instead of the
+reviewed source. Only a process of the same user can write there, and such a process
+could also change the sources, which the check still detects. The ordinary strict
+`verify_tree` is unchanged.
+
+The accepted state (DroidDeck redist markers and the caches) is reported as
+`tool_runtime_writes` in the reuse plan, the menu 10 preview, the recheck plan and the
+binding plan, is part of their digests, and the recheck and binding readiness checks
+require it to be unchanged; a game launched from the slot between planning and writing
+therefore stops the step.

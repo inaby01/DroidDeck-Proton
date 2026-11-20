@@ -10,6 +10,7 @@ import os
 import posixpath
 import re
 import stat
+import struct
 import tarfile
 import zlib
 from dataclasses import dataclass, field
@@ -212,6 +213,7 @@ def verify_tree(root, inventory, overlays=None):
 
 
 DROIDDECK_REDIST_CONTRACT = "droiddeck-redist-markers-v1"
+PYTHON_CACHE_CONTRACT = "cpython-timestamp-pyc-beside-reviewed-source-v1"
 REDIST_TEMPLATE = "files/share/default_pfx_arm64"
 REDIST_REGISTRY = REDIST_TEMPLATE + "/system.reg"
 REDIST_MARKERS = (REDIST_TEMPLATE + "/.droiddeck-redists", REDIST_TEMPLATE + "/.droiddeck-redists-checked")
@@ -309,6 +311,10 @@ def _verify_tree(root, inventory, overlays=None, runtime_entry=None, redist=None
             for child in children:
                 require(len(seen) < MAX_MEMBERS, "too many installed payload objects")
                 name = _relative(relative + child.name)
+                if redist is not None and child.name == PYCACHE and name not in expected and name not in seen:
+                    redist.setdefault("python_caches", {})[name] = _python_cache(directory_fd, relative, expected)
+                    seen[name] = None
+                    continue
                 if redist is not None and name in REDIST_MARKERS and name not in expected and name not in seen:
                     redist["markers"][name.rsplit("/", 1)[1]] = _redist_marker(directory_fd, child.name)
                     seen[name] = None
@@ -390,6 +396,64 @@ def _verify_tree(root, inventory, overlays=None, runtime_entry=None, redist=None
             "payload_trust": "not-established-by-identity-check", "preparation_complete": False, "writes": []}
 
 
+PYCACHE = "__pycache__"
+MAX_PYCACHE_FILES = 256
+PYC_LIMIT = 16 * 1024 * 1024
+_PYC_NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_]{0,127})\.cpython-3[0-9]{1,2}\.pyc")
+
+
+def _python_cache(parent_fd, relative, expected):
+    """A ``__pycache__`` that CPython wrote beside reviewed sources while the tool ran.
+
+    Only ``<stem>.cpython-3NN.pyc`` for a ``<stem>.py`` of the archive in the same directory,
+    single-link regular files without execute or group/other write bits, timestamp-based
+    (flags 0) with the source mtime and size of the installed, verified source. The bytecode
+    itself is hashed and reported, not compared with the source.
+    """
+    location = relative + PYCACHE
+    # Only beside reviewed sources: a directory of the archive that holds at least one .py file.
+    if not any(name.startswith(relative) and name.endswith(".py") and "/" not in name[len(relative):] and
+               entry.get("kind") in ("file", "hardlink") for name, entry in expected.items()):
+        raise TreeMismatch("python-cache", location)
+    info = os.stat(PYCACHE, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o7022:
+        raise TreeMismatch("python-cache", location, ("kind", "mode"), actual_mode=stat.S_IMODE(info.st_mode))
+    fd = os.open(PYCACHE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    files = {}
+    try:
+        unchanged(info, os.fstat(fd))
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                match = _PYC_NAME.fullmatch(entry.name)
+                source = match and expected.get(relative + match.group(1) + ".py")
+                if len(files) >= MAX_PYCACHE_FILES or not source or source.get("kind") not in ("file", "hardlink"):
+                    raise TreeMismatch("python-cache", location)
+                files[entry.name] = _pyc(fd, entry.name, parent_fd, match.group(1) + ".py", location)
+        unchanged(info, os.fstat(fd))
+    finally:
+        os.close(fd)
+    return {"files": len(files), "digest": digest_json(files)}
+
+
+def _pyc(cache_fd, name, parent_fd, source_name, location):
+    info = os.stat(name, dir_fd=cache_fd, follow_symlinks=False)
+    if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 16 <= info.st_size <= PYC_LIMIT and
+            not stat.S_IMODE(info.st_mode) & 0o7133):
+        raise TreeMismatch("python-cache", location + "/" + name, ("kind", "mode", "size"), actual_mode=stat.S_IMODE(info.st_mode))
+    source = os.stat(source_name, dir_fd=parent_fd, follow_symlinks=False)
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=cache_fd)
+    with os.fdopen(fd, "rb") as stream:
+        unchanged(info, os.fstat(stream.fileno()))
+        header = stream.read(16)
+        stream.seek(0)
+        digest = _hash(stream, info.st_size)
+        unchanged(info, os.fstat(stream.fileno()))
+    flags, mtime, size = struct.unpack("<III", header[4:16])
+    if flags != 0 or mtime != int(source.st_mtime) & 0xFFFFFFFF or size != source.st_size & 0xFFFFFFFF:
+        raise TreeMismatch("python-cache", location + "/" + name, ("source-mtime-or-size",))
+    return {"size": info.st_size, "sha256": digest, "magic": header[:4].hex()}
+
+
 def _redist_marker(directory_fd, name):
     """A small single-link regular file without execute or group/other write bits; content is only hashed."""
     info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -413,10 +477,11 @@ def verify_fex_runtime_tree(root, inventory, overlays=None):
     """One source-reviewed empty directory and DroidDeck's redist markers; ordinary verify_tree stays strict.
 
     No configuration file, symlink, other mode/owner or arbitrary ignore-list can
-    enter this envelope. The only other tolerated change is DroidDeck's one-time
+    enter this envelope. The only other tolerated changes are DroidDeck's one-time
     redist step in the default prefix template (a bounded registry tail of two key
-    families and two marker files), reported as ``droiddeck_redist``. Nothing is
-    created, removed, chmodded or adopted.
+    families and two marker files), reported as ``droiddeck_redist``, and CPython's
+    ``__pycache__`` beside reviewed sources (timestamp pycs matching each source),
+    reported as ``python_caches``. Nothing is created, removed, chmodded or adopted.
     """
     root = safe_path(root)
     require(inventory.entries.get("files/share/fex-emu", {}).get("kind") == "directory" and
@@ -448,11 +513,19 @@ def verify_fex_runtime_tree(root, inventory, overlays=None):
     redist = {"markers": {}}
     result = _verify_tree(root, inventory, overlays, None if before is None else {"kind": "directory", "mode": 0o700}, redist)
     require(observe() == before, "FEX runtime directory changed during verification")
+    caches = redist.pop("python_caches", None)
     result.update(runtime_contract=FEX_RUNTIME_CONTRACT, runtime_directory_present=before is not None,
                   runtime_directory_empty=before is not None, execution_authorized=False,
                   droiddeck_redist={"contract": DROIDDECK_REDIST_CONTRACT, **redist}
-                  if redist["markers"] or "registry_sections" in redist else None)
+                  if redist["markers"] or "registry_sections" in redist else None,
+                  python_caches=None if caches is None else {"contract": PYTHON_CACHE_CONTRACT, "directories": caches})
     return result
+
+
+def runtime_writes(result):
+    """What the runtime contract accepted beyond the archive (None when nothing), for plans and records."""
+    writes = {key: result.get(key) for key in ("droiddeck_redist", "python_caches") if result.get(key) is not None}
+    return writes or None
 
 
 def inspect_tree_differences(root, inventory, overlays=None, limit=128):

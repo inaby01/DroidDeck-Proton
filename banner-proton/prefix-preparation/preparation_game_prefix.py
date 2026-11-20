@@ -213,7 +213,7 @@ class GamePrefixPlan:
                                                                               "edition_status")},
                     profile_selection=self.selection, executable={"sha256": self.exe["sha256"], "size": self.exe["size"]},
                     dependencies=list(self.dependencies), exe_path_ascii=self.exe_path_ascii,
-                    tool_droiddeck_redist=self.trial.placement.installation.summary().get("tool_droiddeck_redist"), binding_written=False,
+                    tool_runtime_writes=self.trial.placement.installation.summary().get("tool_runtime_writes"), binding_written=False,
                     dependencies_installed=False, existing_prefix_modified=False)
         return base
 
@@ -442,7 +442,7 @@ class GameBindingPlan:
         return {"scope": "registered-game-target-only-binding", "input_digest": self.digest, "app_id": self.base.record["app_id"],
                 "origin": self.base.record["trial_id"], "profile_id": self.profile["profile_id"],
                 "profile_revision_change": self.profile_revision_change, "exe_path_ascii": self.exe_path_ascii,
-                "tool_droiddeck_redist": self.base.tool_redist,
+                "tool_runtime_writes": self.base.tool_writes,
                 "dependencies": list(self.dependencies), "binding": self.binding.summary(),
                 "tool_directory": self.base.customization.directory, "blockers": list(self.blockers),
                 "game_launched": False, "authentication_performed": False, "preparation_complete": False, "writes": []}
@@ -529,7 +529,7 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
     """
     from preparation_binding import apply_binding
     from preparation_execution import _prefix
-    from preparation_payload import verify_fex_runtime_tree
+    from preparation_payload import runtime_writes, verify_fex_runtime_tree
     from preparation_softdenchi_recipe import softdenchi_recipe, validate_recipe
     recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
     require(isinstance(plan, GameBindingPlan) and confirmation == plan.digest, "exact binding confirmation required")
@@ -544,8 +544,8 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
     def ready():
         base.target.verify()
         base.runtime.verify()
-        require(verify_fex_runtime_tree(tool, base.inventory, base.customization.overlays)["droiddeck_redist"] == base.tool_redist,
-                "tool template changed")
+        require(runtime_writes(verify_fex_runtime_tree(tool, base.inventory, base.customization.overlays)) == base.tool_writes,
+                "tool runtime writes changed")
         require_initialized_directories(base.compatdata, base.record)
         require(_prefix(base.compatdata) == base.prefix_version, "game prefix version changed")
         # Same check as planning: an unclear view before or after inspection is never verified.

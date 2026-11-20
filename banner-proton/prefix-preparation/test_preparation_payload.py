@@ -280,6 +280,85 @@ class PayloadTests(unittest.TestCase):
         with self.assertRaises(payload.TreeMismatch):
             payload.verify_fex_runtime_tree(self.installed, inventory)
 
+    def pycache_fixture(self):
+        """FEX contract tree with two reviewed Python sources, as a launched tool sees them."""
+        self.installed.chmod(0o755)
+        (self.installed / 'files/share/fex-emu').mkdir(parents=True)
+        (self.installed / 'pkg').mkdir()
+        sources = {'tool.py': b'VALUE = 1\n', 'pkg/mod.py': b'def f():\n    return 2\n'}
+        for name, data in sources.items():
+            (self.installed / name).write_bytes(data)
+            (self.installed / name).chmod(0o644)
+        self.make_archive(MEMBERS + [('files/share', 'directory', None, 0o755), ('files/share/fex-emu', 'directory', None, 0o755),
+                                    ('pkg', 'directory', None, 0o755)] +
+                          [(name, 'file', data, 0o644) for name, data in sources.items()])
+        (self.installed / payload.FEX_RUNTIME_DIRECTORY).mkdir(mode=0o700)
+        return self.inspect()
+
+    def write_pyc(self, source, name=None, flags=0, mtime=None, size=None, mode=0o644):
+        import struct
+        source = self.installed / source
+        info = source.stat()
+        cache = source.parent / '__pycache__'
+        cache.mkdir(mode=0o755, exist_ok=True)
+        path = cache / (name or source.stem + '.cpython-314.pyc')
+        header = b'\x2b\x0e\r\n' + struct.pack('<III', flags, int(info.st_mtime) if mtime is None else mtime,
+                                                    info.st_size if size is None else size)
+        path.write_bytes(header + b'synthetic bytecode, never executed')
+        path.chmod(mode)
+        return path
+
+    def test_runtime_contract_accepts_cpython_caches_beside_reviewed_sources(self):
+        inventory = self.pycache_fixture()
+        self.assertIsNone(payload.verify_fex_runtime_tree(self.installed, inventory)['python_caches'])
+        self.write_pyc('tool.py')
+        self.write_pyc('pkg/mod.py')
+        result = payload.verify_fex_runtime_tree(self.installed, inventory)
+        caches = result['python_caches']
+        self.assertEqual(caches['contract'], payload.PYTHON_CACHE_CONTRACT)
+        self.assertEqual({name: item['files'] for name, item in caches['directories'].items()},
+                         {'__pycache__': 1, 'pkg/__pycache__': 1})
+        self.assertEqual(payload.runtime_writes(result), {'python_caches': caches})
+        with self.assertRaises(Invalid):
+            payload.verify_tree(self.installed, inventory)
+
+    def test_runtime_contract_refuses_other_python_cache_content(self):
+        cases = {
+            'no reviewed source': {'source': 'tool.py', 'name': 'other.cpython-314.pyc'},
+            'optimized name': {'source': 'tool.py', 'name': 'tool.cpython-314.opt-1.pyc'},
+            'hash-based pyc': {'source': 'tool.py', 'flags': 1},
+            'other source mtime': {'source': 'tool.py', 'mtime': 1},
+            'other source size': {'source': 'tool.py', 'size': 1},
+            'executable': {'source': 'tool.py', 'mode': 0o755},
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(label=label):
+                inventory = self.pycache_fixture()
+                self.write_pyc(**kwargs)
+                with self.assertRaises(payload.TreeMismatch) as caught:
+                    payload.verify_fex_runtime_tree(self.installed, inventory)
+                self.assertEqual(caught.exception.tree_diagnostic['check'], 'python-cache')
+                self.tearDown()
+                self.setUp()
+        inventory = self.pycache_fixture()
+        self.write_pyc('tool.py')
+        (self.installed / '__pycache__/notes.txt').write_bytes(b'x')
+        with self.assertRaises(payload.TreeMismatch):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        (self.installed / '__pycache__/notes.txt').unlink()
+        (self.installed / '__pycache__').chmod(0o775)
+        with self.assertRaises(payload.TreeMismatch):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        (self.installed / '__pycache__').chmod(0o755)
+        # A cache somewhere without reviewed sources, or a changed source, is still refused.
+        (self.installed / 'files/__pycache__').mkdir()
+        with self.assertRaises(payload.TreeMismatch):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        (self.installed / 'files/__pycache__').rmdir()
+        (self.installed / 'tool.py').write_bytes(b'VALUE = 2\n')
+        with self.assertRaises(payload.TreeMismatch):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+
     def test_difference_audit_aggregates_changes_extras_and_missing_without_adoption(self):
         self.installed.chmod(0o755)
         (self.installed / "proton").write_bytes(b"changed-content")

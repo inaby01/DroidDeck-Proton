@@ -22,6 +22,7 @@ from preparation_installation import CAPTURE
 from preparation_payload import (
     FEX_RUNTIME_CONTRACT,
     inspect_archive,
+    runtime_writes,
     verify_fex_runtime_tree,
 )
 from preparation_probe import inspect_existing_probe_registration
@@ -91,14 +92,14 @@ class RecheckPlan:
     prefix_version: str
     # Journal of the origin record: probe trials, or registered-game new prefixes.
     records: str = "trials"
-    # DroidDeck's redist markers accepted in the tool template by the runtime contract (None if absent).
-    tool_redist: object = None
+    # Runtime writes the contract accepted in the tool (DroidDeck redist markers, CPython caches), or None.
+    tool_writes: object = None
 
     def summary(self):
         return {"scope": SCOPE, "input_digest": self.digest, "trial_id": self.record["trial_id"],
                 "origin_status": self.record["status"], "app_id": self.record["app_id"],
                 "prefix": str(self.compatdata), "command": ["runinprefix", "cmd.exe", "/d", "/c", "exit", "0"],
-                "runtime_contract": FEX_RUNTIME_CONTRACT, "tool_droiddeck_redist": self.tool_redist,
+                "runtime_contract": FEX_RUNTIME_CONTRACT, "tool_runtime_writes": self.tool_writes,
                 "prefix_reinitialized": False,
                 "old_trial_record_updated": False, "execution_authorized": False,
                 "device_namespace_verified": False, "preparation_complete": False, "writes": []}
@@ -174,7 +175,7 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
         renderer, label=runtime.label, umask=int(runtime.umask, 8), tool_slot="preparation")
     progress.append("recheck-fex-tool-tree")
     tool = safe_path(steam / "compatibilitytools.d" / custom.directory, steam)
-    tool_redist = verify_fex_runtime_tree(tool, inventory, custom.overlays)["droiddeck_redist"]
+    tool_writes = runtime_writes(verify_fex_runtime_tree(tool, inventory, custom.overlays))
     progress.append("recheck-payload-permissions")
     policy = reviewed_payload_permissions(inventory, steam, review)
     if policy is not None:
@@ -199,9 +200,9 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
     signature = {"version": VERSION, "scope": SCOPE, "records": records, "record": record_sha256, "archive": inventory.archive_sha512,
                  "inventory": inventory.digest, "customization": custom.digest, "runtime": runtime.identity_digest,
                  "target": target.digest, "prefix_version": version, "work": str(work), "home": str(private_home),
-                 "contract": FEX_RUNTIME_CONTRACT, "settings": _settings(steam, settings), "tool_droiddeck_redist": tool_redist}
+                 "contract": FEX_RUNTIME_CONTRACT, "settings": _settings(steam, settings), "tool_runtime_writes": tool_writes}
     return RecheckPlan(digest_json(signature), record, record_sha256, store_root, probe_store, inventory, custom,
-                      runtime, target, review, settings, work, private_home, compatdata, version, records, tool_redist)
+                      runtime, target, review, settings, work, private_home, compatdata, version, records, tool_writes)
 
 
 def validate_recheck_record(record):
@@ -258,8 +259,9 @@ class RecheckSession:
         policy = reviewed_payload_permissions(p.inventory, p.target.steam, p.review)
         if policy is not None:
             policy.guard()
-        require(verify_fex_runtime_tree(safe_path(p.target.steam / "compatibilitytools.d" / p.customization.directory), p.inventory,
-                                        p.customization.overlays)["droiddeck_redist"] == p.tool_redist, "tool template changed")
+        require(runtime_writes(verify_fex_runtime_tree(safe_path(p.target.steam / "compatibilitytools.d" / p.customization.directory),
+                                                       p.inventory, p.customization.overlays)) == p.tool_writes,
+                "tool runtime writes changed")
         _private_existing(p.compatdata, p.target.steam)
         _aliases(p.target.steam, p.record["app_id"])
         require(_prefix(p.compatdata) == p.prefix_version, "managed prefix version changed")

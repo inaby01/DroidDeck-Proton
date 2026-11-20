@@ -232,7 +232,9 @@ class TrialTests(BASE['StaticFixture']):
             (cache / 'DUMMY_PRIVATE').write_bytes(b'DUMMY_SECRET')
             original = session.wait(1)
         self.assertEqual(original['status'], 'failed')
-        self.assertEqual(original['error']['tree_diagnostic']['check'], 'unexpected-object')
+        # Refused under the runtime contract's cache rule; the unknown file name is not disclosed.
+        self.assertEqual(original['error']['tree_diagnostic']['check'], 'python-cache')
+        self.assertEqual(original['error']['tree_diagnostic']['relative_path'], '__pycache__')
         record_file = self.f.store_root / 'trials' / (original['trial_id'] + '.json')
         before = record_file.read_bytes()
         with patch('subprocess.Popen', side_effect=AssertionError('audit never executes')):
