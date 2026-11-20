@@ -1026,8 +1026,16 @@ reviewed placement, game preparation and dependency installation.
   inspection with a clear view) moves on to binding. Moving on from a record whose
   post-inspection never ran is recorded as a separate read-only check. Partial, unverified
   or incompatible states stop and nothing is repaired.
-- Binding: decided by the current three settings files. When the plan changes nothing,
-  the game is reported as bound; an earlier failed binding, or a verified binding whose
-  files changed since, stops.
+- Before the confirmation (nothing written yet): a profile dependency that is not
+  `ready` stops; for a new prefix the installer file is inspected and bound to the
+  recipe bootstrap; binding records are read (any tool version, shape checked) so an
+  unreadable one stops here. Unreadable game prefix records are counted and shown but
+  do not hide other registrations.
+- Binding: decided by the current three settings files, after the dependencies (an
+  unverified dependency stops even for a bound game). All files bound: reported as
+  bound. Some bound: stops. None bound: binds, unless an earlier binding of this game
+  was verified or wrote files.
+- Result: the fixed values are kept per item (digests); a stop names the changed items.
+  Each step keeps its plan summary and record, also when an exception interrupts it.
 - Not done: registering the game, authentication and the first launch. Silent
   installation on device Wine is not yet measured.
