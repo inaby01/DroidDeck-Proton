@@ -229,9 +229,11 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
     the full stop conditions. After each send the signaled SdProxy is given time to
     exit, and before the next send a fresh view must be fully readable and explained:
     nothing unreadable, unclassified, with a conflicting prefix, or a SdProxy outside
-    the batch. A view that is not yet so is read again for a bounded time (a process
-    that is exiting is briefly unreadable); if none qualifies, the stop aborts and the
-    unreadable PIDs of the last view go to ``detail``. A pinned target that has already
+    the batch. A view that is not yet so is read again for a bounded time only while it
+    merely shrinks (every readable process and every unreadable PID was in the confirmed
+    view; a process that is exiting is briefly unreadable); anything new, or no
+    qualifying view in time, aborts and the unreadable PIDs of the last view go to
+    ``detail``. A pinned target that has already
     exited is recorded as gone. ``log`` is filled per target as it happens, so a partial
     result survives an exception. ``sender`` replaces the kernel call in tests;
     production always uses pidfds.
@@ -265,6 +267,8 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
         first, second = inventory_processes(compatdata, proc_root), inventory_processes(compatdata, proc_root)
         require(proxy_stop_targets(first, second, scope) == batch, "stop candidates changed")
         confirmed = {(p["pid"], p["started"]): p for p in second["processes"] if (p["pid"], p["started"]) in batch}
+        confirmed_keys = {(p["pid"], p["started"]) for p in second["processes"]}
+        confirmed_pids = {p["pid"] for p in second["processes"]}
         last_sent = None
         for key in batch:
             if last_sent is not None:
@@ -277,7 +281,12 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
                         present = revalidate(current, key)
                         break
                     except Invalid:
-                        if time.monotonic() >= deadline:
+                        # Read again only while the view merely shrinks: every readable process and
+                        # every unreadable PID was in the confirmed view. Anything new aborts at once.
+                        settling = (current["unreadable_count"] == len(current["unreadable_pids"]) and
+                                    {(p["pid"], p["started"]) for p in current["processes"]} <= confirmed_keys and
+                                    set(current["unreadable_pids"]) <= confirmed_pids)
+                        if not settling or time.monotonic() >= deadline:
                             if current["unreadable_pids"]:
                                 detail["unreadable_pids"] = list(current["unreadable_pids"])
                             raise
@@ -1171,7 +1180,7 @@ def _offer_session_proxy_stop(session, stream, output, text):
     elif stop.get("result") == "sigterm-sent-processes-remain":
         print(f"SIGTERMを{sent}件送りましたが、待機時間内にこのprefixのプロセスが終了しませんでした。", file=output)
     print("停止後の状態: " + text(result["status"]), file=output)
-    if result["status"] != "present-verified":
+    if result.get("post_state") in (None, "uninspected"):
         print("導入後の検査は済んでいません。" + RESTART_THEN_MENU9, file=output)
 
 

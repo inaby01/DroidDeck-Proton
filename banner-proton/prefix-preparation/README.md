@@ -828,8 +828,10 @@ that is exiting is briefly unreadable (empty argv or a state change between read
 after each SIGTERM, the tool waits up to 5 s for the signaled SdProxy to exit (its pidfd
 turns readable), then reads the view again every 0.25 s for up to 5 s until it is fully
 readable and explained; only such a view allows the next send, and a target that has
-exited meanwhile is recorded as gone. If no view qualifies, the stop aborts as before and
+exited meanwhile is recorded as gone. Reading again is allowed only while the view merely
+shrinks (every readable process and every unreadable PID was in the confirmed view);
+anything new still aborts at once. If no view qualifies, the stop aborts as before and
 the record keeps the unreadable PIDs of the last view (`stop.unreadable_pids`, at most
 16; process summaries also carry `unreadable_pids`). Menu 8 now prints why a stop was
 refused or aborted, how many SIGTERMs were sent, and, unless the post-inspection passed,
-to restart DroidDeck and check the prefix with menu 9.
+to restart DroidDeck and check the prefix with menu 9 when no post-inspection ran.

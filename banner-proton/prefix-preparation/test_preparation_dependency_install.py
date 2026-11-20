@@ -719,6 +719,59 @@ class InstallTests(TRIAL['TrialTests']):
         dep.validate_install_record(result)
         self.clear_fake()
 
+    def test_anything_new_after_a_send_aborts_without_reading_again(self):
+        plan = self.install_plan().recheck
+        real_inventory = dep.inventory_processes
+        for case in ('foreign-process', 'new-unreadable-pid'):
+            with self.subTest(case=case):
+                self.clear_fake()
+                targets = self.lingering_tree()
+                reads = []
+
+                def sender(key, case=case, targets=targets, reads=reads):
+                    if key != targets[0]:
+                        self.fail('a view with something new must not allow the next send')
+                    reads.append(0)
+                    if case == 'foreign-process':
+                        self.fake_process(900007, 'C:\\users\\DUMMY_PRIVATE\\tool.exe', 900002, 50)
+                    else:
+                        self.fake_process(900008, self.PROXY, 900002, 50)
+                        (self.f.proc / '900008' / 'cmdline').write_bytes(b'')
+
+                def inventory(*args, reads=reads, **kwargs):
+                    if reads:
+                        reads[0] += 1
+                    return real_inventory(*args, **kwargs)
+                log, detail = [], {}
+                with patch.object(dep, 'inventory_processes', side_effect=inventory), \
+                        patch.object(dep, 'SIGNAL_SETTLE_WAIT', 30), patch.object(dep, 'SIGNAL_SETTLE_INTERVAL', 0), \
+                        self.assertRaises(Invalid):
+                    dep.signal_proxies(plan.compatdata, targets, self.f.proc, sender, log, dep.NO_SCOPE, detail)
+                self.assertEqual(reads, [1])
+                self.assertEqual([item['result'] for item in log], ['sigterm-sent'])
+                self.assertEqual(detail.get('unreadable_pids'), [900008] if case == 'new-unreadable-pid' else None)
+        self.clear_fake()
+
+    def test_menu8_names_the_missing_inspection_only_when_it_did_not_run(self):
+        class Session:
+            def __init__(self, record):
+                self.record = record
+
+            def preview_proxy_stop(self):
+                return {'processes': [], 'unreadable_count': 0, 'stop_origins': {'installer-run': 1}}, [(1, 2)], None
+
+            def stop_lingering_proxies(self):
+                return self.record
+        sent = {'stop': {'result': 'sigterm-sent', 'signals': [{'result': 'sigterm-sent'}]}}
+        for status, post_state, missing in (('partial', 'partial', False), ('present-verified', 'present-verified', False),
+                                            ('needs-user', None, True), ('needs-user', 'uninspected', True)):
+            with self.subTest(post_state=post_state):
+                output = io.StringIO()
+                dep._offer_session_proxy_stop(Session({'status': status, 'post_state': post_state, 'lingering': sent}),
+                                              io.StringIO('1\n'), output, str)
+                self.assertIn('停止後の状態: ' + status, output.getvalue())
+                self.assertEqual('導入後の検査は済んでいません' in output.getvalue(), missing)
+
     def test_parentless_proxy_not_attributed_to_this_installer_is_refused(self):
         self.clear_fake()
         # Without the installer start time nothing is attributed.
