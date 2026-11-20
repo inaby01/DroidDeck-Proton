@@ -139,7 +139,8 @@ def validate_trial_record(record, scope=SCOPE, id_prefix="trial-"):
     fields(record, ("schema_version", "tool_version", "scope", "trial_id", "app_id", "input_digest", "status", "phase",
                     "exit_code", "prefix_version_sha256", "runtime_execution_verified", "device_namespace_verified",
                     "preparation_complete"),
-           ("error", "stop_observation", "settings_identity_unchanged", "profile", "prefix_identity"))
+           ("error", "stop_observation", "settings_identity_unchanged", "profile", "prefix_identity",
+            "wineprefix_identity"))
     require(("profile" in record) == (scope != SCOPE), "game records require a profile; probe trials carry none")
     if "profile" in record:
         fields(record["profile"], ("profile_id", "revision", "profile_digest", "exe_sha256", "exe_size", "selection",
@@ -152,12 +153,16 @@ def validate_trial_record(record, scope=SCOPE, id_prefix="trial-"):
         # The created prefix directory is recorded before spawn and is required from then on.
         require(("prefix_identity" in record) == (record["phase"] in ("spawn", "waiting", "deadline-child-not-killed",
                                                                       "post-checks")), "game prefix identity inconsistent")
+        # The WINEPREFIX identity is recorded with a successful initialization only.
+        require(("wineprefix_identity" in record) == (record["status"] == "initialized-unverified"),
+                "game Wine prefix identity inconsistent")
     else:
-        require("prefix_identity" not in record, "probe trials carry no prefix identity")
-    if "prefix_identity" in record:
-        fields(record["prefix_identity"], ("device", "inode"))
-        require(all(type(record["prefix_identity"][name]) is int and record["prefix_identity"][name] >= 0
-                    for name in ("device", "inode")), "invalid game prefix identity")
+        require("prefix_identity" not in record and "wineprefix_identity" not in record, "probe trials carry no prefix identity")
+    for name in ("prefix_identity", "wineprefix_identity"):
+        if name in record:
+            fields(record[name], ("device", "inode"))
+            require(all(type(record[name][key]) is int and record[name][key] >= 0 for key in ("device", "inode")),
+                    "invalid game prefix identity")
     require(type(record["schema_version"]) is int and record["schema_version"] == 1 and record["scope"] == scope,
             "unsupported trial record")
     require(type(record["tool_version"]) is str and len(record["tool_version"]) <= 64, "invalid trial version")
@@ -201,6 +206,9 @@ class TrialSession:
 
     def _prefix_created(self):
         """Hook for scopes that bind later steps to the created prefix directory."""
+
+    def _initialized(self):
+        """Hook for scopes that bind later steps to the initialized WINEPREFIX."""
 
     def _save(self):
         validate_trial_record(self.record, self.scope, self.id_prefix)
@@ -311,6 +319,7 @@ class TrialSession:
                 self._guard()
                 _identities(self.launch.spec["tool"], self.launch.spec["expected_hashes"])
                 self.record["prefix_version_sha256"] = _prefix(self.plan.compatdata)
+                self._initialized()
                 self.record["status"] = "initialized-unverified"
         except (OSError, ValueError, TypeError, KeyError) as error:
             self.record.update(status="failed", error={"check": "trial-post-checks", "error_class": type(error).__name__,

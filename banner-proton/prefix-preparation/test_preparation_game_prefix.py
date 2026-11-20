@@ -228,9 +228,12 @@ class GamePrefixTests(DEP['InstallTests']):
     def test_record_binds_the_created_prefix_directory_and_registration(self):
         record, _ = self.initialize()
         self.assertEqual(record['prefix_identity'], game.prefix_identity(self.game_compat))
+        self.assertEqual(record['wineprefix_identity'], game.wineprefix_identity(self.game_compat))
         self.assertEqual({name: record['profile'][name] for name in ('exe_path_sha256', 'title_sha256')},
                          game.registration_identity(self.f.exe, self.registration('42')['title']))
         for broken in ({k: v for k, v in record.items() if k != 'prefix_identity'},
+                       {k: v for k, v in record.items() if k != 'wineprefix_identity'},
+                       {**record, 'status': 'failed'},
                        {**record, 'prefix_identity': {'device': -1, 'inode': 1}},
                        {**record, 'profile': {k: v for k, v in record['profile'].items() if k != 'title_sha256'}}):
             with self.subTest(broken=sorted(broken)), self.assertRaises(Invalid):
@@ -254,6 +257,17 @@ class GamePrefixTests(DEP['InstallTests']):
         self.assertEqual(caught.exception.preparation_check, 'recheck-prefix')
         self.game_compat.rename(moved)
         (self.home / 'original-prefix').rename(self.game_compat)
+        self.assertEqual(self.plan_install(record, digest).blockers, ())
+        # The prefix root and version stay; only the WINEPREFIX inside is swapped for a copy.
+        pfx = self.game_compat / 'pfx'
+        shutil.copytree(pfx, self.home / 'pfx-copy', symlinks=True)
+        pfx.rename(self.home / 'pfx-original')
+        (self.home / 'pfx-copy').rename(pfx)
+        with self.assertRaisesRegex(Invalid, 'game Wine prefix replaced') as caught:
+            self.plan_install(record, digest)
+        self.assertEqual(caught.exception.preparation_check, 'recheck-prefix')
+        shutil.rmtree(pfx)
+        (self.home / 'pfx-original').rename(pfx)
         self.assertEqual(self.plan_install(record, digest).blockers, ())
         version = self.game_compat / 'version'
         version.write_text(version.read_text() + 'other\n')

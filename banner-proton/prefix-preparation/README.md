@@ -782,3 +782,8 @@ content registered from another folder, is refused. The readiness check before e
 binding write uses the planning inspection itself, so a process observed during the
 dependency inspection stops the write. A device-number change across reboots would
 also refuse; that has not been measured on the device.
+
+0.26.2 also records the identity of the WINEPREFIX (`pfx`) created by a successful
+initialization and requires it at the same points, so swapping only `pfx` while the
+prefix root and version stay is refused. Restoring files inside the same directories
+is not detected by these identities.

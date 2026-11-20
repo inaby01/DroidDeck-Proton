@@ -35,14 +35,30 @@ ID_PREFIX = "gprefix-"
 HANDLERS = ("softdenchi-interactive", "mfc-local")
 
 
-def prefix_identity(compatdata):
-    """Directory identity of the created prefix root; a restored or replaced prefix never matches."""
-    fd = os.open(safe_path(compatdata), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def _directory_identity(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
     finally:
         os.close(fd)
     return {"device": info.st_dev, "inode": info.st_ino}
+
+
+def prefix_identity(compatdata):
+    """Directory identity of the created prefix root; a restored or replaced prefix never matches."""
+    return _directory_identity(safe_path(compatdata))
+
+
+def wineprefix_identity(compatdata):
+    """Directory identity of the WINEPREFIX (pfx) created by the initialization inside the prefix root."""
+    compatdata = safe_path(compatdata)
+    return _directory_identity(safe_path(compatdata / "pfx", compatdata))
+
+
+def require_initialized_directories(compatdata, record):
+    """Directory swaps only: restoring files inside the same directories is not detected."""
+    require(prefix_identity(compatdata) == record["prefix_identity"], "game prefix replaced since initialization")
+    require(wineprefix_identity(compatdata) == record["wineprefix_identity"], "game Wine prefix replaced since initialization")
 
 
 def registration_identity(exe, title):
@@ -202,6 +218,10 @@ class GamePrefixSession(trial.TrialSession):
     def _prefix_created(self):
         # Saved before spawn: later steps accept only this directory, never a replacement at the same path.
         self.record["prefix_identity"] = prefix_identity(self.plan.compatdata)
+
+    def _initialized(self):
+        # The WINEPREFIX exists only after the fixed initialization; bind later steps to it as well.
+        self.record["wineprefix_identity"] = wineprefix_identity(self.plan.compatdata)
 
     def _guard(self):
         super()._guard()
@@ -407,7 +427,7 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
         base.target.verify()
         base.runtime.verify()
         verify_fex_runtime_tree(tool, base.inventory, base.customization.overlays)
-        require(prefix_identity(base.compatdata) == base.record["prefix_identity"], "game prefix replaced")
+        require_initialized_directories(base.compatdata, base.record)
         require(_prefix(base.compatdata) == base.prefix_version, "game prefix version changed")
         # Same check as planning: an unclear view before or after inspection is never verified.
         states = _dependency_states(plan.profile, plan.recipes, base.compatdata, recipe, stop_check)

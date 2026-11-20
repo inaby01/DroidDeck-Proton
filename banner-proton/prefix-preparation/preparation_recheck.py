@@ -67,9 +67,9 @@ def _private_existing(path, anchor):
 
 def _initialized_prefix(compatdata, record, version):
     """A registered-game record vouches only for the directory and version it initialized."""
-    from preparation_game_prefix import prefix_identity
+    from preparation_game_prefix import require_initialized_directories
     require(version == record["prefix_version_sha256"], "game prefix version differs from initialization")
-    require(prefix_identity(compatdata) == record["prefix_identity"], "game prefix replaced since initialization")
+    require_initialized_directories(compatdata, record)
 
 
 @dataclass(frozen=True)
