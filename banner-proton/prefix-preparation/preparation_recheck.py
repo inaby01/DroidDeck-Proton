@@ -17,7 +17,12 @@ from preparation_assets import digest_json
 from preparation_binding import _raw
 from preparation_common import SHA256, VERSION, app_id, fields, require, safe_path
 from preparation_customization import plan_customizations
-from preparation_execution import _aliases, _prefix, plan_launch
+from preparation_execution import (
+    _aliases,
+    _prefix,
+    plan_launch,
+    require_no_bytecode_cache,
+)
 from preparation_installation import CAPTURE
 from preparation_payload import (
     FEX_RUNTIME_CONTRACT,
@@ -289,6 +294,7 @@ class RecheckSession:
         try:
             self._guard()
             require(self.stop.check()["clear_in_view"], "target process view changed")
+            require_no_bytecode_cache(launch)
             self.process = subprocess.Popen(launch.argv, cwd=p.work, env=launch.environment, shell=False, close_fds=True,
                 start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, ValueError, TypeError, KeyError) as error:

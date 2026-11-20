@@ -371,6 +371,46 @@ class GamePrefixTests(DEP['InstallTests']):
         self.assertEqual([item['state'] for item in states], ['uninspected', 'uninspected'])
         dll.unlink()
 
+    def tool_pyc(self, body=b'synthetic bytecode, never executed'):
+        """A CPython cache for the generated user_settings.py overlay of the preparation slot."""
+        tool = next(p for p in (self.f.steam / 'compatibilitytools.d').iterdir() if (p / 'user_settings.py').exists())
+        source = tool / 'user_settings.py'
+        info = source.stat()
+        cache = tool / '__pycache__'
+        cache.mkdir(mode=0o755, exist_ok=True)
+        pyc = cache / 'user_settings.cpython-314.pyc'
+        pyc.write_bytes(b'\x2b\x0e\r\n' + struct.pack('<III', 0, int(info.st_mtime), info.st_size) + body)
+        pyc.chmod(0o644)
+        return tool, pyc
+
+    def test_tool_runtime_writes_are_planned_reported_and_rechecked(self):
+        appconfig = next((self.f.steam / 'compatibilitytools.d').glob('*/files/share/fex-emu'))
+        before_digest = self.game_plan().digest
+        tool, pyc = self.tool_pyc()
+        if not (tool / 'files/share/fex-emu/AppConfig').exists():
+            (appconfig / 'AppConfig').mkdir(mode=0o700)
+        preview = self.game_plan()
+        self.assertNotEqual(preview.digest, before_digest)
+        self.assertEqual(sorted(preview.summary()['tool_runtime_writes']['python_caches']['directories']), ['__pycache__'])
+        self.use_folder_dependency()
+        record, digest = self.initialize()
+        self.install_dependency(record, digest)
+        (self.f.exe.parent / 'mfc42.dll').write_bytes(DLL)
+        plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ())
+        self.assertIsNotNone(plan.summary()['tool_runtime_writes']['python_caches'])
+        # A cache rewritten with the same header after planning: refused before any write.
+        pyc.write_bytes(pyc.read_bytes()[:16] + b'rewritten bytecode')
+        before = self.protected()
+        lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
+        with PrivateStore(self.f.store_root) as store, store.locked(lock), \
+                self.assertRaisesRegex(Invalid, 'tool runtime writes changed'):
+            game.apply_game_binding(plan, store, lambda: plan, plan.digest, ProcessStopCheck(self.game_compat, self.f.proc),
+                                    self.recipe)
+        self.assertEqual(before, self.protected())
+        self.assertNotEqual(self.binding_plan(record, digest).digest, plan.digest)
+        (self.f.exe.parent / 'mfc42.dll').unlink()
+
     def test_later_profile_revision_with_the_initialized_exe_is_accepted(self):
         record, digest = self.initialize()
         self.install_dependency(record, digest)

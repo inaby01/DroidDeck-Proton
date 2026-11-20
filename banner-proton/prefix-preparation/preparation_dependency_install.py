@@ -38,7 +38,7 @@ from preparation_common import (
     safe_path,
 )
 from preparation_dependency_state import inspect_dependency_state
-from preparation_execution import plan_launch
+from preparation_execution import plan_launch, require_no_bytecode_cache
 from preparation_processes import (
     SYSTEM_DIRECTORIES,
     WINE_INFRASTRUCTURE,
@@ -599,6 +599,7 @@ class DependencyInstallSession:
         require(self.stop.check()["clear_in_view"], "target process view not clear")
 
     def _spawn(self, launch, tail):
+        require_no_bytecode_cache(launch)
         return subprocess.Popen((launch.argv[0], *tail), cwd=self.plan.recheck.work, env=launch.environment, shell=False,
                                 close_fds=True, start_new_session=True, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

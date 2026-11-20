@@ -31,6 +31,7 @@ from preparation_execution import (
     _identities,
     _prefix,
     plan_launch,
+    require_no_bytecode_cache,
 )
 from preparation_payload import verify_fex_runtime_tree
 from preparation_processes import ProcessStopCheck
@@ -277,6 +278,7 @@ class TrialSession:
             self.record.update(status="running", phase="spawn")
             self._save()
             self._guard()
+            require_no_bytecode_cache(self.launch)
             self.process = subprocess.Popen(self.launch.argv, cwd=p.work, env=self.launch.environment,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 shell=False, close_fds=True, start_new_session=True)

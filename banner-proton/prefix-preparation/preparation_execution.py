@@ -360,6 +360,10 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
             "unsupported preparation runtime variable")
     require(all(type(v) is str and len(v.encode()) <= 4096 and not any(c in v for c in "\0\r\n")
                 for v in runtime_environment.values()), "invalid preparation runtime value")
+    # CPython must not read bytecode caches from the tool tree (they are only matched by header):
+    # point the cache prefix at an absent path in the private work area; nothing is written there.
+    bytecode_prefix = work / BYTECODE_PREFIX
+    require(not os.path.lexists(bytecode_prefix), "bytecode cache prefix present")
     number = int(key)
     steam_id = key if number < 2**31 else "0"
     game_id = key if number < 2**31 else str(number << 32 | 0x02000000)
@@ -370,7 +374,7 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
            "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(steam), "STEAM_COMPAT_INSTALL_PATH": str(install),
            "STEAM_COMPAT_LIBRARY_PATHS": str(steam / "steamapps"), "STEAM_COMPAT_TOOL_PATHS": str(tool),
            "SteamAppId": steam_id, "STEAM_COMPAT_APP_ID": steam_id,
-           "SteamGameId": game_id, "SteamOverlayGameId": game_id}
+           "SteamGameId": game_id, "SteamOverlayGameId": game_id, "PYTHONPYCACHEPREFIX": str(bytecode_prefix)}
     spec = {"tool": tool, "steam": steam, "registration_id": key, "install": install, "work": work,
             "home": home, "runtime_environment": dict(runtime_environment), "expected_hashes": hashes,
             "payload_inventory": payload_inventory, "payload_overlays": overlays, "target_pin": target_pin, "runtime_plan": runtime_plan,
@@ -386,6 +390,14 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
     signature["tool_version"] = VERSION
     context = {k: v for k, v in signature.items() if k not in ("operation", "prefix_version_sha256", "origin_launch_id")}
     return LaunchPlan(operation, key, _digest(signature), _digest(context), payload_digest, target_pin.digest, spec, env, (str(tool / "proton"), *OPERATIONS[operation]))
+
+
+BYTECODE_PREFIX = ".no-bytecode-cache"
+
+
+def require_no_bytecode_cache(launch):
+    """Right before spawning: the bytecode cache prefix of the plan must still be absent."""
+    require(not os.path.lexists(launch.environment["PYTHONPYCACHEPREFIX"]), "bytecode cache prefix present")
 
 
 def _payload_digest(inventory, overlays):
@@ -509,6 +521,7 @@ class LaunchSession:
             _identities(self.plan.spec["tool"], self.plan.spec["expected_hashes"])
             safe_path(compatdata)
             _aliases(self.plan.spec["steam"], self.plan.registration_id)
+            require_no_bytecode_cache(self.plan)
             self.process = subprocess.Popen(self.plan.argv, cwd=self.plan.spec["work"], env=self.plan.environment,
                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                             shell=False, close_fds=True, start_new_session=True)

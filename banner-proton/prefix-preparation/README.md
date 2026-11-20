@@ -949,3 +949,15 @@ The accepted state (DroidDeck redist markers and the caches) is reported as
 binding plan, is part of their digests, and the recheck and binding readiness checks
 require it to be unchanged; a game launched from the slot between planning and writing
 therefore stops the step.
+
+## Tool launches do not read the slot's bytecode caches (0.27.5)
+
+Accepting caches by header (0.27.4) also meant that the tool's own Proton launches
+(initialization, recheck, dependency steps) imported cached bytecode that is not compared
+with the reviewed sources. Every tool launch now sets `PYTHONPYCACHEPREFIX` to an absent
+path in its private work area (with `PYTHONDONTWRITEBYTECODE=1` nothing is written there),
+so CPython compiles the verified sources instead of reading `__pycache__` in the tool.
+The plan refuses if that path exists, and each spawn checks again that it is still absent.
+Game launches by DroidDeck are not affected and keep the weakening described in 0.27.4.
+Standard-library caches are not used by these launches either, which may make them
+slower.
