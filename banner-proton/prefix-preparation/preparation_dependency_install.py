@@ -1265,7 +1265,7 @@ def _offer_session_proxy_stop(session, stream, output, text, preapproved=False, 
     elif sent:
         print(f"SIGTERMは{sent}件送信済みです。", file=output)
     print("停止後の状態: " + text(result["status"]), file=output)
-    if result.get("post_state") in (None, "uninspected"):
+    if result.get("post_state") in (None, "uninspected") and next_step:
         print("導入後の検査は済んでいません。" + next_step, file=output)
 
 

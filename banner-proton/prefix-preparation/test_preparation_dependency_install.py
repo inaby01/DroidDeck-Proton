@@ -383,6 +383,8 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(commands[0], ('runinprefix', 'winver.exe'))
         self.assertEqual(commands[1][0], 'runinprefix')
         self.assertEqual(Path(commands[1][1]).name, 'sdrt-fixture.exe')
+        # Menu 8 passes no arguments to the installer (the surrogate accepts silent ones for menu 12).
+        self.assertEqual(len(commands[1]), 2)
         self.assertEqual(len(commands), 2)
         self.assertEqual(before, self.protected())
         self.assertNotIn('DUMMY_SECRET', json.dumps(result))

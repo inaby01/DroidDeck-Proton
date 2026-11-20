@@ -76,11 +76,22 @@ def fixed_values(*, registration, profile, proton, paths, asset, binding):
             "binding": binding}
 
 
-def without_mode(values):
-    """Fixed values minus the installer mode and arguments (the interactive fallback changes only these)."""
-    result = dict(values)
-    result["asset"] = {key: value for key, value in values["asset"].items() if key not in ("mode", "arguments")}
-    return result
+ITEM_TEXT = {"registration": "登録", "profile": "作品", "proton": "Proton", "paths": "場所", "asset": "資材",
+             "installer_mode": "導入の方式", "binding": "割り当て・設定"}
+
+
+def item_digests(values):
+    """One digest per fixed item, kept in the result so a stop can name what changed."""
+    items = {name: values[name] for name in ("registration", "profile", "proton", "paths", "binding")}
+    items["asset"] = values["asset"]["spec"]
+    items["installer_mode"] = {"mode": values["asset"]["mode"], "arguments": values["asset"]["arguments"]}
+    return {name: digest_json(value) for name, value in sorted(items.items())}
+
+
+def changed_items(confirmed, current, ignore=()):
+    """Names of fixed items that differ; ``ignore`` lists items a separately confirmed step may change."""
+    before, after = item_digests(confirmed), item_digests(current)
+    return [name for name in before if name not in ignore and before[name] != after[name]]
 
 
 def softdenchi_action(latest, invalid, current):
@@ -115,26 +126,40 @@ def _game_records(management, key=None):
     return [item for item in listed if key is None or item["app_id"] == key]
 
 
-def _binding_history(store, key):
+def binding_history(store, key):
+    """Binding records of this registration, from any tool version (only their shape is checked).
+
+    An unreadable record that may belong to this registration stops, since it could hide a
+    partial binding; records of other registrations are not interpreted.
+    """
+    from preparation_binding import validate_binding_record
     history = []
     for item in store.inventory()["bindings"]:
-        require(item.get("status") != "invalid", "invalid binding record present")
-        record, _ = store.read_record("bindings", item["binding_id"] + ".json")
+        name = item["binding_id"] + ".json" if "binding_id" in item else item["object"]
+        record, _ = store.read_record("bindings", name)
+        validate_binding_record(record, any_version=True)
         if record["app_id"] == key:
-            history.append(record["status"])
+            history.append({"status": record["status"], "completed_files": list(record["completed_files"])})
     return history
 
 
 def binding_action(binding, history):
-    """Design 5.2: decided by the current three files, never by a past record alone."""
+    """Design 5.2: decided by the current three files, never by a past record alone.
+
+    All files bound: already bound. Some bound: stop (a partial state is never completed
+    automatically). None bound: bind, unless a past binding wrote files (it was verified, or
+    it failed after writing) and the files have changed since.
+    """
     from preparation_binding import FILES
     bound = [name for name in FILES if binding.before[name] == binding.after[name]]
     if len(bound) == len(FILES):
         return "already-bound", None
-    if any(status != "binding-verified" for status in history):
-        return "stop", "previous-binding-incomplete"
-    if history:
+    if bound:
+        return "stop", "binding-partially-applied"
+    if any(item["status"] == "binding-verified" for item in history):
         return "stop", "binding-changed-after-verified-binding"
+    if any(item["completed_files"] for item in history):
+        return "stop", "previous-binding-wrote-files"
     return "apply", None
 
 
@@ -172,6 +197,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
     protected, stage, started = [steam, settings], "one-pass-config", False
     report = {"mode": MODE, "scope": SCOPE, "tool_version": VERSION, "steps": [], "binding_written": False,
               "game_launched": False, "authentication_performed": False, "preparation_complete": False}
+    live = {}  # the step whose session is running, so an exception still saves its record
+
     common = {"config": config, "directory": directory, "renderer": renderer, "steam": steam, "settings": settings,
               "home": home, "environment": environment, "runtime_root": runtime_root}
 
@@ -189,9 +216,12 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                             paths=[str(base.compatdata), str(base.work), str(base.private_home)], asset=asset,
                             binding=binding_digest)
 
-    def check_fixed(current, compare=None):
-        if (compare or (lambda v: v))(current) != (compare or (lambda v: v))(fixed):
-            raise Stopped(stage, "fixed-values-changed", "確認したときの内容（登録・作品・資材・Proton・設定）が変わりました。"
+    def check_fixed(current, ignore=(), where=None):
+        changed = changed_items(fixed, current, ignore)
+        if changed:
+            report.setdefault("fixed_value_changes", []).append({"stage": where or stage, "items": changed})
+            raise Stopped(where or stage, "fixed-values-changed:" + ",".join(changed),
+                          "確認したときの内容（" + "・".join(ITEM_TEXT[name] for name in changed) + "）が変わりました。"
                           "もう一度 12 を実行して、内容を確認し直してください。")
 
     def interactive_fallback(record, record_digest):
@@ -203,9 +233,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         plan = refresh()
         interactive_asset = {**asset, "mode": "interactive", "arguments": []}
         current = from_base(plan.recheck, interactive_asset, plan_binding(steam, settings, key, proton["directory"]).digest)
-        if without_mode(current) != without_mode(fixed):
-            raise Stopped("softdenchi-interactive", "fixed-values-changed",
-                          "確認したときの内容が変わったため、画面ありの導入に切り替えません。")
+        check_fixed(current, ("installer_mode",), "softdenchi-interactive")
         if plan.blockers:
             raise Stopped("softdenchi-interactive", "dependency-plan-blocked:" + ",".join(plan.blockers))
         print("画面なしの導入では、ソフト電池は入りませんでした（何も変更されていません）。", file=output)
@@ -214,9 +242,10 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         if stream.readline(32).strip() != "1":
             report["steps"].append({"step": "softdenchi-interactive", "declined": True})
             return None
-        report["steps"].append({"step": "softdenchi-interactive", "confirmed_plan": plan.digest})
+        report["steps"].append({"step": "softdenchi-interactive", "plan": plan.summary(), "confirmed_plan": plan.digest})
         with droiddeck_lock(settings):
             session = DependencyInstallSession(plan, store, refresh, plan.digest, stop)
+            live.update(step=report["steps"][-1], session=session)
             session.start_gui_check()
             print("winverの画面が出たら、内容を確認して閉じてください。", file=output, flush=True)
             outcome = _wait_loop(session.wait_gui_check, stream, output, "gui_check")
@@ -231,6 +260,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                         _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=RESTART_THEN_12)
         result = dict(session.record)
         report["steps"][-1]["record"] = result
+        live.clear()
         return result
 
     try:
@@ -321,9 +351,15 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             paths = [str(base.compatdata), str(base.work), str(base.private_home)]
             compatdata = base.compatdata
         binding = plan_binding(steam, settings, key, proton["directory"])
+        stage = "binding-history"
+        if os.path.lexists(management):
+            # Read before anything is written: an unreadable binding record stops here, not after installation.
+            with PrivateStore(management) as store:
+                binding_history(store, key)
+        stage = "one-pass-plan"
         fixed = fixed_values(registration=_registration(games, key), profile=_profile(profile, recipes, softdenchi),
                              proton=proton, paths=paths, asset=asset, binding=binding.digest)
-        report["confirmed_fixed_values"] = digest_json(fixed)
+        report["confirmed_fixed_values"] = {"digest": digest_json(fixed), "items": item_digests(fixed)}
         print("ゲーム: " + text(games[key]["title"]) + f" [ID {key}]", file=output)
         print("作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）/ 依存 " +
               text(", ".join(profile["dependencies"])), file=output)
@@ -368,6 +404,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 print("prefixを初期化しています。", file=output, flush=True)
                 with droiddeck_lock(settings):
                     session = GamePrefixSession(plan, store, refresh_init, plan.digest, stop)
+                    report["steps"].append({"step": "initialize", "plan": plan.summary()})
+                    live.update(step=report["steps"][-1], session=session)
                     session.start()
                     while True:
                         outcome = session.wait(30)
@@ -376,7 +414,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                         print("未完了です。強制終了していません。さらに待つ場合は1、記録を残して戻る場合はq: ", end="", file=output, flush=True)
                         if stream.readline(32).strip() != "1":
                             break
-                report["steps"].append({"step": "initialize", "record": outcome})
+                report["steps"][-1]["record"] = outcome
+                live.clear()
                 if outcome["status"] != "initialized-unverified":
                     raise Stopped(stage, "initialization-" + outcome["status"], "初期化が完了しませんでした。作成物は削除せずに残しています。")
                 record, record_digest = store.read_record(RECORDS, outcome["trial_id"] + ".json")
@@ -414,12 +453,15 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                     print("ソフト電池を画面なしで導入しています（最初の10分は確認なしで待ちます）。", file=output, flush=True)
                     with droiddeck_lock(settings):
                         session = DependencyInstallSession(dplan, store, refresh_silent, dplan.digest, stop)
+                        report["steps"].append({"step": "softdenchi-silent", "plan": dplan.summary()})
+                        live.update(step=report["steps"][-1], session=session)
                         session.start_silent_installer()
                         _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
                         if session.record["installer"]["status"] == "exited-processes-remain":
                             _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=RESTART_THEN_12)
                     result = dict(session.record)
-                    report["steps"].append({"step": "softdenchi-silent", "record": result})
+                    report["steps"][-1]["record"] = result
+                    live.clear()
                     if result["status"] == "cancelled-absent":
                         result = interactive_fallback(record, record_digest)
                     if result is None or result["status"] != "present-verified":
@@ -434,14 +476,15 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             summary = bplan.summary()
             for item in summary["dependencies"]:
                 print("  依存: " + text(item["dependency_id"] + " / " + item["state"]), file=output)
-            action, reason = binding_action(bplan.binding, _binding_history(store, key))
+            action, reason = binding_action(bplan.binding, binding_history(store, key))
             report["steps"].append({"step": "binding-plan", "plan": summary, "action": action, "reason": reason})
+            # Dependencies first (design 5.1 step 4 before 5): an already bound game is not "ready" while one is unverified.
+            if bplan.blockers:
+                raise Stopped(stage, "binding-blocked:" + ",".join(bplan.blockers), "全依存が検証済みになるまで割り当てません。")
             if action == "already-bound":
                 print("このゲームはすでに準備用Protonに割り当て済みです。設定は変更しません。", file=output)
             elif action == "stop":
                 raise Stopped(stage, reason, "割り当ての状態に確認が要ります。設定は変更していません。")
-            elif bplan.blockers:
-                raise Stopped(stage, "binding-blocked:" + ",".join(bplan.blockers), "全依存が検証済みになるまで割り当てません。")
             else:
                 result = apply_game_binding(bplan, store, lambda: plan_game_binding(
                     record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,
@@ -460,6 +503,9 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
     except (OSError, ValueError, TypeError, KeyError) as error:
         report.update(status="stopped", stage=stage, **describe_error(error, stage),
                       writes_may_exist=started)
+        if live:
+            # As in menus 8 and 10, the record of the interrupted step is kept in the result.
+            live["step"].update(record=dict(live["session"].record), interrupted=True)
         print("検査停止: " + text(report["check"]) + " / " + text(report["reason"] or report["error_class"]), file=output)
         print("作成物・記録は削除していません。", file=output)
     try:

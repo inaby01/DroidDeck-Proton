@@ -363,12 +363,14 @@ def _atomic(path, data, previous, guard, replaced):
         os.close(fd)
 
 
-def validate_binding_record(record):
+def validate_binding_record(record, any_version=False):
+    """Shape of a binding record. Writers require this version; history readers accept any version string."""
     bounded(record)
     fields(record, ("schema_version", "tool_version", "binding_id", "app_id", "input_digest", "status",
                     "completed_files", "preparation_complete"))
     require(type(record["schema_version"]) is int and record["schema_version"] == 1 and
-            record["tool_version"] == VERSION, "unknown binding record version")
+            (record["tool_version"] == VERSION if not any_version else
+             type(record["tool_version"]) is str and 0 < len(record["tool_version"]) <= 64), "unknown binding record version")
     require(type(record["binding_id"]) is str and record["binding_id"].startswith("binding-") and
             len(record["binding_id"]) == 40 and all(c in "0123456789abcdef" for c in record["binding_id"][8:]), "invalid binding ID")
     require(app_id(record["app_id"]) == record["app_id"], "invalid binding app ID")

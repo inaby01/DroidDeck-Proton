@@ -2,6 +2,7 @@
 """Menu 12 one-pass preparation with the native surrogate; never Wine, vendor binaries or real games."""
 
 import hashlib
+import io
 import json
 import runpy
 import subprocess
@@ -30,6 +31,8 @@ class ActionTableTests(unittest.TestCase):
     def test_softdenchi_rows(self):
         cases = [
             ((None, 0, 'absent'), 'install'),
+            ((record('needs-user', 'installer-exited'), 0, 'absent'), 'install'),
+            ((record('running', 'installer-staged'), 0, 'absent'), 'install'),
             ((None, 0, 'present-verified'), 'skip'),
             ((None, 0, 'partial'), 'stop'),
             ((None, 1, 'absent'), 'stop'),
@@ -59,11 +62,51 @@ class ActionTableTests(unittest.TestCase):
                 self.after = {name: value if name in same else value + b'!' for name, value in self.before.items()}
         everything = ('games', 'config', 'state')
         self.assertEqual(one_pass.binding_action(Plan(everything), [])[0], 'already-bound')
-        self.assertEqual(one_pass.binding_action(Plan(everything), ['binding-failed'])[0], 'already-bound')
-        self.assertEqual(one_pass.binding_action(Plan(('state',)), ['binding-failed']), ('stop', 'previous-binding-incomplete'))
-        self.assertEqual(one_pass.binding_action(Plan(()), ['binding-verified']),
-                         ('stop', 'binding-changed-after-verified-binding'))
+        failed_early = {'status': 'binding-failed', 'completed_files': []}
+        failed_late = {'status': 'binding-failed', 'completed_files': ['games']}
+        verified = {'status': 'binding-verified', 'completed_files': list(everything)}
+        self.assertEqual(one_pass.binding_action(Plan(everything), [failed_late])[0], 'already-bound')
+        # A partial state stops whatever the history says; it is never completed automatically.
+        self.assertEqual(one_pass.binding_action(Plan(('state',)), []), ('stop', 'binding-partially-applied'))
+        self.assertEqual(one_pass.binding_action(Plan(('state',)), [failed_late]), ('stop', 'binding-partially-applied'))
+        self.assertEqual(one_pass.binding_action(Plan(()), [verified]), ('stop', 'binding-changed-after-verified-binding'))
+        self.assertEqual(one_pass.binding_action(Plan(()), [failed_late]), ('stop', 'previous-binding-wrote-files'))
+        # A binding that failed before writing anything does not block a new one.
+        self.assertEqual(one_pass.binding_action(Plan(()), [failed_early]), ('apply', None))
         self.assertEqual(one_pass.binding_action(Plan(()), []), ('apply', None))
+
+    def test_preapproved_stop_reads_no_input_and_records_how_it_was_confirmed(self):
+        class Session:
+            def __init__(self, targets, reason=None):
+                self.preview = ({'processes': [], 'unreadable_count': 0, 'stop_origins': {'installer-run': 2}}, targets, reason)
+                self.calls, self.record = [], {}
+
+            def preview_proxy_stop(self):
+                return self.preview
+
+            def stop_lingering_proxies(self, **kwargs):
+                self.calls.append(kwargs)
+                return {'status': 'present-verified', 'post_state': 'present-verified',
+                        'lingering': {'stop': {'result': 'sigterm-sent', 'signals': []}}}
+
+            def _save(self):
+                pass
+
+        stream, output = io.StringIO('1\n'), io.StringIO()
+        session = Session([(1, 1), (2, 2)])
+        dep._offer_session_proxy_stop(session, stream, output, str, preapproved=True, next_step=None)
+        self.assertEqual(session.calls, [{'confirmation': 'one-pass-preapproved'}])
+        self.assertEqual(stream.tell(), 0)
+        self.assertIn('最初の確認に基づき', output.getvalue())
+        # Without targets under the unchanged rules nothing is sent, pre-approved or not.
+        refused = Session(None, 'unexplained process')
+        dep._offer_session_proxy_stop(refused, io.StringIO(), io.StringIO(), str, preapproved=True, next_step=None)
+        self.assertEqual(refused.calls, [])
+        self.assertEqual(refused.record['lingering']['stop'], {'result': 'refused', 'reason': 'unexplained process'})
+        # Menu 8 still asks, and its call carries no pre-approval.
+        asked = Session([(1, 1)])
+        dep._offer_session_proxy_stop(asked, io.StringIO('1\n'), io.StringIO(), str)
+        self.assertEqual(asked.calls, [{}])
 
     def test_silent_arguments_are_pinned_to_the_recipe_bootstrap(self):
         real = recipe_module.softdenchi_recipe()
@@ -183,6 +226,10 @@ class OnePassTests(GAME['GamePrefixTests']):
         fallback = [step for step in report['steps'] if step['step'] == 'softdenchi-interactive']
         self.assertEqual(len(fallback), 1)
         self.assertEqual(fallback[0]['record']['gui_check']['display_confirmed'], True)
+        # The separate confirmation is bound to the interactive plan, which is what the session ran.
+        self.assertEqual(fallback[0]['confirmed_plan'], fallback[0]['record']['input_digest'])
+        self.assertEqual(fallback[0]['plan']['installer_mode'], 'interactive')
+        self.assertEqual(report['steps'][1]['plan']['installer_mode'], 'silent')
 
     def test_changed_fixed_values_stop_before_initialization(self):
         real = one_pass._profile
@@ -197,7 +244,10 @@ class OnePassTests(GAME['GamePrefixTests']):
         with patch.object(one_pass, '_profile', side_effect=drifting):
             _, report, _, commands = self.run_menu('12\n1\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
-        self.assertEqual(report['reason'], 'fixed-values-changed')
+        self.assertEqual(report['reason'], 'fixed-values-changed:profile')
+        self.assertEqual(report['stage'], 'initialize')
+        self.assertEqual(sorted(report['confirmed_fixed_values']['items']),
+                         ['asset', 'binding', 'installer_mode', 'paths', 'profile', 'proton', 'registration'])
         self.assertEqual(commands, [])
         self.assertFalse(self.game_compat.exists())
         self.assertEqual(before, self.protected())
@@ -216,11 +266,91 @@ class OnePassTests(GAME['GamePrefixTests']):
 
         with patch.object(one_pass, '_profile', side_effect=drifting):
             _, report, output, commands = self.run_menu('12\n1\n1\n1\n1\n')
-        self.assertEqual(report['reason'], 'fixed-values-changed', report)
+        self.assertEqual(report['reason'], 'fixed-values-changed:profile', report)
         self.assertEqual(report['stage'], 'softdenchi-interactive')
+        self.assertEqual(report['fixed_value_changes'], [{'stage': 'softdenchi-interactive', 'items': ['profile']}])
         self.assertNotIn('画面ありで導入する場合は1', output)
         self.assertEqual(len(commands), 2)
         self.assertEqual([item['status'] for item in self.installs()], ['cancelled-absent'])
+
+    def write_binding_record(self, app, version, status='binding-verified', completed=('games', 'config', 'state')):
+        record_ = {'schema_version': 1, 'tool_version': version, 'binding_id': 'binding-' + hashlib.sha256(app.encode()).hexdigest()[:32],
+                   'app_id': app, 'input_digest': '0' * 64, 'status': status, 'completed_files': list(completed),
+                   'preparation_complete': False}
+        directory = self.f.store_root / 'bindings'
+        directory.mkdir(mode=0o700, exist_ok=True)
+        path = directory / (record_['binding_id'] + '.json')
+        path.write_text(json.dumps(record_))
+        path.chmod(0o600)
+        return path
+
+    def test_binding_records_of_older_versions_do_not_stop_the_run(self):
+        self.write_binding_record('77', '0.27.7')
+        _, report, _, _ = self.run_menu('12\n1\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertTrue(report['binding_written'])
+
+    def test_unreadable_binding_record_stops_before_anything_is_written(self):
+        path = self.write_binding_record('77', '0.27.7')
+        path.write_text('{"not": "a binding record"}')
+        before = self.protected()
+        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        self.assertEqual((report['status'], report['stage']), ('stopped', 'binding-history'), report)
+        self.assertEqual(commands, [])
+        self.assertFalse(self.game_compat.exists())
+        self.assertEqual(before, self.protected())
+
+    def test_profile_is_selected_by_the_pinned_exe_hash_and_bound_game_with_a_missing_file_is_not_ready(self):
+        self.use_folder_dependency()
+        dll = self.f.exe.parent / 'mfc42.dll'
+        dll.write_bytes(GAME['DLL'])
+        # One pinned match: no profile question (menu, game, confirmation).
+        _, report, output, _ = self.run_menu('12\n1\n1\n')
+        self.assertIn('EXEハッシュ一致で自動選択', output)
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        dll.unlink()
+        before = self.protected()
+        _, report, output, commands = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(report['reason'], 'binding-blocked:dependency-not-verified:mfc42-game-folder')
+        self.assertNotIn('準備が終わりました', output)
+        self.assertEqual(commands, [])
+        self.assertEqual(before, self.protected())
+
+    def test_several_matching_profiles_are_asked(self):
+        self.use_folder_dependency()
+        twin = dict(self.config['game_preparation']['profiles'][0], profile_id='example-twin')
+        self.config['game_preparation']['profiles'].append(twin)
+        status, report, output, commands = self.run_menu('12\n1\nq\n')
+        self.assertEqual((status, report, commands), (0, None, []))
+        self.assertIn('作品プロファイルの番号', output)
+        self.assertNotIn('自動選択', output)
+
+    def test_settings_changed_between_steps_stop_before_binding(self):
+        real = one_pass.plan_game_binding
+        games = self.games_config
+
+        def touched(**kwargs):
+            # Same content, different bytes: the confirmed settings inputs no longer match.
+            games.write_text(json.dumps(json.loads(games.read_text()), indent=2))
+            return real(**kwargs)
+
+        with patch.object(one_pass, 'plan_game_binding', side_effect=touched):
+            _, report, _, _ = self.run_menu('12\n1\n1\n1\n')
+        self.assertEqual(report['reason'], 'fixed-values-changed:binding', report)
+        self.assertEqual(report['stage'], 'binding')
+        self.assertFalse(report['binding_written'])
+        self.assertNotIn('42', json.loads(self.games_config.read_text())['games'])
+
+    def test_an_exception_inside_a_step_keeps_that_step_record_in_the_result(self):
+        with patch.object(dep.DependencyInstallSession, '_spawn', side_effect=OSError('spawn refused')):
+            _, report, _, _ = self.run_menu('12\n1\n1\n1\n')
+        self.assertEqual((report['status'], report['stage']), ('stopped', 'softdenchi-silent'), report)
+        step = report['steps'][-1]
+        self.assertEqual(step['step'], 'softdenchi-silent')
+        self.assertTrue(step['interrupted'])
+        self.assertEqual((step['record']['status'], step['record']['phase']), ('failed', 'installer-spawned'))
+        self.assertEqual(step['plan']['installer_mode'], 'silent')
 
     def test_failed_installation_history_stops_without_reinstalling(self):
         record_, digest = self.initialize()
