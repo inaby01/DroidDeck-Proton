@@ -727,7 +727,10 @@ and otherwise refuse the stop as unclassified.
 
 After an explicit confirmation, SIGTERM is sent only to SdProxy processes whose
 parent chain reaches UCManSvc under `services.exe`, with consistent start times and
-one shared executable identity, from two identical inventories without unreadable,
+one shared executable identity (in menu 8 right after the installer run, also a chain
+whose first SdProxy has no parent left in the view, if it started no earlier than the
+process this tool spawned for the installer and shares the identity of the single
+`services.exe`; see 0.26.3), from two identical inventories without unreadable,
 unclassified or prefix-conflicting processes (both prefix variables, when present,
 must name this prefix). The batch is pinned with pidfds and the full conditions are
 evaluated again after pinning; before each further signal the view is read again
@@ -791,3 +794,18 @@ also refuse; that has not been measured on the device.
 initialization and requires it at the same points, so swapping only `pfx` while the
 prefix root and version stay is refused. Restoring files inside the same directories
 is not detected by these identities.
+
+## Stopping what the installer run left behind (0.26.3)
+
+On the device (0.26.2) the bootstrap started SdProxy before UCManSvc and exited, so the
+first SdProxy had no parent left in the prefix view, and `lsass.exe`, `tabtip.exe` and
+Proton's `xalia.exe` stayed beside it. Menu 8 now records the start time of the process
+it spawns for the installer (`installer.spawned_started`, from `/proc/PID/stat`; absent
+if it could not be read) and, in that same session only, also accepts a SdProxy chain
+whose first SdProxy lost its parent when that SdProxy started no earlier than the
+installer spawn and every process in the chain shares the executable identity of the
+one `services.exe` in the view. All other conditions (two identical inventories,
+nothing unreadable, unclassified or prefix-conflicting, pidfd pinning and revalidation,
+SIGTERM only) are unchanged. Menu 9 keeps the UCManSvc-only rule because it has no
+installer run to bound the origin. The menu 10 profile prompt also accepts the profile
+name.

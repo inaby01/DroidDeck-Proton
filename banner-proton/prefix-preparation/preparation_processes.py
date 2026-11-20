@@ -34,6 +34,19 @@ def _identity(raw, pid):
     return parts[0], int(parts[19])
 
 
+def process_start_time(pid, proc_root=Path("/proc")):
+    """Start time (clock ticks since boot, as in /proc/PID/stat) of one process, or an error."""
+    root_fd = os.open(safe_path(proc_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(str(int(pid)), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            return _identity(_read(fd, "stat", 8192), str(int(pid)))[1]
+        finally:
+            os.close(fd)
+    finally:
+        os.close(root_fd)
+
+
 def _matches(raw, compatdata):
     return _prefix_fields(raw, compatdata)[0]
 

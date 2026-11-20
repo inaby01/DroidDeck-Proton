@@ -595,6 +595,69 @@ class InstallTests(TRIAL['TrialTests']):
                     self.assertEqual(sent, [])
         self.clear_fake()
 
+    def test_installer_run_proxy_whose_starter_exited_is_stopped_only_after_the_installer_spawn(self):
+        # 0.26.2 device run: the first SdProxy started before UCManSvc and its starter had left the view.
+        sent = []
+
+        def sender(key):
+            sent.append(key)
+            self.clear_fake()
+        self.clear_fake()
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep, 'process_start_time', return_value=25), patch.object(dep, 'PROXY_STOP_WAIT', 2):
+            session, targets = self.installed_with_lingering(store, proxy_parent=900404)
+            self.assertEqual(session.record['installer']['spawned_started'], 25)
+            _summary, planned, reason = session.preview_proxy_stop()
+            self.assertEqual((sorted(planned), reason), (sorted(targets), None))
+            result = session.stop_lingering_proxies(sender)
+        self.assertEqual(sent, [targets[0]])
+        self.assertEqual(result['lingering']['stop']['result'], 'sigterm-sent')
+        self.assertEqual(result['status'], 'present-verified')
+        dep.validate_install_record(result)
+        self.clear_fake()
+
+    def test_parentless_proxy_without_an_earlier_installer_spawn_is_refused(self):
+        self.clear_fake()
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep, 'process_start_time', side_effect=OSError('no start time')):
+            session, _ = self.installed_with_lingering(store, proxy_parent=900404)
+            self.assertNotIn('spawned_started', session.record['installer'])
+            result = session.stop_lingering_proxies(lambda key: self.fail('refused stop must not signal'))
+        self.assertEqual(result['lingering']['stop'], {'result': 'refused', 'reason': 'proxy origin not confirmed'})
+        compat = self.install_plan().recheck.compatdata
+        for bound, extra, reason in ((31, False, 'proxy origin not confirmed'), (25, True, 'service origin not confirmed')):
+            with self.subTest(bound=bound):
+                self.clear_fake()
+                self.lingering_tree(proxy_parent=900404)
+                if extra:
+                    self.fake_process(900010, self.SERVICES, 1, 11)
+                first, second = (dep.inventory_processes(compat, self.f.proc) for _ in range(2))
+                self.assertEqual(dep.process_start_time(900005, self.f.proc), 30)
+                with self.assertRaisesRegex(Invalid, reason):
+                    dep.proxy_stop_targets(first, second, bound)
+        # Menu 9 has no installer run to bound the origin: the same tree is refused.
+        self.clear_fake()
+        plan = self.install_plan().recheck
+        self.lingering_tree(proxy_parent=900404)
+        with self.f.store() as store:
+            entry = dep.offer_reinspection_proxy_stop(plan, store, ProcessStopCheck(plan.compatdata, self.f.proc),
+                                                      io.StringIO(), io.StringIO(), str,
+                                                      sender=lambda key: self.fail('menu 9 must refuse'))
+        self.assertEqual(entry['stop'], {'result': 'refused', 'reason': 'proxy origin not confirmed'})
+        self.clear_fake()
+
+    def test_installer_start_time_is_validated_in_the_record(self):
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep, 'process_start_time', return_value=25):
+            session, _ = self.installed_with_lingering(store)
+            record = dict(session.record)
+        self.clear_fake()
+        for broken in ({**record, 'installer': {**record['installer'], 'spawned_started': -1}},
+                       {**record, 'installer': {**record['installer'], 'spawned_started': '25'}},
+                       {**record, 'gui_check': {**record['gui_check'], 'spawned_started': 25}}):
+            with self.assertRaisesRegex(Invalid, 'invalid installer start time'):
+                dep.validate_install_record(broken)
+
     XALIA = 'Z:\\DUMMY_TOOL\\files\\share\\xalia\\xalia.exe'
 
     def test_wine_and_proton_helpers_seen_on_the_device_are_explained(self):
