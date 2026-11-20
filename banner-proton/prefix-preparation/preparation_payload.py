@@ -215,36 +215,52 @@ DROIDDECK_REDIST_CONTRACT = "droiddeck-redist-markers-v1"
 REDIST_TEMPLATE = "files/share/default_pfx_arm64"
 REDIST_REGISTRY = REDIST_TEMPLATE + "/system.reg"
 REDIST_MARKERS = (REDIST_TEMPLATE + "/.droiddeck-redists", REDIST_TEMPLATE + "/.droiddeck-redists-checked")
-REDIST_TAIL_LIMIT = 64 * 1024
+REDIST_TAIL_LIMIT = 8 * 1024
 REDIST_MARKER_LIMIT = 64 * 1024
-# DroidDeck 0.7.1 appends these keys once per compatibility tool (observed on device 2026-11-17 and
-# 2026-11-20): Steam CommonRedist "installed" flags and VC++ runtime version keys. Registry text
-# doubles its backslashes. Nothing else may be appended, and the archive bytes must stay a prefix.
-_REDIST_SECTION = re.compile(
-    rb"\[Software\\\\(?:Wow6432Node\\\\)?(?:"
-    rb"Valve\\\\Steam\\\\Apps\\\\CommonRedist(?:\\\\[A-Za-z0-9 ._-]{1,64}){1,3}|"
-    rb"Microsoft\\\\VisualStudio\\\\14\.0\\\\VC\\\\Runtimes\\\\(?:x86|x64|arm64))\] [0-9]{1,20}")
-_REDIST_VALUE = re.compile(rb'"[A-Za-z0-9 ._-]{1,64}"=(?:dword:[0-9a-f]{8}|"v[0-9.]{1,32}")')
+# DroidDeck appends these keys once per compatibility tool: Steam CommonRedist "installed" flags
+# (two path parts below CommonRedist, dword values) and VC++ runtime version keys (Bld, Installed,
+# Major, Minor, Rbld as dword, Version as "v<digits>"). Registry text doubles its backslashes.
+# Nothing else may be appended, every section needs a value, and the archive bytes stay a prefix.
+_REDIST_COMMON = re.compile(
+    rb"\[Software\\\\(?:Wow6432Node\\\\)?Valve\\\\Steam\\\\Apps\\\\CommonRedist"
+    rb"\\\\[A-Za-z0-9 ._-]{1,64}\\\\[A-Za-z0-9 ._-]{1,64}\] [0-9]{1,20}")
+_REDIST_RUNTIMES = re.compile(
+    rb"\[Software\\\\(?:Wow6432Node\\\\)?Microsoft\\\\VisualStudio\\\\14\.0\\\\VC\\\\Runtimes\\\\(?:x86|x64|arm64)\] [0-9]{1,20}")
+_REDIST_COMMON_VALUE = re.compile(rb'"[A-Za-z0-9 ._-]{1,64}"=dword:[0-9a-f]{8}')
+_REDIST_RUNTIME_VALUE = re.compile(rb'"(?:Bld|Installed|Major|Minor|Rbld)"=dword:[0-9a-f]{8}|"Version"="v[0-9.]{1,32}"')
+
+
+def _redist_tail_error():
+    return TreeMismatch("redist-registry-tail", REDIST_REGISTRY, ("sha256", "size"))
 
 
 def _redist_registry_tail(stream, expected, size):
     """Archive bytes unchanged, then only DroidDeck's redist sections; returns the section count and tail hash."""
-    require(expected["kind"] == "file" and size > expected["size"] and size - expected["size"] <= REDIST_TAIL_LIMIT,
-            "unexpected registry growth")
+    if not (expected["kind"] == "file" and expected["size"] < size <= expected["size"] + REDIST_TAIL_LIMIT):
+        raise _redist_tail_error()
     stream.seek(0)
-    require(_hash(_Bounded(stream, expected["size"]), expected["size"]) == expected["sha256"], "registry template prefix changed")
+    if _hash(_Bounded(stream, expected["size"]), expected["size"]) != expected["sha256"]:
+        raise _redist_tail_error()
     stream.seek(expected["size"])
     tail = stream.read(size - expected["size"] + 1)
-    require(len(tail) == size - expected["size"] and tail.endswith(b"\n"), "unexpected registry tail")
-    sections, current = 0, False
-    for line in tail[:-1].split(b"\n"):
+    # A leading newline keeps the first appended line from joining the archive's last line.
+    if len(tail) != size - expected["size"] or not tail.startswith(b"\n") or not tail.endswith(b"\n"):
+        raise _redist_tail_error()
+    sections, values, kind = 0, 0, None
+    for line in tail[1:-1].split(b"\n"):
         if not line:
             continue
-        if _REDIST_SECTION.fullmatch(line):
-            sections, current = sections + 1, True
+        if _REDIST_COMMON.fullmatch(line) or _REDIST_RUNTIMES.fullmatch(line):
+            if kind is not None and values == 0:
+                raise _redist_tail_error()
+            sections, values = sections + 1, 0
+            kind = _REDIST_COMMON_VALUE if _REDIST_COMMON.fullmatch(line) else _REDIST_RUNTIME_VALUE
+        elif kind is not None and kind.fullmatch(line):
+            values += 1
         else:
-            require(current and _REDIST_VALUE.fullmatch(line) is not None, "unexpected registry tail")
-    require(sections > 0, "unexpected registry tail")
+            raise _redist_tail_error()
+    if sections == 0 or values == 0:
+        raise _redist_tail_error()
     return sections, hashlib.sha256(tail).hexdigest()
 
 
@@ -356,10 +372,9 @@ def _verify_tree(root, inventory, overlays=None, runtime_entry=None, redist=None
         os.close(fd)
     if {name for name, entry in seen.items() if entry is not None} != expected.keys():
         raise TreeMismatch("missing-objects")
-    if redist is not None:
-        # The markers come with the appended registry; never a tail without DroidDeck's marker file.
-        require("registry_sections" not in redist or ".droiddeck-redists" in redist["markers"],
-                "registry tail without DroidDeck redist marker")
+    # The markers come with the appended registry; never a tail without DroidDeck's marker file.
+    if redist is not None and "registry_sections" in redist and ".droiddeck-redists" not in redist["markers"]:
+        raise TreeMismatch("redist-marker-missing", REDIST_MARKERS[0])
     groups = {}
     for name, entry in expected.items():
         if entry["kind"] == "file":
@@ -378,8 +393,10 @@ def _verify_tree(root, inventory, overlays=None, runtime_entry=None, redist=None
 def _redist_marker(directory_fd, name):
     """A small single-link regular file without execute or group/other write bits; content is only hashed."""
     info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= REDIST_MARKER_LIMIT and
-            not stat.S_IMODE(info.st_mode) & 0o7133, "unexpected DroidDeck redist marker")
+    if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= REDIST_MARKER_LIMIT and
+            not stat.S_IMODE(info.st_mode) & 0o7133):
+        raise TreeMismatch("redist-marker", REDIST_TEMPLATE + "/" + name, ("kind", "mode", "size"),
+                           actual_mode=stat.S_IMODE(info.st_mode))
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
     with os.fdopen(fd, "rb") as stream:
         unchanged(info, os.fstat(stream.fileno()))
@@ -393,10 +410,13 @@ FEX_RUNTIME_DIRECTORY = "files/share/fex-emu/AppConfig"
 
 
 def verify_fex_runtime_tree(root, inventory, overlays=None):
-    """One source-reviewed empty directory; ordinary verify_tree stays strict.
+    """One source-reviewed empty directory and DroidDeck's redist markers; ordinary verify_tree stays strict.
 
     No configuration file, symlink, other mode/owner or arbitrary ignore-list can
-    enter this envelope. Nothing is created, removed, chmodded or adopted.
+    enter this envelope. The only other tolerated change is DroidDeck's one-time
+    redist step in the default prefix template (a bounded registry tail of two key
+    families and two marker files), reported as ``droiddeck_redist``. Nothing is
+    created, removed, chmodded or adopted.
     """
     root = safe_path(root)
     require(inventory.entries.get("files/share/fex-emu", {}).get("kind") == "directory" and

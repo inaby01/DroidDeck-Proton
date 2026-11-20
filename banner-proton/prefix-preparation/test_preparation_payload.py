@@ -220,6 +220,66 @@ class PayloadTests(unittest.TestCase):
         with self.assertRaises(Invalid):
             payload.verify_fex_runtime_tree(self.installed, inventory)
 
+    def test_runtime_contract_redist_grammar_bounds_and_diagnostics(self):
+        section = (b'\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\CommonRedist\\\\DirectX\\\\Jun2010] 1795176401\n'
+                   b'"dxsetup"=dword:00000001\n')
+        rejected = {
+            'no leading newline': self.TAIL[1:],
+            'three path parts': b'\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\CommonRedist\\\\a\\\\b\\\\c] 1\n"x"=dword:00000001\n',
+            'string in CommonRedist': b'\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\CommonRedist\\\\a\\\\b] 1\n"x"="v1"\n',
+            'other runtime value': (b'\n[Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\x86] 1\n'
+                                    b'"Path"=dword:00000001\n'),
+            'section without values': section + b'\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\CommonRedist\\\\a\\\\b] 1\n',
+            'over the size bound': section * (payload.REDIST_TAIL_LIMIT // len(section) + 1),
+        }
+        for label, tail in rejected.items():
+            with self.subTest(label=label):
+                template, inventory = self.redist_fixture()
+                self.droiddeck_redist_step(template, tail)
+                with self.assertRaises(payload.TreeMismatch) as caught:
+                    payload.verify_fex_runtime_tree(self.installed, inventory)
+                self.assertEqual(caught.exception.tree_diagnostic['check'], 'redist-registry-tail')
+                self.assertEqual(caught.exception.tree_diagnostic['relative_path'], payload.REDIST_REGISTRY)
+                self.tearDown()
+                self.setUp()
+        accepted = {'within the size bound': section * (payload.REDIST_TAIL_LIMIT // len(section)),
+                    'the step twice': self.TAIL + self.TAIL}
+        for label, tail in accepted.items():
+            with self.subTest(label=label):
+                template, inventory = self.redist_fixture()
+                self.droiddeck_redist_step(template, tail)
+                self.assertEqual(payload.verify_fex_runtime_tree(self.installed, inventory)['droiddeck_redist']
+                                 ['registry_appended_bytes'], len(tail))
+                self.tearDown()
+                self.setUp()
+        template, inventory = self.redist_fixture()
+        # Markers alone (registry untouched), and the checked marker alone.
+        (template / '.droiddeck-redists').write_bytes(b'x')
+        self.assertNotIn('registry_sections', payload.verify_fex_runtime_tree(self.installed, inventory)['droiddeck_redist'])
+        (template / '.droiddeck-redists').unlink()
+        (template / '.droiddeck-redists-checked').write_bytes(b'')
+        payload.verify_fex_runtime_tree(self.installed, inventory)
+        # Unsafe markers carry a located diagnostic.
+        (template / '.droiddeck-redists-checked').chmod(0o664)
+        with self.assertRaises(payload.TreeMismatch) as caught:
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        self.assertEqual(caught.exception.tree_diagnostic['check'], 'redist-marker')
+        (template / '.droiddeck-redists-checked').chmod(0o644)
+        os.link(template / '.droiddeck-redists-checked', self.root / 'second-link')
+        with self.assertRaises(payload.TreeMismatch):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        (self.root / 'second-link').unlink()
+        # A tail without the marker file, and a mode change of the registry, are refused.
+        self.droiddeck_redist_step(template)
+        (template / '.droiddeck-redists').unlink()
+        with self.assertRaises(payload.TreeMismatch) as caught:
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+        self.assertEqual(caught.exception.tree_diagnostic['check'], 'redist-marker-missing')
+        (template / '.droiddeck-redists').write_bytes(b'x')
+        (template / 'system.reg').chmod(0o600)
+        with self.assertRaises(payload.TreeMismatch):
+            payload.verify_fex_runtime_tree(self.installed, inventory)
+
     def test_difference_audit_aggregates_changes_extras_and_missing_without_adoption(self):
         self.installed.chmod(0o755)
         (self.installed / "proton").write_bytes(b"changed-content")

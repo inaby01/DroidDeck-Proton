@@ -12,7 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import preparation_trial as trial
-from preparation_assets import digest_json, exe_identity, measure_stream
+from preparation_assets import (
+    MAX_EXE,
+    digest_json,
+    exe_identity,
+    measure_stream,
+    pe_machine,
+)
 from preparation_common import (
     SHA256,
     VERSION,
@@ -39,7 +45,8 @@ HANDLERS = ("softdenchi-interactive", "mfc-local", "game-folder-file")
 READY_HANDLERS = ("softdenchi-interactive", "game-folder-file")
 GAME_FOLDER_FILE_LIMIT = 64 * 1024 * 1024
 NON_ASCII_NOTE = ("注意: 登録EXEのパスにASCII以外の文字（日本語など）が含まれます。"
-                  "このようなフォルダー名で、ゲームが起動直後に終了した実機記録があります（原因は未確定）。")
+                  "このようなフォルダー名で、ゲームが起動直後に終了した例があります（原因は未確定）。"
+                  "フォルダー名を変える場合は、この初期化の前に変えて登録し直してください（初期化後は登録パスが固定されます）。")
 PE_MACHINES = ("x86", "x86_64")
 
 
@@ -81,7 +88,7 @@ def validate_game_config(value):
     recipes = {}
     require(type(value["recipes"]) is list and 0 < len(value["recipes"]) <= 64, "invalid recipe list")
     for item in value["recipes"]:
-        folder_file = item.get("handler") == "game-folder-file"
+        folder_file = type(item) is dict and item.get("handler") == "game-folder-file"
         fields(item, ("dependency_id", "revision", "handler", "status", "reason") + (("file", "required_by") if folder_file else ()))
         key = identifier(item["dependency_id"])
         require(key not in recipes, "duplicate recipe")
@@ -126,42 +133,48 @@ def _validate_game_folder_file(item):
     require(type(spec["sha256"]) is str and SHA256.fullmatch(spec["sha256"]) is not None, "invalid game-folder file hash")
     require(spec["pe_machine"] in PE_MACHINES, "invalid game-folder file architecture")
     require(type(origin["exe_sha256"]) is str and SHA256.fullmatch(origin["exe_sha256"]) is not None, "invalid game-folder origin")
-    string(origin["import"])
+    require(type(origin["import"]) is str and origin["import"].lower() == name.lower(),
+            "game-folder file must be the declared import of the executable")
 
 
 def inspect_game_folder_file(exe, spec):
-    """Read-only: the declared file directly in the registered EXE's folder (name case-insensitive).
+    """Read-only: the declared file directly in the registered EXE's folder (ASCII name, case-insensitive).
 
     ``present-verified`` means exactly one single-link regular file of that name with the
-    declared size, SHA-256 and PE architecture. Nothing is copied, moved or loaded; whether
-    the game actually loads it is only observable at launch.
+    declared size, SHA-256 and PE architecture, which is also the architecture of the
+    registered EXE. It is a match with the declaration only: provenance is not checked, the
+    EXE import table is not read, and nothing is copied, moved or loaded; whether the game
+    actually loads it is only observable at launch.
     """
-    folder = safe_path(exe).parent
+    exe = safe_path(exe)
+    folder = exe.parent
+    wanted = spec["name"].lower()
     try:
         with os.scandir(folder) as entries:
-            matches = [entry for entry in entries if entry.name.lower() == spec["name"].lower()]
-    except OSError as error:
-        return {"state": "uninspected", "reason": "game folder unreadable: " + type(error).__name__}
-    if not matches:
-        return {"state": "absent", "reason": "file not found in the game folder"}
-    if len(matches) > 1:
-        return {"state": "incompatible", "reason": "several files differ only in case"}
-    if matches[0].is_symlink():
-        return {"state": "incompatible", "reason": "symbolic link"}
-    try:
+            matches = [entry for entry in entries if entry.name.isascii() and entry.name.lower() == wanted]
+        if not matches:
+            return {"state": "absent", "reason": "file not found in the game folder"}
+        if len(matches) > 1:
+            return {"state": "incompatible", "reason": "several files differ only in case"}
+        if matches[0].is_symlink():
+            return {"state": "incompatible", "reason": "symbolic link"}
         with regular_open(folder / matches[0].name, GAME_FOLDER_FILE_LIMIT) as stream:
             measured = measure_stream(stream, GAME_FOLDER_FILE_LIMIT, "pe")
+        with regular_open(exe, MAX_EXE) as stream:
+            exe_machine = pe_machine(stream, os.fstat(stream.fileno()).st_size)
     except OSError as error:
-        return {"state": "uninspected", "reason": "file unreadable: " + type(error).__name__}
+        return {"state": "uninspected", "reason": "game folder or file unreadable: " + type(error).__name__}
     except ValueError as error:
         return {"state": "incompatible", "reason": str(error)}
     if (measured["size"], measured["sha256"], measured["pe_machine"]) != (spec["size"], spec["sha256"], spec["pe_machine"]):
         return {"state": "incompatible", "reason": "size, hash or architecture differs"}
+    if measured["pe_machine"] != exe_machine:
+        return {"state": "incompatible", "reason": "architecture differs from the game executable"}
     return {"state": "present-verified"}
 
 
 def exe_path_ascii(exe):
-    """Recorded on device: a non-ASCII game folder name made an ANSI MFC42 game exit right after start."""
+    """Whether the registered EXE path is ASCII; a non-ASCII folder name was seen together with an exit right after start."""
     return str(exe).isascii()
 
 
@@ -453,6 +466,7 @@ def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe):
         elif item["handler"] == "game-folder-file":
             states.append({**declared, **inspect_game_folder_file(exe, item["file"])})
         else:
+            require(item["handler"] == "softdenchi-interactive", "unsupported ready handler")
             states.append({**declared, "state": inspect_dependency_state(compatdata, recipe)["state"]})
     if clear and not stop_check.check()["clear_in_view"]:
         states = [{**item, "state": "uninspected", "reason": "concurrent-process-observed"} if item["state"] != "blocked" else item
@@ -488,12 +502,13 @@ def plan_game_binding(*, record, record_sha256, config, directory, renderer, sou
 
 
 def profile_revision_change(profile, recorded):
-    """The profile bound at initialization, or a later revision of it that only refines dependencies.
+    """The profile bound at initialization, or a later revision of it pinned to the initialized EXE.
 
     A later revision is accepted only for the same profile ID with a strictly higher
     revision that pins the EXE hash measured at initialization (still checked live by the
-    recheck). Its dependencies are evaluated live at binding, so they need no pinning here.
-    Title and edition are not part of the record and cannot be compared.
+    recheck). Its dependencies are evaluated live at binding, so they need no pinning here;
+    the record has no dependency list, so removed dependencies cannot be detected, and title
+    and edition are not part of the record either. Menu 11 shows them for the operator.
     """
     current = digest_json(profile)
     if current == recorded["profile_digest"]:
@@ -589,6 +604,9 @@ def interactive_game_binding(directory, renderer, config, *, input_stream=None, 
         if change is not None:
             print(f"作品プロファイル: 初期化時の改訂{change['initialized_revision']}から改訂{change['current_revision']}へ"
                   "（同じEXEハッシュ。依存はこの場で検査します）", file=output)
+            print("  現在のプロファイル: " + selection._text(plan.profile["title"] + " / " + plan.profile["edition"] + " / 依存 " +
+                                                     ", ".join(plan.profile["dependencies"])) +
+                  "（初期化時の依存の一覧は記録になく、比べられません）", file=output)
         for item in summary["dependencies"]:
             print("  依存: " + selection._text(item["dependency_id"] + " / " + item["state"] +
                                               (" / " + item["reason"] if item.get("reason") and item["state"] != "blocked" else "")),

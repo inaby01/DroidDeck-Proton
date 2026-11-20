@@ -987,11 +987,46 @@ class InstallTests(TRIAL['TrialTests']):
                         if not other.exists():
                             other.write_bytes(b'different synthetic loader')
                         exe.symlink_to(other)
-                log = []
-                with self.assertRaisesRegex(Invalid, 'target changed before signal'):
-                    dep.signal_proxies(plan.compatdata, targets, self.f.proc, swap_child, log)
+                log, detail = [], {}
+                with patch.object(dep, 'SIGNAL_SETTLE_WAIT', 30), patch.object(dep, 'SIGNAL_SETTLE_INTERVAL', 0), \
+                        self.assertRaisesRegex(Invalid, 'target changed before signal'):
+                    dep.signal_proxies(plan.compatdata, targets, self.f.proc, swap_child, log, dep.NO_SCOPE, detail)
                 self.assertEqual([item['result'] for item in log], ['sigterm-sent'])
+                # A changed confirmed process is not "shrinking": no waiting for the deadline.
+                self.assertEqual((detail['revalidation']['result'], detail['revalidation']['reads']), ('not-shrinking', 1))
         self.clear_fake()
+
+    def test_more_unreadable_pids_than_reported_abort_at_once(self):
+        plan = self.install_plan().recheck
+        targets = self.lingering_tree()
+
+        def flood(key):
+            for pid in range(900100, 900117):
+                self.fake_process(pid, self.PROXY, 900002, 60)
+                (self.f.proc / str(pid) / 'cmdline').write_bytes(b'')
+        log, detail = [], {}
+        with patch.object(dep, 'SIGNAL_SETTLE_WAIT', 30), patch.object(dep, 'SIGNAL_SETTLE_INTERVAL', 0), \
+                self.assertRaisesRegex(Invalid, 'unreadable process'):
+            dep.signal_proxies(plan.compatdata, targets, self.f.proc,
+                               lambda key: flood(key) if key == targets[0] else self.fail('second send'), log, dep.NO_SCOPE, detail)
+        self.assertEqual((detail['revalidation']['result'], detail['revalidation']['reads']), ('not-shrinking', 1))
+        self.assertEqual(detail['revalidation']['unreadable_count'], 17)
+        self.assertEqual(len(detail['unreadable_pids']), 16)
+        self.clear_fake()
+
+    @unittest.skipUnless(callable(getattr(os, 'pidfd_open', None)), 'pidfd required')
+    def test_await_exit_returns_when_the_pinned_child_exits(self):
+        import time
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(0.2)'])
+        descriptor = os.pidfd_open(child.pid, 0)
+        try:
+            began = time.monotonic()
+            dep._await_exit(descriptor, 5)
+            self.assertLess(time.monotonic() - began, 3)
+        finally:
+            os.close(descriptor)
+            child.wait()
+        dep._await_exit(-1, 0.01)  # an unusable descriptor never raises
 
     def test_menu9_keeps_the_signal_history_when_a_later_step_fails(self):
         plan = self.install_plan().recheck

@@ -748,7 +748,8 @@ reinspects as before.
 ## Registered-game new prefixes (0.25.0)
 
 With `game_preparation` (operator-declared profiles and recipes; only the SoftDenchi
-recipe can be `ready`, MFC stays `blocked`), menu 10 initializes a new prefix for a
+recipe can be `ready`, MFC stays `blocked`; 0.27.0 adds read-only `game-folder-file`
+recipes), menu 10 initializes a new prefix for a
 registered game that has no compatdata yet. Probe registrations keep the dedicated
 trial scope and existing prefixes stay read-only. The same guarded session as the
 probe trial runs the fixed builtin initialization with the reviewed preparation slot;
@@ -822,20 +823,19 @@ profile name.
 
 ## Sending to the second SdProxy after the first exits (0.26.4)
 
-On the device (0.26.3) the stop conditions held and SIGTERM reached the first SdProxy,
-but the view read before the second send contained an unreadable process, so the stop
-aborted; minutes later, without a restart, no process of the prefix remained. A process
-that is exiting is briefly unreadable (empty argv or a state change between reads). Now,
+A stop could abort after the first SIGTERM because the view read before the second send
+contained an unreadable process. The working hypothesis (not confirmed) is that an
+exiting process is briefly unreadable (empty argv or a state change between reads). Now,
 after each SIGTERM, the tool waits up to 5 s for the signaled SdProxy to exit (its pidfd
 turns readable), then reads the view again every 0.25 s for up to 5 s until it is fully
 readable and explained; only such a view allows the next send, and a target that has
 exited meanwhile is recorded as gone. Reading again is allowed only while the view merely
-shrinks (every readable process and every unreadable PID was in the confirmed view);
-anything new still aborts at once. If no view qualifies, the stop aborts as before and
-the record keeps the unreadable PIDs of the last view (`stop.unreadable_pids`, at most
-16; process summaries also carry `unreadable_pids`). Menu 8 now prints why a stop was
-refused or aborted, how many SIGTERMs were sent, and, unless the post-inspection passed,
-to restart DroidDeck and check the prefix with menu 9 when no post-inspection ran.
+shrinks (see 0.27.3 for the exact rule); anything new or changed aborts at once. If no
+view qualifies, the stop aborts as before and the record keeps the unreadable PIDs of the
+last view (`stop.unreadable_pids`, at most 16; process summaries also carry
+`unreadable_pids`). Menu 8 prints why a stop was refused or aborted and how many
+SIGTERMs were sent, and, when no post-inspection ran (`post_state` None or
+`uninspected`), to restart DroidDeck and check the prefix with menu 9.
 
 ## Game-folder file dependencies and profile revisions (0.27.0)
 
@@ -844,49 +844,58 @@ x86 executable importing the ANSI `MFC42.DLL`), while the 32-bit MFC140 and VC++
 2015-2019 runtime that SoftDenchi's in-process components load are installed by the
 SoftDenchi bootstrap during menu 8. A new recipe handler,
 `game-folder-file`, declares such a file by name, size, SHA-256 and PE architecture
-together with the EXE hash and import it was derived from; the profile must pin that
-EXE hash. It is the only handler besides the SoftDenchi installer that may be `ready`.
-Menu 11 checks it read-only: exactly one single-link regular file of that name
-(case-insensitive) directly in the registered EXE's folder, matching size, hash and
-architecture, is `present-verified`; none is `absent`; a symlink, several case
-variants or other content is `incompatible`; unreadable is `uninspected`. The check
-runs again in the readiness callback before each binding write. Nothing is copied,
-moved, installed or loaded; whether the game loads the file is only observable at
-launch. `mfc-local` (placing MFC into the prefix) stays blocked.
+together with the EXE hash and import it was derived from (the import must name the
+file); the profile must pin that EXE hash. It is the only handler besides the SoftDenchi
+installer that may be `ready`, so a bound prefix no longer implies a verified SoftDenchi
+unless the profile lists it. Menu 11 checks it read-only: exactly one single-link
+regular file of that ASCII name (case-insensitive) directly in the registered EXE's
+folder, matching size, hash and architecture, and of the same architecture as the
+registered EXE, is `present-verified`; none is `absent`; a symlink, several case
+variants, other content, another architecture or a change while reading is
+`incompatible`; unreadable is `uninspected`. `present-verified` means a match with the
+declaration only: the file's provenance is not checked and the EXE import table is not
+read. The check runs again in the readiness callback before each binding write. Nothing
+is copied, moved, installed or loaded; whether the game loads the file is only
+observable at launch. `mfc-local` (placing MFC into the prefix) stays blocked.
 
 Menu 11 also accepts a later revision of the profile bound at initialization: same
 profile ID, a strictly higher revision, and a pinned EXE hash equal to the one measured
 at initialization (which the recheck still verifies live). Dependencies are evaluated
-live, so a revision that only refines them needs no new prefix. The plan and result
-record both revisions and digests; any other change still refuses. Profile title and
-edition are not in the record and cannot be compared.
+live, so a new prefix is not needed. The record keeps no dependency list, title or
+edition, so a revision that drops a dependency or renames the profile cannot be detected;
+menu 11 shows the current title, edition and dependencies for the operator. The plan
+and result record both revisions and digests; any other change still refuses.
 
 Menus 10 and 11 report whether the registered EXE path is ASCII and warn otherwise: a
-game in a folder named with non-ASCII characters has been observed to exit right after
-start while an ASCII-named copy with the same kind of prefix proceeded (the failing
-call was not observed).
+game in a folder named with non-ASCII characters has been seen to exit right after start
+while an ASCII-named copy with the same kind of prefix proceeded (the cause is not
+known). The registration path is fixed at initialization, so a folder must be renamed
+and registered again before menu 10.
 
 ## DroidDeck's redistributable markers in the preparation slot (0.27.1)
 
-On the device, the first DroidDeck game session after the preparation slot was placed
-appended Steam CommonRedist "installed" flags (DirectX, .NET 4.5.2, VC++ 2017/2019/2022)
-and VC++ runtime version keys to the slot's `files/share/default_pfx_arm64/system.reg`
-(keeping its mtime) and added `.droiddeck-redists` and `.droiddeck-redists-checked`
-beside it. The regular SoftDenchi slot had received the identical block once, two days
-earlier, and has not changed since. Every step that verified the slot then stopped.
+DroidDeck, in its first game session after a compatibility tool appears, appends Steam
+CommonRedist "installed" flags (DirectX, .NET 4.5.2, VC++ 2017/2019/2022) and VC++
+runtime version keys to the tool's `files/share/default_pfx_arm64/system.reg` (keeping
+its mtime) and adds `.droiddeck-redists` and `.droiddeck-redists-checked` beside it, once
+per tool. After that, every step that verified the preparation slot stopped.
 
 The runtime-contract verifier (`verify_fex_runtime_tree`, used by the reuse plan of the
-preparation slot, trials, recheck, dependency steps and binding) now accepts exactly
-this, and nothing else: the archive bytes of that `system.reg` must remain a byte-for-byte
-prefix with the same mode, followed by at most 64 KiB of sections whose keys are
-`Software\[Wow6432Node\]Valve\Steam\Apps\CommonRedist\...` (one to three path parts) or
-`Software\[Wow6432Node\]Microsoft\VisualStudio\14.0\VC\Runtimes\{x86,x64,arm64}`, with
-only `dword` values or a `"v<digits/dots>"` string; such a tail requires the
-`.droiddeck-redists` marker. The two markers must be small single-link regular files
-without execute or group/other write bits; their content is only hashed and reported
-(`droiddeck_redist` in the verifier result). The ordinary strict `verify_tree` is
-unchanged. Prefixes created from such a template inherit these registry entries; whether
-that makes the SoftDenchi bootstrap skip its VC++ runtime is not verified.
+preparation slot when its FEX directory exists, and directly by trials, recheck,
+dependency steps and binding) now accepts this bounded change in addition to the FEX
+directory: the archive bytes of that `system.reg` must remain a byte-for-byte prefix with
+the same mode, followed by at most 8 KiB starting and ending with a newline, made only of
+sections `Software\[Wow6432Node\]Valve\Steam\Apps\CommonRedist\<part>\<part>` with
+`dword` values and `Software\[Wow6432Node\]Microsoft\VisualStudio\14.0\VC\Runtimes\{x86,x64,arm64}`
+with `Bld`, `Installed`, `Major`, `Minor`, `Rbld` (`dword`) and `Version` (`"v<digits/dots>"`),
+each section with at least one value; such a tail requires the `.droiddeck-redists`
+marker. The two markers must be small single-link regular files without execute or
+group/other write bits; their content is only hashed and reported. Failures carry a
+located tree diagnostic (`redist-registry-tail`, `redist-marker`, `redist-marker-missing`).
+The ordinary strict `verify_tree` is unchanged. Proton copies the template, including
+the tail and the markers, into each new prefix; whether that makes the SoftDenchi
+bootstrap skip its VC++ runtime is not verified, and the SoftDenchi post-inspection
+does not check VC++ runtime files.
 
 ## Review fixes (0.27.2)
 
@@ -904,3 +913,13 @@ that makes the SoftDenchi bootstrap skip its VC++ runtime is not verified.
   the recheck readiness check and the binding readiness check before each write require
   it to be unchanged (the menu 10 initialization guard re-verifies the tree but does not
   compare this state).
+
+## Review follow-ups (0.27.3)
+
+- Stop: while settling, a readable process counts as unchanged only if it is in the
+  confirmed view with the same image, prefix consistency and executable identity (its
+  parent may change); otherwise the stop aborts at once (`not-shrinking`). Menu 8 shows
+  the number of SIGTERMs whenever any was sent; menu 9 shows the restart hint only when
+  its inspection is `uninspected`.
+- Binding: non-object recipe entries are refused by validation; ready handlers are
+  dispatched explicitly.

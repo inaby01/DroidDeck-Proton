@@ -66,10 +66,14 @@ class ConfigTests(unittest.TestCase):
             {**folder_recipe(), 'file': {**folder_recipe()['file'], 'pe_machine': 'arm64'}},
             {**folder_recipe(), 'file': {**folder_recipe()['file'], 'sha256': 'x'}},
             {**folder_recipe(), 'required_by': {'exe_sha256': EXE_HASH}},
-            {**RECIPES[1], 'file': folder_recipe()['file']})
+            {**RECIPES[1], 'file': folder_recipe()['file']},
+            {**folder_recipe(), 'required_by': {'exe_sha256': EXE_HASH, 'import': 'OTHER.DLL'}})
         for recipe in broken_recipes:
             with self.subTest(recipe=recipe), self.assertRaises(Invalid):
                 game.validate_game_config({'profiles': [profile], 'recipes': RECIPES + [recipe]})
+        for entry in ('not-an-object', ['list'], None, 7):
+            with self.subTest(entry=entry), self.assertRaises(Invalid):
+                game.validate_game_config({'profiles': [profile], 'recipes': RECIPES + [entry]})
         for changed in ({**profile, 'exe_sha256': None}, {**profile, 'exe_sha256': 'b' * 64}):
             with self.subTest(profile=changed), self.assertRaisesRegex(Invalid, 'game-folder dependency requires'):
                 game.validate_game_config({'profiles': [changed], 'recipes': RECIPES + [folder_recipe()]})
@@ -92,6 +96,15 @@ class ConfigTests(unittest.TestCase):
             (folder / 'MFC42.DLL').write_bytes(synthetic_pe(0x8664))
             self.assertEqual(game.inspect_game_folder_file(exe, {**spec, 'size': len(synthetic_pe(0x8664))})['state'],
                              'incompatible')
+            # Declared x64 and present as x64, but the game executable is x86.
+            x64 = synthetic_pe(0x8664)
+            declared = {**spec, 'size': len(x64), 'sha256': hashlib.sha256(x64).hexdigest(), 'pe_machine': 'x86_64'}
+            self.assertEqual(game.inspect_game_folder_file(exe, declared),
+                             {'state': 'incompatible', 'reason': 'architecture differs from the game executable'})
+            # Only ASCII names match: the Kelvin sign is not the letter k.
+            (folder / '\u212a.dll').write_bytes(DLL)
+            self.assertEqual(game.inspect_game_folder_file(exe, {**spec, 'name': 'k.dll'})['state'], 'absent')
+            (folder / '\u212a.dll').unlink()
             (folder / 'MFC42.DLL').unlink()
             (root / 'elsewhere.dll').write_bytes(DLL)
             (folder / 'mfc42.dll').symlink_to(root / 'elsewhere.dll')
@@ -333,6 +346,31 @@ class GamePrefixTests(DEP['InstallTests']):
         self.assertEqual(second.summary()['dependencies'][1]['declared_file']['sha256'], hashlib.sha256(other).hexdigest())
         dll.unlink()
 
+    def test_folder_file_is_rechecked_by_the_readiness_callback_and_needs_a_clear_view(self):
+        self.use_folder_dependency()
+        record, digest = self.initialize()
+        self.install_dependency(record, digest)
+        dll = self.f.exe.parent / 'mfc42.dll'
+        dll.write_bytes(DLL)
+        plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ())
+        before = self.protected()
+        lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
+        dll.write_bytes(DLL + b'changed after the refresh')
+        # refresh() still returns the original plan, so only ready() can see the change.
+        with PrivateStore(self.f.store_root) as store, store.locked(lock), \
+                self.assertRaisesRegex(Invalid, 'dependency postconditions changed'):
+            game.apply_game_binding(plan, store, lambda: plan, plan.digest, ProcessStopCheck(self.game_compat, self.f.proc),
+                                    self.recipe)
+        self.assertEqual(before, self.protected())
+
+        class Busy:
+            def check(self):
+                return {'clear_in_view': False}
+        states = game._dependency_states(plan.profile, plan.recipes, self.game_compat, self.recipe, Busy(), self.f.exe)
+        self.assertEqual([item['state'] for item in states], ['uninspected', 'uninspected'])
+        dll.unlink()
+
     def test_later_profile_revision_with_the_initialized_exe_is_accepted(self):
         record, digest = self.initialize()
         self.install_dependency(record, digest)
@@ -347,6 +385,7 @@ class GamePrefixTests(DEP['InstallTests']):
             status, report, output = self.menu('11\n1\nq\n')
         self.assertEqual((status, report), (0, None))
         self.assertIn('初期化時の改訂1から改訂2へ', output)
+        self.assertIn('現在のプロファイル: Synthetic game profile / unconfirmed edition / 依存 softdenchi-runtime, mfc42-game-folder', output)
         self.assertIn('mfc42-game-folder / present-verified', output)
         profile = self.config['game_preparation']['profiles'][0]
         for changed in ({'revision': 1}, {'exe_sha256': 'b' * 64}):

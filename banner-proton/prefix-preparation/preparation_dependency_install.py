@@ -232,8 +232,10 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
     nothing unreadable, unclassified, with a conflicting prefix, or a SdProxy outside
     the batch (a view is read before every later send, even when the previous target was
     already gone). A view that is not yet so is read again for a bounded time only while it
-    merely shrinks (every readable process and every unreadable PID was in the confirmed
-    view; a process that is exiting is briefly unreadable); anything new, or no
+    merely shrinks (every readable process is in the confirmed view with the same image,
+    prefix consistency and executable identity, and every unreadable PID was in it; the
+    working hypothesis is that an exiting process is briefly unreadable); anything new or
+    changed, or no
     qualifying view in time, aborts and the unreadable PIDs of the last view go to
     ``detail`` with the abort kind (``timeout`` or ``not-shrinking``), the number of reads
     and the PIDs that were not in the confirmed view. Each later log entry carries its reads
@@ -271,8 +273,13 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
         first, second = inventory_processes(compatdata, proc_root), inventory_processes(compatdata, proc_root)
         require(proxy_stop_targets(first, second, scope) == batch, "stop candidates changed")
         confirmed = {(p["pid"], p["started"]): p for p in second["processes"] if (p["pid"], p["started"]) in batch}
-        confirmed_keys = {(p["pid"], p["started"]) for p in second["processes"]}
+        confirmed_view = {(p["pid"], p["started"]): p for p in second["processes"]}
         confirmed_pids = {p["pid"] for p in second["processes"]}
+
+        def changed(p):
+            # A confirmed process may only lose its parent; any other change counts as new.
+            then = confirmed_view.get((p["pid"], p["started"]))
+            return then is None or any(p[name] != then[name] for name in ("image", "prefix_consistent", "executable_id"))
         last_sent = None
         for index, key in enumerate(batch):
             if index:
@@ -291,8 +298,7 @@ def signal_proxies(compatdata, targets, proc_root, sender=None, log=None, scope=
                     except Invalid:
                         # Read again only while the view merely shrinks: every readable process and
                         # every unreadable PID was in the confirmed view. Anything new aborts at once.
-                        new_pids = sorted({p["pid"] for p in current["processes"]
-                                           if (p["pid"], p["started"]) not in confirmed_keys} |
+                        new_pids = sorted({p["pid"] for p in current["processes"] if changed(p)} |
                                           (set(current["unreadable_pids"]) - confirmed_pids))
                         settling = current["unreadable_count"] == len(current["unreadable_pids"]) and not new_pids
                         if not settling or time.monotonic() >= deadline:
@@ -1197,6 +1203,8 @@ def _offer_session_proxy_stop(session, stream, output, text):
         print(f"停止を中止しました（{text(stop.get('reason') or stop.get('error_class') or '')}）。送信済み {sent}件。", file=output)
     elif stop.get("result") == "sigterm-sent-processes-remain":
         print(f"SIGTERMを{sent}件送りましたが、待機時間内にこのprefixのプロセスが終了しませんでした。", file=output)
+    elif sent:
+        print(f"SIGTERMは{sent}件送信済みです。", file=output)
     print("停止後の状態: " + text(result["status"]), file=output)
     if result.get("post_state") in (None, "uninspected"):
         print("導入後の検査は済んでいません。" + RESTART_THEN_MENU9, file=output)
@@ -1228,7 +1236,6 @@ def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sende
         entry["stop"].update(result="aborted", **describe_error(error, "lingering-proxy-signal"))
         sent = sum(item["result"] == "sigterm-sent" for item in entry["stop"]["signals"])
         print(f"停止を中止しました（{text(entry['stop']['reason'] or entry['stop']['error_class'])}）。送信済み {sent}件。", file=output)
-        print(RESTART_THEN_MENU9, file=output)
         return entry
     entry["stop"]["result"] = "sigterm-sent"
     try:
@@ -1295,6 +1302,8 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
             lingering = offer_reinspection_proxy_stop(base, store, stop, stream, output, selection._text)
             inspection = inspect_managed_dependency(base, store, stop, recipe)
             history = [item for item in store.inventory()["dependency_installs"] if item.get("app_id") == record["app_id"]]
+        if inspection.get("state") == "uninspected":
+            print(RESTART_THEN_MENU9, file=output)
         report = {"mode": "managed-dependency-reinspection-result", "scope": SCOPE, "tool_version": VERSION,
                   "app_id": record["app_id"], "lingering": lingering,
                   "inspection": inspection, "installation_history": history, "wine_started": False,
