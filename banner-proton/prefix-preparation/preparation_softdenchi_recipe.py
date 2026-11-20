@@ -146,6 +146,29 @@ def validate_recipe(recipe):
     return recipe
 
 
+# Silent launch of the recipe bootstrap (one-pass preparation only). The bootstrap is an
+# InstallShield Basic MSI setup.exe (Setup.ini ScriptDriven=0); "/s" with "/v<msiexec option>"
+# is its documented silent form, and /v may be repeated. REBOOT=ReallySuppress keeps the MSI
+# (ScheduleReboot under ISSCHEDULEREBOOT) from restarting. No argument contains a space, so
+# nothing depends on quoting through Wine. Bound to the exact bootstrap; not part of the
+# recipe digest, so records of interactive installations stay comparable.
+SILENT_LAUNCH = {"bootstrap_sha256": _RECIPE["bootstrap"]["sha256"],
+                 "arguments": ["/s", "/v/qn", "/vREBOOT=ReallySuppress"]}
+
+
+def silent_arguments(recipe, launch=None):
+    """The pinned silent arguments for this recipe's bootstrap, or refusal."""
+    validate_recipe(recipe)
+    launch = SILENT_LAUNCH if launch is None else launch
+    fields(launch, ("bootstrap_sha256", "arguments"))
+    arguments = launch["arguments"]
+    require(launch["bootstrap_sha256"] == recipe["bootstrap"]["sha256"], "silent launch not defined for this bootstrap")
+    require(type(arguments) is list and 0 < len(arguments) <= 8 and
+            all(type(a) is str and re.fullmatch(r"/[A-Za-z0-9/=_.-]{1,64}", a, re.ASCII) for a in arguments),
+            "invalid silent arguments")
+    return list(arguments)
+
+
 def recipe_digest(recipe):
     return digest_json(validate_recipe(recipe))
 

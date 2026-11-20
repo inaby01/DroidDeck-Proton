@@ -55,6 +55,7 @@ from preparation_softdenchi_recipe import (
     HANDLER,
     bind_asset,
     recipe_digest,
+    silent_arguments,
     softdenchi_recipe,
     validate_recipe,
 )
@@ -87,6 +88,9 @@ INSTALLER_OBSERVATION_INTERVAL = 0.5
 # The installer window needs the operator's attention; ask "wait again?" only after this long,
 # so the SdProxy attribution keeps observing while the operator works in that window.
 INSTALLER_QUIET_WAIT = 600
+INSTALLER_MODES = ("interactive", "silent")
+# The operator's license decision in a silent run is the one-pass confirmation itself.
+SILENT_LICENSE_CONSENT = "one-pass-confirmation"
 POST_STATUS = {"present-verified": "present-verified", "present-unverified": "installed-unverified", "partial": "partial",
                "incompatible": "incompatible", "absent": "cancelled-absent", "uninspected": "needs-user"}
 
@@ -355,7 +359,8 @@ def validate_install_record(record):
                     "handler", "recipe_revision", "recipe_digest", "asset_sha256", "input_digest", "previous_install_id",
                     "phase", "status", "gui_check", "installer", "pre_state", "post_state", "runtime_execution_verified",
                     "device_namespace_verified", "preparation_complete"),
-           ("post_inspection", "stop_observation", "settings_identity_unchanged", "prefix_allocation", "lingering", "error"))
+           ("post_inspection", "stop_observation", "settings_identity_unchanged", "prefix_allocation", "lingering", "error",
+            "license_consent"))
     require(type(record["schema_version"]) is int and record["schema_version"] == 1 and record["scope"] == SCOPE,
             "unsupported installation record")
     require(type(record["tool_version"]) is str and 0 < len(record["tool_version"]) <= 64, "invalid installation version")
@@ -369,7 +374,7 @@ def validate_install_record(record):
     require(record["phase"] in PHASES and record["status"] in STATUSES, "invalid installation state")
     for section in ("gui_check", "installer"):
         fields(record[section], ("status", "unix_exit_status"), ("display_confirmed", "staged_unchanged", "spawned_started",
-                                                               "installer_proxies"))
+                                                               "installer_proxies", "mode", "arguments"))
         require(record[section]["unix_exit_status"] is None or type(record[section]["unix_exit_status"]) is int,
                 "invalid exit status")
     require("spawned_started" not in record["gui_check"] and
@@ -382,6 +387,18 @@ def validate_install_record(record):
              0 < len(attributed) <= MAX_INSTALLER_PROXIES and
              all(type(item) is list and len(item) == 2 and all(type(v) is int and v >= 0 for v in item) for item in attributed) and
              len({tuple(item) for item in attributed}) == len(attributed)), "invalid installer SdProxy attribution")
+    require("mode" not in record["gui_check"] and "arguments" not in record["gui_check"], "invalid GUI check record")
+    mode = record["installer"].get("mode", "interactive")
+    arguments = record["installer"].get("arguments", [])
+    require(mode in INSTALLER_MODES and type(arguments) is list and len(arguments) <= 8 and
+            all(type(a) is str and 0 < len(a) <= 64 for a in arguments) and (mode == "silent") == bool(arguments),
+            "invalid installer mode")
+    # A silent run never shows or confirms a window; the GUI check is recorded as not applicable, not as confirmed.
+    require((mode == "silent") == (record["gui_check"]["status"] == "not-applicable") and
+            (mode != "silent" or "display_confirmed" not in record["gui_check"]) and
+            (mode == "silent") == (record.get("license_consent") == SILENT_LICENSE_CONSENT) and
+            ("license_consent" not in record or record["license_consent"] == SILENT_LICENSE_CONSENT),
+            "invalid silent installation record")
     require(record["pre_state"] in ("absent",) and record["post_state"] in (None, "uninspected", "absent", "partial", "incompatible",
             "present-unverified", "present-verified"), "invalid dependency state")
     require(all(record[name] is False for name in ("runtime_execution_verified", "device_namespace_verified",
@@ -466,20 +483,26 @@ class InstallPlan:
     inputs_root: object = field(repr=False)
     capacity: dict = field(repr=False)
     blockers: tuple
+    installer_mode: str = "interactive"
+    installer_arguments: tuple = ()
 
     def summary(self):
         p = self.recheck
+        silent = self.installer_mode == "silent"
         return {"scope": SCOPE, "input_digest": self.digest, "trial_id": p.record["trial_id"], "recheck_id": self.recheck_id,
                 "app_id": p.record["app_id"], "prefix": str(p.compatdata), "handler": HANDLER,
                 "recipe_revision": self.recipe["revision"], "asset": {"filename": self.spec["filename"],
                 "sha256": self.measured["sha256"] if self.measured else None, "size": self.measured["size"] if self.measured else None},
                 "pre_state": self.pre_state["state"], "pre_groups": self.pre_state["groups"],
                 "previous_installation": self.previous, "capacity": self.capacity,
-                "steps": [{"step": "gui-check", "command": list(GUI_COMMAND)},
+                "installer_mode": self.installer_mode,
+                "steps": [*([] if silent else [{"step": "gui-check", "command": list(GUI_COMMAND)}]),
                           {"step": "original-bootstrap", "command": ["runinprefix", "<private copy of " + self.spec["filename"] + ">"],
-                           "arguments": [], "silent_arguments_inferred": False, "msi_only_bypass": False},
+                           "arguments": list(self.installer_arguments), "silent_arguments_inferred": False,
+                           "silent_arguments_source": "pinned-installshield-basic-msi" if silent else None, "msi_only_bypass": False},
                           {"step": "offline-postconditions", "wine_started": False}],
-                "license_decision": "operator-in-installer-window", "authentication_performed": False,
+                "license_decision": SILENT_LICENSE_CONSENT if silent else "operator-in-installer-window",
+                "authentication_performed": False,
                 "network_blocked": False, "forced_termination": False, "blockers": list(self.blockers),
                 "execution_authorized": False, "device_namespace_verified": False, "preparation_complete": False, "writes": []}
 
@@ -499,8 +522,10 @@ def plan_dependency_install(**kwargs):
 
 
 def _plan_dependency_install(progress, *, record, record_sha256, config, directory, renderer, source, games, steam, settings,
-                             home, environment, runtime_root, recipe=None):
+                             home, environment, runtime_root, recipe=None, installer_mode="interactive", silent_launch=None):
     recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
+    require(installer_mode in INSTALLER_MODES, "invalid installer mode")
+    arguments = tuple(silent_arguments(recipe, silent_launch)) if installer_mode == "silent" else ()
     dependency = validate_dependency_config(config.get("dependency_installation"))
     require(dependency["recipe_revision"] == recipe["revision"], "configured recipe revision differs")
     progress.append("managed-recheck-plan")
@@ -544,9 +569,10 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
                  "recipe": recipe_digest(recipe), "binding": binding, "spec": digest_json(spec), "measured": report["measured"],
                  # The history is shown, not pinned: this session's own record must not invalidate its plan.
                  "pre_state": digest_json(pre), "inputs": str(inputs_root),
-                 "capacity_sufficient": capacity["sufficient"], "blockers": sorted(blockers)}
+                 "capacity_sufficient": capacity["sufficient"], "blockers": sorted(blockers),
+                 "installer_mode": installer_mode, "installer_arguments": list(arguments)}
     return InstallPlan(digest_json(signature), base, recheck_id, recheck_sha256, recipe, spec, directory, report["measured"],
-                       pre, latest, inputs_root, capacity, tuple(sorted(blockers)))
+                       pre, latest, inputs_root, capacity, tuple(sorted(blockers)), installer_mode, arguments)
 
 
 class DependencyInstallSession:
@@ -568,6 +594,10 @@ class DependencyInstallSession:
                        "installer": {"status": "not-started", "unix_exit_status": None}, "pre_state": plan.pre_state["state"],
                        "post_state": None, "runtime_execution_verified": False, "device_namespace_verified": False,
                        "preparation_complete": False}
+        if plan.installer_mode == "silent":
+            self.record["gui_check"] = {"status": "not-applicable", "unix_exit_status": None}
+            self.record["installer"].update(mode="silent", arguments=list(plan.installer_arguments))
+            self.record["license_consent"] = SILENT_LICENSE_CONSENT
 
     def _save(self):
         validate_install_record(self.record)
@@ -607,6 +637,7 @@ class DependencyInstallSession:
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def start_gui_check(self):
+        require(self.plan.installer_mode == "interactive", "GUI check belongs to the interactive installer")
         require(self.hash is None and self.process is None and self.confirmation == self.plan.digest,
                 "exact unused confirmation required")
         require(not self.plan.blockers, "dependency installation blocked")
@@ -711,8 +742,13 @@ class DependencyInstallSession:
         summary["stop_origins"] = count_origins(origins)
         return summary, list(origins), None
 
-    def stop_lingering_proxies(self, sender=None):
-        """Operator-confirmed: SIGTERM only to SdProxy explained by proxy_stop_targets, then post-checks."""
+    def stop_lingering_proxies(self, sender=None, confirmation="operator-prompt"):
+        """Operator-confirmed: SIGTERM only to SdProxy explained by proxy_stop_targets, then post-checks.
+
+        ``confirmation`` records how the operator agreed: at the prompt (menu 8), or in the
+        one-pass confirmation before the run (menu 12). The targets and conditions are the same.
+        """
+        require(confirmation in ("operator-prompt", "one-pass-preapproved"), "invalid stop confirmation")
         require(self.record["phase"] == "installer-exited" and self.record["installer"]["status"] == "exited-processes-remain",
                 "no lingering installer processes recorded")
         entry = self.record.setdefault("lingering", {"section": "installer"})
@@ -729,7 +765,7 @@ class DependencyInstallSession:
                 return self._save()
             targets = list(origins)
             entry["stop"] = {"result": "sending", "planned": len(targets), "origins": count_origins(origins), "signals": [],
-                             "signal": "SIGTERM", "forced_kill": False}
+                             "signal": "SIGTERM", "forced_kill": False, "confirmation": confirmation}
             self._save()
             try:
                 entry["stop"]["sent"] = signal_proxies(compatdata, targets, proc_root, sender, entry["stop"]["signals"], scope,
@@ -820,8 +856,23 @@ class DependencyInstallSession:
         return True
 
     def start_installer(self):
+        require(self.plan.installer_mode == "interactive", "interactive plan required")
         require(self.record["phase"] == "gui-check-stopped" and self.record["gui_check"].get("display_confirmed") is True and
                 self.process is None and self.record["status"] == "running", "confirmed GUI check required first")
+        return self._start_installer(("runinprefix",))
+
+    def start_silent_installer(self):
+        """One-pass only: the pinned silent bootstrap launch, after the same checks start_gui_check makes."""
+        require(self.plan.installer_mode == "silent" and self.plan.installer_arguments, "silent plan required")
+        require(self.hash is None and self.process is None and self.confirmation == self.plan.digest,
+                "exact unused confirmation required")
+        require(not self.plan.blockers, "dependency installation blocked")
+        require(self.refresh().digest == self.plan.digest, "dependency installation plan changed")
+        self._guard()
+        self._clear()
+        return self._start_installer(("runinprefix",))
+
+    def _start_installer(self, head):
         try:
             require(self.refresh().digest == self.plan.digest, "dependency installation plan changed")
             self._guard()
@@ -839,7 +890,7 @@ class DependencyInstallSession:
             self.record.update(phase="installer-spawned")
             self.record["installer"]["status"] = "running"
             self._save()
-            self.process = self._spawn(launch, ("runinprefix", str(self.staged)))
+            self.process = self._spawn(launch, (*head, str(self.staged), *self.plan.installer_arguments))
         except (OSError, ValueError, TypeError, KeyError) as error:
             self._fail("installer-start", error)
             raise
@@ -1185,7 +1236,7 @@ def _confirm_proxy_stop(count, stream, output, origins=None):
     return stream.readline(32).strip() == "1"
 
 
-def _offer_session_proxy_stop(session, stream, output, text):
+def _offer_session_proxy_stop(session, stream, output, text, preapproved=False, next_step=RESTART_THEN_MENU9):
     summary, targets, reason = session.preview_proxy_stop()
     _print_lingering(summary, output, text)
     if targets is None:
@@ -1193,11 +1244,16 @@ def _offer_session_proxy_stop(session, stream, output, text):
         session.record.setdefault("lingering", {"section": "installer"})["stop"] = {"result": "refused", "reason": reason}
         session._save()
         return
-    if not _confirm_proxy_stop(len(targets), stream, output, summary.get("stop_origins")):
+    if preapproved:
+        origins = summary.get("stop_origins") or {"ucmansvc": len(targets)}
+        detail = "、".join(f"{ORIGIN_TEXT[name]} {number}件" for name, number in sorted(origins.items()))
+        print(f"最初の確認に基づき、このprefixのSdProxy {len(targets)}件（{detail}）だけにSIGTERMを送ります。"
+              "強制終了（SIGKILL）はしません。", file=output, flush=True)
+    elif not _confirm_proxy_stop(len(targets), stream, output, summary.get("stop_origins")):
         session.record.setdefault("lingering", {"section": "installer"})["stop"] = {"result": "declined"}
         session._save()
         return
-    result = session.stop_lingering_proxies()
+    result = session.stop_lingering_proxies(confirmation="one-pass-preapproved") if preapproved else session.stop_lingering_proxies()
     stop = (result.get("lingering") or {}).get("stop") or {}
     sent = sum(item["result"] == "sigterm-sent" for item in stop.get("signals", []))
     if stop.get("result") == "refused":
@@ -1210,7 +1266,7 @@ def _offer_session_proxy_stop(session, stream, output, text):
         print(f"SIGTERMは{sent}件送信済みです。", file=output)
     print("停止後の状態: " + text(result["status"]), file=output)
     if result.get("post_state") in (None, "uninspected"):
-        print("導入後の検査は済んでいません。" + RESTART_THEN_MENU9, file=output)
+        print("導入後の検査は済んでいません。" + next_step, file=output)
 
 
 def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sender=None):

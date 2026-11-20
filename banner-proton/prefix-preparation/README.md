@@ -989,3 +989,45 @@ launches never write them (`PYTHONDONTWRITEBYTECODE`, 0.27.5).
   stop aborts at once (`not-shrinking`).
 - Menu 10: the initialization guard right before spawn requires the runtime writes of the
   preparation slot (`tool_runtime_writes`) to equal those of the plan.
+
+## One-pass preparation of a new game (0.28.0)
+
+Menu 12 runs the steps of menus 10, 8 and 11 for one registered game in one run, with one
+confirmation. It is offered when the bundle enables the initialization trial, the
+reviewed placement, game preparation and dependency installation.
+
+- Selection: registered games without a prefix ("new") and games with a tool record
+  ("resume"). A profile is chosen automatically when exactly one profile pins the
+  measured EXE hash; otherwise it is asked as in menu 10.
+- Confirmation: before anything is written, the run shows the registration, profile,
+  prefix, preparation slot, the SoftDenchi installer with its silent arguments, the
+  license statement, the SdProxy stop rule and the settings files the binding changes.
+  The confirmation is taken for a digest of fixed values (registration and EXE, profile
+  and recipe digests, asset and installer mode, private paths, payload/customization/
+  runtime identity and runtime writes, binding plan digest including the settings
+  inputs). Each later step plans again (the same plans, guards and writers as the
+  separate menus) and stops, without asking again, when its fixed values differ.
+- Locks: the private tool/prefix lock is held from the first write to the last step;
+  the DroidDeck settings lock is held during initialization and installation only, and
+  the binding writer takes it itself.
+- SoftDenchi: the recipe bootstrap runs with pinned silent arguments
+  `/s /v/qn /vREBOOT=ReallySuppress` (InstallShield Basic MSI setup.exe; `SILENT_LAUNCH`,
+  bound to the bootstrap hash and kept out of the recipe digest). There is no winver
+  check; the record states `gui_check.status = not-applicable`, `installer.mode = silent`
+  and `license_consent = one-pass-confirmation`. Menu 8 keeps the interactive installer
+  and its display check. A lingering SdProxy is stopped under the unchanged rules,
+  confirmed by the one-pass confirmation (`stop.confirmation = one-pass-preapproved`).
+- Interactive fallback: only when the silent run installs nothing (`cancelled-absent`),
+  the run plans the interactive installer, requires every fixed value except the
+  installer mode to be unchanged, and asks for a separate confirmation of that plan.
+- Resume: a stopped run is continued by running menu 12 again. A failed or unreadable
+  installation record stops; a record after which a new attempt is allowed leads to an
+  installation when the current state is `absent`; `present-verified` (current, offline
+  inspection with a clear view) moves on to binding. Moving on from a record whose
+  post-inspection never ran is recorded as a separate read-only check. Partial, unverified
+  or incompatible states stop and nothing is repaired.
+- Binding: decided by the current three settings files. When the plan changes nothing,
+  the game is reported as bound; an earlier failed binding, or a verified binding whose
+  files changed since, stops.
+- Not done: registering the game, authentication and the first launch. Silent
+  installation on device Wine is not yet measured.

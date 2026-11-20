@@ -36,9 +36,11 @@ from pathlib import Path
 root = Path(os.environ['STEAM_COMPAT_DATA_PATH'])
 if sys.argv[1:] == ['runinprefix', 'winver.exe']:
     raise SystemExit(0)
-if len(sys.argv) == 3 and sys.argv[1] == 'runinprefix' and sys.argv[2].startswith('/'):
+if len(sys.argv) >= 3 and sys.argv[1] == 'runinprefix' and sys.argv[2].startswith('/'):
     raw = Path(sys.argv[2]).read_bytes()
     spec = json.loads(raw.split(b'\\nDROIDDECK_SYNTHETIC_INSTALLER\\n', 1)[1])
+    if sys.argv[3:] and spec.get('silent_noop'):
+        raise SystemExit(0)
     drive = root / 'pfx/drive_c'
     for relative, data in spec['files'].items():
         path = drive / relative
@@ -94,10 +96,13 @@ FILES = {'Program Files (x86)/SoftDenchi/SatX4.ocx': X86, 'Program Files/SoftDen
          'Program Files (x86)/SoftDenchi/UCManSvc.exe': SERVICE, 'Program Files (x86)/SoftDenchi/License.txt': TEXT}
 
 
-def installer(files=None, registry=None, exit_code=0):
+def installer(files=None, registry=None, exit_code=0, silent_noop=False):
     files = FILES if files is None else files
     body = {'files': {k: base64.b64encode(v).decode() for k, v in files.items()},
             'registry': wine_registry() if registry is None else registry, 'exit': exit_code}
+    if silent_noop:
+        # A bootstrap that ignores the silent arguments: it installs nothing when given any.
+        body['silent_noop'] = True
     return PE() + MARKER + json.dumps(body).encode()
 
 

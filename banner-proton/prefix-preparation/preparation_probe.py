@@ -539,6 +539,9 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
     if config.get("initialization_trial") is True and "placement_review" in config and "game_preparation" in config:
         print("10. 実ゲーム登録の新規prefixを初期化（実Proton/Wineを起動。ゲームは起動しない）", file=output)
         print("11. 依存が揃った実ゲームprefixを準備用slotへ割り当て（Wine・ゲームは起動しない）", file=output)
+    if config.get("initialization_trial") is True and "placement_review" in config and "game_preparation" in config \
+            and "dependency_installation" in config:
+        print("12. 新しいゲームを1回で準備（初期化→ソフト電池を画面なしで導入→割り当て。途中からの再開も可）", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
     if answer == "4" and "placement_review" in config:
@@ -548,6 +551,10 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
             and "game_preparation" in config:
         from preparation_game_prefix import interactive_game_prefix
         return interactive_game_prefix(directory, renderer, config, **options)
+    if answer == "12" and config.get("initialization_trial") is True and "placement_review" in config \
+            and "game_preparation" in config and "dependency_installation" in config:
+        from preparation_one_pass import interactive_one_pass
+        return interactive_one_pass(directory, renderer, config, **options)
     if answer == "11" and config.get("initialization_trial") is True and "placement_review" in config \
             and "game_preparation" in config:
         from preparation_game_prefix import interactive_game_binding
