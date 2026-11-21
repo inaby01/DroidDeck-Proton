@@ -512,6 +512,21 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual(len(commands), 2)
         self.assertIn('dlls', report['confirmed_fixed_values']['items'])
 
+    def test_confirmation_lists_any_number_of_dlls(self):
+        profile = self.config['game_preparation']['profiles'][0]
+        for number in range(8):
+            data = GAME['synthetic_pe'](extra=b'synthetic runtime %d' % number)
+            name = f'runtime{number}.dll'
+            spec = DEP['spec_for'](data, asset_id=f'runtime-fixture-{number}', filename=name)
+            self.config['game_preparation']['recipes'].append(
+                {'dependency_id': f'runtime-{number}', 'revision': 1, 'handler': 'prefix-dll', 'status': 'ready',
+                 'reason': 'synthetic recipe', 'asset': spec, 'destination': 'syswow64'})
+            profile['dependencies'].append(f'runtime-{number}')
+            (self.f.fixture.source.root / name).write_bytes(data)
+        status, report, output, commands = self.run_menu('12\n1\n1\nq\n')
+        self.assertEqual((status, report, commands), (0, None, []))
+        self.assertIn('  13) 依存がすべて検証済みなら', output)
+
     def test_running_again_skips_the_placed_dll(self):
         self.run_menu('12\n1\n1\n1\n')
         placed = self.wow64() / 'mfc42.dll'

@@ -11,6 +11,7 @@ example a refused SdProxy stop) is continued by running menu 12 again for the sa
 """
 
 import hashlib
+import itertools
 import os
 from pathlib import Path
 
@@ -454,7 +455,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         if label == "新規" and not init_plan.exe_path_ascii:
             print(NON_ASCII_NOTE, file=output)
         print("行うこと:", file=output)
-        steps = iter(range(1, 10))
+        steps = itertools.count(1)
         if label == "新規":
             print(f"  {next(steps)}) prefixを初期化（準備用Protonで cmd.exe /d /c exit 0。ゲームは起動しません）", file=output)
         for item in dll_items:
