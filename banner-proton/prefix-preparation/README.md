@@ -1101,3 +1101,57 @@ folder. `mfc-local` stays reserved and blocked.
   The plan observes the process view before and after inspecting; an unclear view stops.
 - Not measured on a device: the 0.29.1 creation in the prefix's `syswow64`, loading from
   `syswow64`, and whether the file stays through Proton updates.
+
+## Operational entry (0.30.0)
+
+When a bundle enables the probe material, the reviewed placement, the initialization
+trial, dependency installation and game preparation (the conditions of menu 12), the
+first screen offers four entries. A bundle missing one of them keeps the earlier screen.
+
+```
+1. 新しいゲームを準備（初期化→DLL→ソフト電池→割り当て。途中からの再開も可）
+2. ゲームの状態を確認（何も変更しません）
+3. 新しいProtonを準備用slotに置く（起動しない）
+4. 詳細メニュー（検証用・手動の操作）
+```
+
+- 1 is menu 12. 4 shows the earlier menus 1–12 with their numbers unchanged. Any other
+  input, including a number of the earlier screen such as 12, cancels without writing.
+- Guidance follows the screen: with the entry screen it names "詳細メニューの9" and
+  "もう一度 1"; bundles with the earlier screen keep "メニュー9" and "12".
+- 3: placement without a probe. An ordinary registered game (not a probe EXE) is used
+  only to confirm the registration source and the executable DroidDeck records; its
+  prefix, settings and files are only read, and a prefix may exist. Exactly one
+  registration must point at the executable; registrations with two prefix aliases, a
+  symbolic-link prefix, or a game folder that contains the tool folders are listed with
+  the reason and cannot be chosen. The plan carries `confirmation_registration` instead of
+  `probe_registration`, and the witness kind is part of the confirmed digest. Placement
+  itself (review, staging, full tree check, non-replacing publication, locks) is
+  unchanged and creates no follow-up plan. Menu 4 still requires the probe and an absent
+  prefix.
+- Reads from the asset folder (`prepare.sh`'s folder) do not compare timestamps: the
+  payload archive for registered games (planning, staging, managed recheck), declared
+  assets (installer, DLLs) and the source of cached assets. Every byte is still hashed
+  against the declared size and digest, a size or identity change still stops, and the PE
+  architecture is taken from the hashed bytes. Shared storage was seen to change file
+  times while reading. Probe trials, private records, Steam and DroidDeck settings,
+  installed trees, the game EXE and prefix registry reads stay strict.
+- 2: the state of each game this tool initialized, read-only. No locks (neither the
+  private store locks nor the DroidDeck settings lock), no store creation, no Wine and no
+  SdProxy stop offer; only the result JSON is written. The payload is read once and its
+  inventory is passed to every game's checks; a missing payload or an unplaced slot is
+  reported once and leaves dependencies undetermined. Per game: the initialization record,
+  the profile, the assignment from `games.json`, `config.vdf` and `state.json` (this
+  bundle's slot, another Proton by name, none, partial with the differing files, or
+  another Proton whose three files disagree), the dependency states, and the next step.
+  A game assigned to another Proton is out of this bundle's scope. A running game, or a
+  read that changed underneath, is shown as not checkable. Problems of one game do not
+  stop the others.
+- The next step comes from the read-only evaluation that menu 1 uses before its
+  confirmation (`evaluate_resume`): the pre-write stops (profile and revision, blocked
+  dependencies, DLL assets, the installer of a new prefix, binding records) and each
+  step's decision (DLL resume, SoftDenchi state and installation plan, binding). "Ready"
+  means every dependency is verified and the game is bound. When resuming, menu 1 now
+  stops before its confirmation, with the same stage and reason, when a later step would
+  stop (for example a binding that cannot follow because a game-folder file is missing),
+  instead of writing the earlier steps first. Each step still plans again under its locks.

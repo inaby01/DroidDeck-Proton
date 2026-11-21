@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 ONE = runpy.run_path(str(HERE / 'test_preparation_one_pass.py'))
+FOLDER = runpy.run_path(str(HERE / 'test_preparation_folder_reads.py'))
 import preparation_binding as binding
 import preparation_dependency_install as dep
 import preparation_recheck as recheck
@@ -293,6 +294,8 @@ class EntryTests(StatusMixin, ONE['OnePassTests']):
                 status_code, report, output = self.menu(answer)
                 self.assertEqual((status_code, report), (0, None))
                 self.assertTrue(output.startswith('1. 新しいゲームを準備'), output)
+                self.assertTrue(output.endswith('取り消しました。\n'), output)
+                self.assertEqual('詳細メニュー（番号は従来どおり）' in output, answer.startswith('4'))
         self.assertEqual(before, self.state())
 
     def test_entry_2_is_the_status_check(self):
@@ -355,6 +358,40 @@ class DllStatusTests(StatusMixin, ONE['PrefixDllOnePassTests']):
         self.assertTrue(entry['next']['reason'].startswith('dll-asset:mfc42-prefix:'))
         _, menu, _, _ = self.run_menu('1\n1\n1\n')
         self.agrees(entry, menu)
+
+    def test_entry_1_new_and_resumed_pass_while_asset_timestamps_change_on_every_read(self):
+        with FOLDER['touching_asset_folder'](self.f.fixture.source.root) as touched:
+            _, report, output, _ = self.run_menu('1\n1\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', output)
+        archive = self.f.fixture.source.archive.name
+        self.assertTrue({archive, 'mfc42.dll', 'sdrt-fixture.exe'} <= set(touched), touched)
+
+    def test_resume_passes_while_asset_timestamps_change_and_the_probe_recheck_stays_strict(self):
+        self.initialize()
+        with FOLDER['touching_asset_folder'](self.f.fixture.source.root) as touched:
+            _, report, output, _ = self.run_menu('1\n1\n1\n')
+            self.assertEqual(report['status'], 'ready-to-launch', output)
+            self.assertIn(self.f.fixture.source.archive.name, touched)
+            source, _, games = ONE['GAME']['DEP']['TRIAL']['BASE']['selection'].registration_catalog(self.environment)
+            with self.assertRaisesRegex(status.require.__globals__['Invalid'], r'input changed during read \(mtime_ns'):
+                recheck.plan_recheck(record=self.trial_record, record_sha256=self.trial_digest, config=self.config,
+                    directory=self.f.fixture.source.root, renderer=self.f.fixture.options['renderer'], source=source,
+                    games=games, steam=self.f.steam, settings=self.f.settings, home=self.home, environment=self.environment,
+                    runtime_root=self.f.root)
+
+    def test_a_binding_that_cannot_follow_stops_before_the_dll_and_softdenchi_are_written(self):
+        self.use_folder_dependency()
+        self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime', 'mfc42-prefix', 'mfc42-game-folder']
+        self.initialize()
+        _, report, _ = self.status()
+        entry = self.entry(report)
+        self.assertEqual(entry['next']['reason'], 'binding-blocked:dependency-not-verified:mfc42-game-folder')
+        self.assertEqual(entry['next']['actions'], ['prefix-dll:mfc42-prefix', 'softdenchi-silent'])
+        _, menu, output, commands = self.run_menu('1\n1\n1\n')
+        self.agrees(entry, menu)
+        self.assertNotIn('この内容で準備する場合は1', output)
+        self.assertEqual((commands, self.dll_records(), self.installs()), ([], [], []))
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
 
     def test_different_dll_asset_stops_in_both(self):
         self.initialize()

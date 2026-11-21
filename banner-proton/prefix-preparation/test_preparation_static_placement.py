@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 FIX = runpy.run_path(str(HERE / 'test_preparation_tool_writer.py'))
+FOLDER = runpy.run_path(str(HERE / 'test_preparation_folder_reads.py'))
 import preparation_probe as probe
 import preparation_selection as selection
 import preparation_static_placement as placement
@@ -173,7 +174,8 @@ class StaticPlanTests(StaticFixture):
 
     def test_existing_prefix_refused_before_any_tool_write(self):
         self.f.compatdata.mkdir(parents=True)
-        with self.assertRaises(Invalid):
+        # Menu 4 keeps its own check (reported as prefix-already-exists); the probe proof also refuses it.
+        with self.assertRaisesRegex(Invalid, 'new prefix required'):
             self.plan()
         self.assertFalse(self.f.destination().exists())
 
@@ -554,6 +556,26 @@ class ConfirmedNativeTests(ConfirmedFixture):
             out.write(b'changed')
         with self.assertRaises(Invalid):
             self.confirmed_apply(plan)
+        self.assertFalse(self.f.destination().exists())
+
+    def test_placement_passes_while_the_archive_timestamps_change_on_every_read(self):
+        with FOLDER['touching_asset_folder'](self.f.fixture.source.root) as touched:
+            _, report, output = self.confirmed_menu('1\n1\n')
+        self.assertEqual(report['mode'], 'static-preparation-tool-installed', output)
+        self.assertGreaterEqual(touched.count(self.f.fixture.source.archive.name), 3)
+
+    def test_probe_placement_stays_strict_about_archive_timestamps(self):
+        with FOLDER['touching_asset_folder'](self.f.fixture.source.root), \
+                self.assertRaisesRegex(Invalid, r'input changed during read \(mtime_ns'):
+            self.plan()
+
+    def test_held_lock_of_the_confirmation_game_stops_before_publication(self):
+        compatdata = self.f.steam / 'steamapps/compatdata/42'
+        with PrivateStore(self.f.store_root, create=True) as store, store.locked(hashlib.sha256(str(compatdata).encode()).hexdigest()):
+            status, report, output = self.confirmed_menu('1\n1\n')
+        self.assertEqual(status, 2)
+        self.assertEqual(report['mode'], 'confirmed-placement-stopped', output)
+        self.assertEqual(report['error']['stage'], 'confirmed-placement-apply')
         self.assertFalse(self.f.destination().exists())
 
     def test_direct_apply_matches_the_menu_result(self):

@@ -244,7 +244,7 @@ def _game(key, listed, title, context):
             print("  初期化の記録: 完了していません（" + text(item["status"]) + "）。1（新しいゲームを準備）はこのゲームで止まります"
                   "（作成物は削除せずに残しています）。", file=output)
             return entry
-        print("  初期化の記録: 初期化済み", file=output)
+        print("  初期化の記録: 初期化済み / prefix: " + text(str(steam / "steamapps/compatdata" / key)), file=output)
         if title is None:
             entry["next"] = {"next": "not-listed", "reason": "registration-missing"}
             print("  DroidDeckの登録が見つからないため、1（新しいゲームを準備）の一覧に出ません。", file=output)
