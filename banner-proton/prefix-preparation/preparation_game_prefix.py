@@ -39,10 +39,11 @@ from preparation_store import PrivateStore
 SCOPE = "registered-game-new-prefix"
 RECORDS = "game-prefixes"
 ID_PREFIX = "gprefix-"
-HANDLERS = ("softdenchi-interactive", "mfc-local", "game-folder-file")
-# Handlers whose recipes may be declared ready: the guarded SoftDenchi installer, and a read-only
-# check of a file already in the registered game's folder (nothing is copied or installed).
-READY_HANDLERS = ("softdenchi-interactive", "game-folder-file")
+HANDLERS = ("softdenchi-interactive", "mfc-local", "game-folder-file", "prefix-dll")
+# Handlers whose recipes may be declared ready: the guarded SoftDenchi installer, a read-only
+# check of a file already in the registered game's folder (nothing is copied or installed), and
+# one declared x86 DLL placed into the prefix's syswow64 (menu 12). ``mfc-local`` stays reserved.
+READY_HANDLERS = ("softdenchi-interactive", "game-folder-file", "prefix-dll")
 GAME_FOLDER_FILE_LIMIT = 64 * 1024 * 1024
 NON_ASCII_NOTE = ("注意: 登録EXEのパスにASCII以外の文字（日本語など）が含まれます。"
                   "このようなフォルダー名で、ゲームが起動直後に終了した例があります（原因は未確定）。"
@@ -88,13 +89,18 @@ def validate_game_config(value):
     recipes = {}
     require(type(value["recipes"]) is list and 0 < len(value["recipes"]) <= 64, "invalid recipe list")
     for item in value["recipes"]:
+        if type(item) is dict and item.get("handler") == "prefix-dll":
+            from preparation_prefix_dll import validate_prefix_dll_recipe
+            validate_prefix_dll_recipe(item)
         folder_file = type(item) is dict and item.get("handler") == "game-folder-file"
-        fields(item, ("dependency_id", "revision", "handler", "status", "reason") + (("file", "required_by") if folder_file else ()))
+        prefix_dll = type(item) is dict and item.get("handler") == "prefix-dll"
+        fields(item, ("dependency_id", "revision", "handler", "status", "reason") + (("file", "required_by") if folder_file else ()) +
+               (("asset", "destination") if prefix_dll else ()))
         key = identifier(item["dependency_id"])
         require(key not in recipes, "duplicate recipe")
         revision(item["revision"])
         require(item["handler"] in HANDLERS and item["status"] in ("ready", "blocked"), "invalid recipe")
-        require(item["handler"] in READY_HANDLERS or item["status"] == "blocked", "only SoftDenchi or a game-folder check can be ready")
+        require(item["handler"] in READY_HANDLERS or item["status"] == "blocked", "only SoftDenchi, a game-folder check or a prefix DLL can be ready")
         string(item["reason"])
         if folder_file:
             _validate_game_folder_file(item)
@@ -118,6 +124,8 @@ def validate_game_config(value):
         require(all(recipes[dep]["handler"] != "game-folder-file" or
                     item["exe_sha256"] == recipes[dep]["required_by"]["exe_sha256"] for dep in item["dependencies"]),
                 "game-folder dependency requires the profile EXE hash it was derived from")
+        names = [recipes[dep]["asset"]["filename"].lower() for dep in item["dependencies"] if recipes[dep]["handler"] == "prefix-dll"]
+        require(len(names) == len(set(names)), "prefix DLL names repeat within a profile")
         profiles[key] = item
     return profiles, recipes
 
@@ -448,9 +456,13 @@ class GameBindingPlan:
                 "game_launched": False, "authentication_performed": False, "preparation_complete": False, "writes": []}
 
 
-def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe):
-    """Live, offline dependency states. A view that is not clear makes every check uninspected."""
+def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe, payload=None):
+    """Live, offline dependency states. A view that is not clear makes every check uninspected.
+
+    ``payload`` is (verified inventory, tool directory) of the selected Proton, used by ``prefix-dll``.
+    """
     from preparation_dependency_state import inspect_dependency_state
+    from preparation_prefix_dll import inspect_prefix_dll
     clear = stop_check.check()["clear_in_view"]
     states = []
     for dependency in profile["dependencies"]:
@@ -459,12 +471,18 @@ def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe):
         declared = {"dependency_id": dependency, "recipe_revision": item["revision"], "recipe_digest": digest_json(item)}
         if item["handler"] == "game-folder-file":
             declared["declared_file"] = dict(item["file"])
+        if item["handler"] == "prefix-dll":
+            declared["declared_asset"] = {key: item["asset"][key] for key in ("filename", "expected_size", "expected_sha256", "pe_machine")}
         if item["status"] != "ready":
             states.append({**declared, "state": "blocked", "reason": item["reason"]})
         elif not clear:
             states.append({**declared, "state": "uninspected", "reason": "target-process-view-not-clear"})
         elif item["handler"] == "game-folder-file":
             states.append({**declared, **inspect_game_folder_file(exe, item["file"])})
+        elif item["handler"] == "prefix-dll":
+            require(payload is not None, "payload required for a prefix DLL check")
+            found = inspect_prefix_dll(compatdata, item, *payload)
+            states.append({**declared, **{key: found[key] for key in ("state", "reason") if key in found}})
         else:
             require(item["handler"] == "softdenchi-interactive", "unsupported ready handler")
             states.append({**declared, "state": inspect_dependency_state(compatdata, recipe)["state"]})
@@ -472,6 +490,11 @@ def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe):
         states = [{**item, "state": "uninspected", "reason": "concurrent-process-observed"} if item["state"] != "blocked" else item
                   for item in states]
     return tuple(states)
+
+
+def _payload(base):
+    from preparation_dependency_install import _tool_directory
+    return base.inventory, _tool_directory(base)
 
 
 def plan_game_binding(*, record, record_sha256, config, directory, renderer, source, games, steam, settings, home,
@@ -490,7 +513,7 @@ def plan_game_binding(*, record, record_sha256, config, directory, renderer, sou
     revision_change = profile_revision_change(profile, record["profile"])
     require(isinstance(stop_check, ProcessStopCheck) and stop_check.compatdata == base.compatdata, "matching process observation required")
     exe = base.target.exe
-    dependencies = _dependency_states(profile, recipes, base.compatdata, recipe, stop_check, exe)
+    dependencies = _dependency_states(profile, recipes, base.compatdata, recipe, stop_check, exe, _payload(base))
     blockers = sorted({("dependency-blocked:" if item["state"] == "blocked" else "dependency-not-verified:") + item["dependency_id"]
                        for item in dependencies if item["state"] != "present-verified"})
     binding = plan_binding(steam, settings, record["app_id"], base.customization.directory)
@@ -537,7 +560,7 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
     require(refresh().digest == plan.digest, "game binding plan changed")
     base = plan.base
     tool = safe_path(base.target.steam / "compatibilitytools.d" / base.customization.directory, base.target.steam)
-    # Only SoftDenchi and read-only game-folder checks can be ready (validate_game_config); mfc-local stays blocked.
+    # Only SoftDenchi, read-only game-folder checks and prefix DLLs can be ready (validate_game_config); mfc-local stays blocked.
     require(plan.dependencies and all(item["state"] == "present-verified" for item in plan.dependencies),
             "dependencies not verified")
 
@@ -549,7 +572,8 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
         require_initialized_directories(base.compatdata, base.record)
         require(_prefix(base.compatdata) == base.prefix_version, "game prefix version changed")
         # Same check as planning: an unclear view before or after inspection is never verified.
-        states = _dependency_states(plan.profile, plan.recipes, base.compatdata, recipe, stop_check, base.target.exe)
+        states = _dependency_states(plan.profile, plan.recipes, base.compatdata, recipe, stop_check, base.target.exe,
+                                    _payload(base))
         require(all(item["state"] == "present-verified" for item in states), "dependency postconditions changed")
         return {"target": True, "dependencies": True, "payload": True, "stopped": True}
     return apply_binding(plan.binding, base.target.steam, base.settings, store, ready)

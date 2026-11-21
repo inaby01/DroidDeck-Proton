@@ -50,6 +50,11 @@ if len(sys.argv) >= 3 and sys.argv[1] == 'runinprefix' and sys.argv[2].startswit
         registry.write(spec['registry'])
     raise SystemExit(spec['exit'])
 (root / 'pfx/drive_c/windows').mkdir(parents=True, exist_ok=True)
+# Like Proton, link the x86 builtins of syswow64 to this tool's files (the fixture ships cmd.exe only).
+wow64 = root / 'pfx/drive_c/windows/syswow64'
+wow64.mkdir(exist_ok=True)
+if not (wow64 / 'cmd.exe').is_symlink():
+    (wow64 / 'cmd.exe').symlink_to(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), 'files/lib/wine/i386-windows/cmd.exe'))
 for name in ('system.reg', 'user.reg'):
     (root / 'pfx' / name).write_text('WINE REGISTRY Version 2\\n')
 (root / 'version').write_text('synthetic-version-1\\n')

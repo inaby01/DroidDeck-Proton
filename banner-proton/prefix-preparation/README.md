@@ -1039,3 +1039,56 @@ reviewed placement, game preparation and dependency installation.
   Each step keeps its plan summary and record, also when an exception interrupts it.
 - Not done: registering the game, authentication and the first launch. Silent
   installation on device Wine is not yet measured.
+
+## One declared DLL in the prefix: handler `prefix-dll` (0.29.0)
+
+A recipe with handler `prefix-dll` places one x86 DLL into the initialized game prefix's
+`pfx/drive_c/windows/syswow64/`, as menu 12's step between the initialization and the
+SoftDenchi installation. A profile can then declare a runtime DLL that the game imports
+without pinning the EXE hash or asking the operator to put the file into the game
+folder. `mfc-local` stays reserved and blocked.
+
+- Declaration: the recipe carries an asset declaration in the manifest format and
+  `"destination": "syswow64"`. A ready recipe requires an x86 PE, a reviewed provenance
+  and `personal-use-reviewed` terms, a known size and an independent SHA-256 reference.
+  The file name is a single short ASCII basename ending in `.dll`; it is placed in lower
+  case, and two DLLs of one profile may not share a destination name. The asset file is
+  read from the folder of `prepare.sh`, like the SoftDenchi installer.
+- Not changed: registry, DLL overrides, registration (regsvr32), the game folder, and any
+  existing file (never overwritten, replaced or removed). Wine is not started.
+- Refused: a name that the selected payload ships under `files/lib/wine/` or
+  `files/share/default_pfx*/` (a native copy would hide the builtin); a `syswow64` whose
+  x86 layout cannot be confirmed. The layout check reads `syswow64/kernel32.dll`, which
+  must be a link to the verified payload's `files/lib/wine/i386-windows/kernel32.dll` or an
+  x86 regular file; `system32` is not used, since on ARM64 devices it holds ARM64 and x64
+  images.
+- State (read-only): `absent`, `present-verified` (exactly one single-link regular file
+  whose size, SHA-256 and PE architecture match the declaration), `incompatible` (case
+  variants, links, other content, a Wine builtin or placeholder file), `uninspected`.
+  `present-verified` is a match with the declaration only; whether the game loads the
+  file is observable at launch. Menu 11 and the binding step include it in the
+  dependency check and in the readiness callback before each settings write.
+- Copy: under the private and DroidDeck locks, with the managed recheck guard and a clear
+  process view. Every step works relative to one opened `syswow64` whose device and
+  inode are part of the plan. A temporary file named after the record is created with
+  `O_EXCL|O_NOFOLLOW`; its identity is recorded before anything is written; the copy is
+  read back and compared, the guard, process view, directory identity, the absence of
+  the destination (any case) and the temporary file identity are checked again, and the
+  file is placed with `linkat`, which never replaces an existing name. Then only the
+  temporary name is removed. A filesystem without hard links fails the copy; no other
+  placement is tried.
+- Records: `prefix-dlls` (phases `planned`, `temp-created`, `temp-written`, `linked`,
+  `present-verified`, `failed`). A copy that never linked ends `failed` and leaves no
+  temporary file; after the link the destination is never removed.
+- Resume: the latest record of the same initialization, dependency and destination
+  decides with the current state. An interrupted copy whose temporary name is still the
+  recorded file is removed and copied again; a link interrupted before the temporary name
+  was removed is completed by removing only that name; a destination already verified is
+  skipped. A temporary name that is not the recorded file, a replaced `syswow64`, a
+  record for another recipe or asset, an unreadable record or any other combination
+  stops and nothing is repaired.
+- Menu 12: the confirmation lists each DLL (name, asset hash, destination); the fixed
+  values gain `dlls` (recipe digest and measured asset per DLL); a missing or different
+  asset stops before anything is written.
+- Not measured on a device: placement with hard links on the device filesystem, loading
+  from `syswow64`, and whether the file stays through Proton updates.

@@ -1,4 +1,4 @@
-"""Menu 12: prepare one registered game in one run (initialize, install, bind).
+"""Menu 12: prepare one registered game in one run (initialize, place DLLs, install, bind).
 
 Each step calls the plan, session and writer that menus 10, 8 and 11 use, and plans again
 right before it runs. One confirmation covers the fixed values shown before anything is
@@ -26,6 +26,13 @@ from preparation_game_prefix import (
     registration_identity,
     validate_game_config,
 )
+from preparation_prefix_dll import (
+    DESTINATION,
+    PrefixDllSession,
+    plan_prefix_dll,
+    target_name,
+)
+from preparation_prefix_dll import HANDLER as PREFIX_DLL
 from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore
 
@@ -70,19 +77,31 @@ def _asset(config, softdenchi, mode, silent_launch):
     return {"spec": digest_json(config["dependency_installation"]["asset"]), "mode": mode, "arguments": arguments}
 
 
-def fixed_values(*, registration, profile, proton, paths, asset, binding):
+def _dlls(profile, recipes, directory):
+    """Each prefix DLL of the profile: its recipe and the measured asset (re-read at every step)."""
+    values = []
+    for dep in profile["dependencies"]:
+        item = recipes[dep]
+        if item["handler"] == PREFIX_DLL:
+            report = inspect_assets({"schema_version": 1, "assets": [item["asset"]]}, directory)[0]
+            values.append({"dependency_id": dep, "recipe": digest_json(item), "measured": report["measured"],
+                           "blockers": report["blockers"]})
+    return values
+
+
+def fixed_values(*, registration, profile, proton, paths, asset, binding, dlls):
     """The values the single confirmation is given for; stage-dependent states are excluded."""
     return {"registration": registration, "profile": profile, "proton": proton, "paths": paths, "asset": asset,
-            "binding": binding}
+            "binding": binding, "dlls": dlls}
 
 
 ITEM_TEXT = {"registration": "登録", "profile": "作品", "proton": "Proton", "paths": "場所", "asset": "資材",
-             "installer_mode": "導入の方式", "binding": "割り当て・設定"}
+             "installer_mode": "導入の方式", "binding": "割り当て・設定", "dlls": "prefixに入れるDLL"}
 
 
 def item_digests(values):
     """One digest per fixed item, kept in the result so a stop can name what changed."""
-    items = {name: values[name] for name in ("registration", "profile", "proton", "paths", "binding")}
+    items = {name: values[name] for name in ("registration", "profile", "proton", "paths", "binding", "dlls")}
     items["asset"] = values["asset"]["spec"]
     items["installer_mode"] = {"mode": values["asset"]["mode"], "arguments": values["asset"]["arguments"]}
     return {name: digest_json(value) for name, value in sorted(items.items())}
@@ -238,7 +257,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         return fixed_values(registration=_registration(catalog(), key), profile=_profile(profile, recipes, softdenchi),
                             proton=_proton(base.inventory, base.customization, base.runtime, base.tool_writes),
                             paths=[str(base.compatdata), str(base.work), str(base.private_home)], asset=asset,
-                            binding=binding_digest)
+                            binding=binding_digest, dlls=_dlls(profile, recipes, directory))
 
     def check_fixed(current, ignore=(), where=None):
         changed = changed_items(fixed, current, ignore)
@@ -382,6 +401,13 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                               "インストーラー（" + spec["filename"] + "）がprepare.shと同じフォルダーにないか、内容が違います。"
                               "何も変更していません。")
 
+        dll_items = [recipes[dep] for dep in profile["dependencies"] if recipes[dep]["handler"] == PREFIX_DLL]
+        problems = sorted({"dll-asset:" + item["dependency_id"] + ":" + reason
+                           for item, value in zip(dll_items, _dlls(profile, recipes, directory)) for reason in value["blockers"]})
+        if problems:
+            raise Stopped(stage, ",".join(problems), "prefixに入れるDLL（" + "、".join(item["asset"]["filename"] for item in dll_items) +
+                          "）がprepare.shと同じフォルダーにないか、内容が違います。何も変更していません。")
+
         def refresh_init():
             return plan_game_prefix(source=source, games=catalog(), key=key, profile_id=profile_id, **common)
 
@@ -407,7 +433,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 binding_history(store, key)
         stage = "one-pass-plan"
         fixed = fixed_values(registration=_registration(games, key), profile=_profile(profile, recipes, softdenchi),
-                             proton=proton, paths=paths, asset=asset, binding=binding.digest)
+                             proton=proton, paths=paths, asset=asset, binding=binding.digest,
+                             dlls=_dlls(profile, recipes, directory))
         report["confirmed_fixed_values"] = {"digest": digest_json(fixed), "items": item_digests(fixed)}
         print("ゲーム: " + text(games[key]["title"]) + f" [ID {key}]", file=output)
         print("作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）/ 依存 " +
@@ -421,17 +448,21 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         print("行うこと:", file=output)
         if label == "新規":
             print("  1) prefixを初期化（準備用Protonで cmd.exe /d /c exit 0。ゲームは起動しません）", file=output)
+        for item in dll_items:
+            print("  2) prefixの" + DESTINATION + "に " + text(target_name(item)) + " が入っていなければ入れる（資材 " +
+                  text(item["asset"]["filename"]) + "、SHA-256 " + item["asset"]["expected_sha256"][:16] +
+                  "…）。既存のファイルは上書きせず、レジストリ・DLLの上書き設定は変えません", file=output)
         if uses_softdenchi:
-            print("  2) ソフト電池が入っていなければ、インストーラー（" + text(spec["filename"]) + "、SHA-256 " +
+            print("  3) ソフト電池が入っていなければ、インストーラー（" + text(spec["filename"]) + "、SHA-256 " +
                   spec["expected_sha256"][:16] + "…）を画面なしで実行（" + " ".join(asset["arguments"]) + "）", file=output)
             print("     インストーラーに同梱された使用許諾に同意したうえで導入します。この確認の1は、その同意を含みます。", file=output)
             print("     使用許諾を画面で読んでから導入したい場合は、ここでqを選び、メニュー8を使ってください。", file=output)
             print("     導入後にSdProxyが残った場合は、メニュー8と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。",
                   file=output)
-        print("  3) ゲームフォルダーのファイルなど、ほかの依存は読み取りで照合（配置はしません）", file=output)
-        print("  4) 依存がすべて検証済みなら、このゲームだけを準備用Protonへ割り当て（" +
+        print("  4) ゲームフォルダーのファイルなど、ほかの依存は読み取りで照合（配置はしません）", file=output)
+        print("  5) 依存がすべて検証済みなら、このゲームだけを準備用Protonへ割り当て（" +
               text(", ".join(binding.summary()["planned_files"]) or "変更なし") + "）", file=output)
-        print("書くもの: 新規prefix・専用work/HOME・prefix内（ソフト電池）・このゲームの設定項目・私有記録/lock・結果JSON。"
+        print("書くもの: 新規prefix・専用work/HOME・prefix内（" + ("DLL・" if dll_items else "") + "ソフト電池）・このゲームの設定項目・私有記録/lock・結果JSON。"
               "既存の他prefix・ゲームフォルダー・認証・セーブは変更しません。", file=output)
         print("すべてのゲーム・Wineを終了してから続行してください。", file=output)
         print("この内容で準備する場合は1、取消はq: ", end="", file=output, flush=True)
@@ -451,7 +482,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                     proton=_proton(installation.inventory, installation.customization, installation.runtime,
                                    installation.summary().get("tool_runtime_writes")),
                     paths=[str(plan.compatdata), str(plan.trial.work), str(plan.trial.private_home)], asset=asset,
-                    binding=plan_binding(steam, settings, key, proton["directory"]).digest))
+                    binding=plan_binding(steam, settings, key, proton["directory"]).digest,
+                    dlls=_dlls(profile, recipes, directory)))
                 print("prefixを初期化しています。", file=output, flush=True)
                 with droiddeck_lock(settings):
                     session = GamePrefixSession(plan, store, refresh_init, plan.digest, stop)
@@ -474,6 +506,31 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 stage = "resume-record"
                 _, current_digest = store.read_record(RECORDS, record["trial_id"] + ".json")
                 require(current_digest == record_digest, "game prefix record changed")
+            for item in dll_items:
+                stage = "prefix-dll"
+
+                def refresh_dll(item=item):
+                    return plan_prefix_dll(record=record, record_sha256=record_digest, item=item, source=source,
+                                           games=catalog(), **common)
+
+                dll_plan = refresh_dll()
+                check_fixed(from_base(dll_plan.recheck, asset, plan_binding(steam, settings, key, proton["directory"]).digest))
+                report["steps"].append({"step": "prefix-dll", "plan": dll_plan.summary()})
+                if dll_plan.action == "skip":
+                    continue
+                if dll_plan.blockers:
+                    raise Stopped(stage, "prefix-dll-blocked:" + ",".join(dll_plan.blockers),
+                                  "prefixの" + DESTINATION + "の " + target_name(item) + " に確認が要ります。上書き・修復はしていません。")
+                print("prefixに " + text(target_name(item)) + " を入れています。", file=output, flush=True)
+                with droiddeck_lock(settings):
+                    session = PrefixDllSession(dll_plan, store, refresh_dll, dll_plan.digest, stop)
+                    live.update(step=report["steps"][-1], session=session)
+                    result = session.apply()
+                report["steps"][-1]["record"] = result
+                live.clear()
+                if result["phase"] != "present-verified":
+                    raise Stopped(stage, "prefix-dll-" + result["phase"],
+                                  "DLLを入れられませんでした。置いたファイルは削除していません。もう一度 12 を実行すると、記録から続きを判定します。")
             if uses_softdenchi:
                 stage = "softdenchi-state"
                 base = base_plan(record, record_digest)

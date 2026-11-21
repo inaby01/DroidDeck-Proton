@@ -4,6 +4,7 @@
 import hashlib
 import io
 import json
+import os
 import runpy
 import subprocess
 import unittest
@@ -15,6 +16,7 @@ GAME = runpy.run_path(str(HERE / 'test_preparation_game_prefix.py'))
 DEP = GAME['DEP']
 import preparation_dependency_install as dep
 import preparation_one_pass as one_pass
+import preparation_prefix_dll as prefix_dll
 import preparation_softdenchi_recipe as recipe_module
 import preparation_trial as trial
 from preparation_common import Invalid
@@ -24,6 +26,13 @@ from preparation_store import PrivateStore
 def game_records_dir():
     import preparation_game_prefix
     return preparation_game_prefix.RECORDS
+
+
+DLL_DATA = GAME['synthetic_pe'](extra=b'synthetic prefix runtime library')
+
+
+class Killed(BaseException):
+    """Simulates the tool being killed: nothing in the tool catches it."""
 
 
 def record(status, phase='post-inspected'):
@@ -264,7 +273,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertEqual(report['reason'], 'fixed-values-changed:profile')
         self.assertEqual(report['stage'], 'initialize')
         self.assertEqual(sorted(report['confirmed_fixed_values']['items']),
-                         ['asset', 'binding', 'installer_mode', 'paths', 'profile', 'proton', 'registration'])
+                         ['asset', 'binding', 'dlls', 'installer_mode', 'paths', 'profile', 'proton', 'registration'])
         self.assertEqual(commands, [])
         self.assertFalse(self.game_compat.exists())
         self.assertEqual(before, self.protected())
@@ -449,10 +458,312 @@ class OnePassTests(GAME['GamePrefixTests']):
                 dep.validate_install_record(bad)
 
 
+class PrefixDllOnePassTests(OnePassTests):
+    """Menu 12 with a prefix DLL dependency (design: prefix-preparation-prefix-dll-design)."""
+
+    def setUp(self):
+        super().setUp()
+        self.use_dll()
+        patch.object(prefix_dll, 'REFERENCE', 'cmd.exe').start()
+        self.addCleanup(patch.stopall)
+
+    def use_dll(self, data=DLL_DATA, **changes):
+        spec = DEP['spec_for'](data, asset_id='mfc42-fixture', filename='mfc42.dll', version='6.00.8665.0')
+        spec.update(changes)
+        recipes = [item for item in self.config['game_preparation']['recipes'] if item['dependency_id'] != 'mfc42-prefix']
+        recipes.append({'dependency_id': 'mfc42-prefix', 'revision': 1, 'handler': 'prefix-dll', 'status': 'ready',
+                        'reason': 'synthetic recipe', 'asset': spec, 'destination': 'syswow64'})
+        self.config['game_preparation']['recipes'] = recipes
+        self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime', 'mfc42-prefix']
+        path = self.f.fixture.source.root / spec['filename']
+        if path.exists():
+            path.unlink()
+        path.write_bytes(data)
+
+    def wow64(self):
+        return self.game_compat / 'pfx/drive_c/windows/syswow64'
+
+    def dll_records(self):
+        with PrivateStore(self.f.store_root) as store:
+            return sorted((store.read_record(prefix_dll.RECORDS, item['record_id'] + '.json')[0]
+                           for item in store.inventory()['prefix_dlls']), key=lambda item: item['created_ns'])
+
+    def leftovers(self):
+        return sorted(p.name for p in self.wow64().iterdir() if p.name.startswith('.prefixdll-'))
+
+    def test_new_game_gets_the_dll_before_softdenchi_and_is_bound(self):
+        _, report, output, commands = self.run_menu('12\n1\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual([step['step'] for step in report['steps']],
+                         ['initialize', 'prefix-dll', 'softdenchi-state', 'softdenchi-silent', 'binding-plan', 'binding'])
+        self.assertIn('syswow64に mfc42.dll が入っていなければ入れる', output)
+        placed = self.wow64() / 'mfc42.dll'
+        self.assertEqual(placed.read_bytes(), DLL_DATA)
+        self.assertEqual(placed.stat().st_nlink, 1)
+        self.assertFalse(placed.is_symlink())
+        self.assertEqual(self.leftovers(), [])
+        (saved,) = self.dll_records()
+        self.assertEqual((saved['phase'], saved['error'], saved['name']), ('present-verified', None, 'mfc42.dll'))
+        self.assertEqual(report['steps'][1]['record']['record_id'], saved['record_id'])
+        self.assertFalse(report['steps'][1]['plan']['registry_changed'])
+        states = {item['dependency_id']: item['state'] for item in report['steps'][-2]['plan']['dependencies']}
+        self.assertEqual(states, {'softdenchi-runtime': 'present-verified', 'mfc42-prefix': 'present-verified'})
+        self.assertEqual(len(commands), 2)
+        self.assertIn('dlls', report['confirmed_fixed_values']['items'])
+
+    def test_running_again_skips_the_placed_dll(self):
+        self.run_menu('12\n1\n1\n1\n')
+        placed = self.wow64() / 'mfc42.dll'
+        before = (placed.stat().st_ino, placed.stat().st_mtime_ns)
+        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(report['steps'][0]['step'], 'prefix-dll')
+        self.assertEqual(report['steps'][0]['plan']['action'], 'skip')
+        self.assertEqual(len(self.dll_records()), 1)
+        self.assertEqual(before, (placed.stat().st_ino, placed.stat().st_mtime_ns))
+        self.assertEqual(commands, [])
+
+    def test_existing_different_file_is_never_overwritten(self):
+        self.initialize()
+        foreign = GAME['synthetic_pe'](extra=b'someone else placed this')
+        (self.wow64() / 'MFC42.DLL').write_bytes(foreign)
+        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(report['stage'], 'prefix-dll')
+        self.assertIn('size, hash or architecture differs', report['reason'])
+        self.assertEqual((self.wow64() / 'MFC42.DLL').read_bytes(), foreign)
+        self.assertEqual((commands, self.dll_records(), self.leftovers()), ([], [], []))
+        self.assertFalse(report['binding_written'])
+
+    def test_a_name_the_proton_ships_as_builtin_is_refused(self):
+        self.initialize()
+        with patch.object(prefix_dll, 'builtin_names', return_value={'mfc42.dll'}):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('builtin', report['reason'])
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
+
+    def test_unconfirmed_x86_layout_is_refused(self):
+        self.initialize()
+        (self.wow64() / 'cmd.exe').unlink()
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('x86 system directory not confirmed', report['reason'])
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
+
+    def test_missing_or_different_asset_stops_before_anything_is_written(self):
+        (self.f.fixture.source.root / 'mfc42.dll').write_bytes(DLL_DATA + b'tampered')
+        before = self.protected()
+        _, report, output, commands = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(report['stage'], 'one-pass-precheck')
+        self.assertIn('dll-asset:mfc42-prefix:hash-mismatch', report['reason'])
+        self.assertIn('mfc42.dll', output)
+        self.assertEqual(commands, [])
+        self.assertFalse(self.game_compat.exists())
+        self.assertEqual(before, self.protected())
+
+    def test_dll_asset_changed_after_confirmation_stops_by_name(self):
+        real = one_pass._dlls
+        calls = []
+
+        def drifting(*args):
+            calls.append(1)
+            values = real(*args)
+            return values if len(calls) <= 2 else [{**values[0], 'measured': None}]
+
+        self.initialize()
+        with patch.object(one_pass, '_dlls', side_effect=drifting):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(report['reason'], 'fixed-values-changed:dlls')
+        self.assertIn('prefixに入れるDLL', report['next_step'])
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
+
+    def test_failed_copy_leaves_no_temporary_file_and_is_retried(self):
+        self.initialize()
+        real_link = os.link
+        with patch.object(prefix_dll.os, 'link', side_effect=OSError(1, 'Operation not permitted')):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(report['reason'], 'prefix-dll-failed')
+        (failed,) = self.dll_records()
+        self.assertEqual((failed['phase'], failed['error']['check'], failed['error']['errno']), ('failed', 'copy', 1))
+        self.assertEqual(self.leftovers(), [])
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
+        self.assertIs(prefix_dll.os.link, real_link)
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual([item['phase'] for item in self.dll_records()], ['failed', 'present-verified'])
+        self.assertEqual(self.dll_records()[1]['resumed_from'], failed['record_id'])
+
+    def test_destination_appearing_right_before_link_is_kept(self):
+        self.initialize()
+        real_link = os.link
+        intruder = GAME['synthetic_pe'](extra=b'appeared concurrently')
+
+        def racing(*args, **kwargs):
+            (self.wow64() / 'mfc42.dll').write_bytes(intruder)
+            return real_link(*args, **kwargs)
+
+        with patch.object(prefix_dll, '_matches', return_value=[]), patch.object(prefix_dll.os, 'link', side_effect=racing):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), intruder)
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(self.dll_records()[0]['phase'], 'failed')
+
+    def test_case_variant_appearing_right_before_link_stops_without_linking(self):
+        self.initialize()
+        real_directory = prefix_dll.PrefixDllSession._directory
+        calls = []
+
+        def directory(session, fd):
+            calls.append(1)
+            if len(calls) == 2:
+                (self.wow64() / 'MFC42.DLL').write_bytes(b'appeared concurrently')
+            return real_directory(session, fd)
+
+        with patch.object(prefix_dll.PrefixDllSession, '_directory', directory):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(self.dll_records()[0]['phase'], 'failed')
+        self.assertEqual(sorted(p.name for p in self.wow64().iterdir() if p.name.lower() == 'mfc42.dll'), ['MFC42.DLL'])
+        self.assertEqual(self.leftovers(), [])
+
+    def test_temporary_file_replaced_before_link_is_neither_linked_nor_removed(self):
+        self.initialize()
+        real_directory = prefix_dll.PrefixDllSession._directory
+        calls = []
+
+        def directory(session, fd):
+            calls.append(1)
+            if len(calls) == 2:
+                temporary = self.wow64() / session.record['temporary']
+                temporary.unlink()
+                temporary.write_bytes(DLL_DATA)
+            return real_directory(session, fd)
+
+        with patch.object(prefix_dll.PrefixDllSession, '_directory', directory):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        (saved,) = self.dll_records()
+        self.assertEqual(saved['phase'], 'failed')
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
+        self.assertEqual(self.leftovers(), [saved['temporary']])
+
+    def test_failure_after_the_link_keeps_the_file_and_is_not_a_failed_copy(self):
+        self.initialize()
+        real_unlink = os.unlink
+
+        def refused(path, *args, **kwargs):
+            if str(path).startswith('.prefixdll-') and not refused.done:
+                refused.done = True
+                raise OSError(5, 'Input/output error')
+            return real_unlink(path, *args, **kwargs)
+
+        refused.done = False
+        with patch.object(prefix_dll.os, 'unlink', side_effect=refused):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        (saved,) = self.dll_records()
+        self.assertEqual((saved['phase'], saved['error']['check']), ('temp-written', 'copy'))
+        placed = self.wow64() / 'mfc42.dll'
+        self.assertEqual((placed.read_bytes(), placed.stat().st_nlink), (DLL_DATA, 1))
+        self.assertEqual(self.leftovers(), [])
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(report['steps'][0]['plan']['action'], 'skip')
+
+    def test_binding_plan_requires_the_dll_in_the_prefix(self):
+        record, digest = self.initialize()
+        self.install_dependency(record, digest)
+        self.assertEqual(self.binding_plan(record, digest).blockers, ('dependency-not-verified:mfc42-prefix',))
+        (self.wow64() / 'mfc42.dll').write_bytes(DLL_DATA)
+        self.assertEqual(self.binding_plan(record, digest).blockers, ())
+
+    def test_killed_after_writing_the_temporary_file_resumes_by_identity(self):
+        self.initialize()
+        with patch.object(prefix_dll.os, 'link', side_effect=Killed()), self.assertRaises(Killed):
+            self.run_menu('12\n1\n1\n')
+        (interrupted,) = self.dll_records()
+        self.assertEqual(interrupted['phase'], 'temp-written')
+        self.assertEqual(self.leftovers(), [interrupted['temporary']])
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(report['steps'][0]['plan']['action'], 'remove-temporary-then-install')
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), DLL_DATA)
+
+    def test_temporary_name_replaced_after_interruption_is_never_removed(self):
+        self.initialize()
+        with patch.object(prefix_dll.os, 'link', side_effect=Killed()), self.assertRaises(Killed):
+            self.run_menu('12\n1\n1\n')
+        (interrupted,) = self.dll_records()
+        temporary = self.wow64() / interrupted['temporary']
+        temporary.unlink()
+        temporary.write_bytes(b'not the recorded file')
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(temporary.read_bytes(), b'not the recorded file')
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
+
+    def test_killed_between_link_and_unlink_completes_without_copying_again(self):
+        self.initialize()
+        real_unlink = os.unlink
+
+        def killed(path, *args, **kwargs):
+            if str(path).startswith('.prefixdll-'):
+                raise Killed()
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(prefix_dll.os, 'unlink', side_effect=killed), self.assertRaises(Killed):
+            self.run_menu('12\n1\n1\n')
+        placed = self.wow64() / 'mfc42.dll'
+        self.assertEqual(placed.stat().st_nlink, 2)
+        inode = placed.stat().st_ino
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(report['steps'][0]['plan']['action'], 'remove-temporary-then-recheck')
+        self.assertEqual((placed.stat().st_nlink, placed.stat().st_ino), (1, inode))
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual([item['phase'] for item in self.dll_records()], ['temp-written', 'present-verified'])
+
+    def test_replaced_syswow64_is_refused_right_before_link(self):
+        self.initialize()
+        real_link = os.link
+
+        def swap(*args, **kwargs):
+            raise AssertionError('link must not run')
+
+        real_directory = prefix_dll.PrefixDllSession._directory
+        calls = []
+
+        def directory(session, fd):
+            calls.append(1)
+            if len(calls) == 2:
+                moved = self.wow64().with_name('syswow64-moved')
+                self.wow64().rename(moved)
+                self.wow64().mkdir()
+            return real_directory(session, fd)
+
+        with patch.object(prefix_dll.PrefixDllSession, '_directory', directory), \
+                patch.object(prefix_dll.os, 'link', side_effect=swap):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(self.dll_records()[0]['phase'], 'failed')
+        self.assertIs(prefix_dll.os.link, real_link)
+        self.assertEqual(list(self.wow64().iterdir()), [])
+
+
 # Only the one-pass tests run here; the inherited fixtures' own tests run in their modules.
 for _name in dir(GAME['GamePrefixTests']):
     if _name.startswith('test_') and _name not in OnePassTests.__dict__:
         setattr(OnePassTests, _name, None)
+# The DLL tests add their own; the one-pass tests without a DLL keep running in OnePassTests.
+for _name in dir(OnePassTests):
+    if _name.startswith('test_') and _name not in PrefixDllOnePassTests.__dict__:
+        setattr(PrefixDllOnePassTests, _name, None)
 
 
 if __name__ == '__main__':
