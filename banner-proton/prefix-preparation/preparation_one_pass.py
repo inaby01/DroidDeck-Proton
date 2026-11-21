@@ -541,9 +541,13 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 report["steps"][-1]["record"] = result
                 live.clear()
                 if result["phase"] != "present-verified":
-                    raise Stopped(stage, "prefix-dll-" + result["phase"],
-                                  "DLLを入れられませんでした（段階: " + text(str((result.get("error") or {}).get("check"))) + "）。"
-                                  "作ったファイルは削除していません。もう一度 12 を実行すると、記録から続きを判定します。")
+                    step = text(str((result.get("error") or {}).get("check")))
+                    if result["phase"] == "failed":
+                        hint = "DLLのファイルは作っていません。原因を取り除いてから、もう一度 12 を実行してください。"
+                    else:
+                        hint = ("作ったDLLのファイル（書きかけの可能性があります）は削除していません。"
+                                "結果JSONを戻してください（回復の手順をお知らせします）。")
+                    raise Stopped(stage, "prefix-dll-" + result["phase"], "DLLを入れられませんでした（段階: " + step + "）。" + hint)
             if uses_softdenchi:
                 stage = "softdenchi-state"
                 base = base_plan(record, record_digest)

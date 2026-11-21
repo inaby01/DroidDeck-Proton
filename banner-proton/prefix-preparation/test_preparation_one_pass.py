@@ -489,7 +489,7 @@ class PrefixDllOnePassTests(OnePassTests):
                            for item in store.inventory()['prefix_dlls']), key=lambda item: item['created_ns'])
 
     def leftovers(self):
-        """Anything in syswow64 besides the fixture builtin and the placed DLL (an unnamed copy leaves nothing)."""
+        """Anything in syswow64 besides the fixture builtin and the placed DLL (the copy never leaves other names)."""
         return sorted(p.name for p in self.wow64().iterdir() if p.name not in ('cmd.exe', 'mfc42.dll', 'MFC42.DLL'))
 
     def test_new_game_gets_the_dll_before_softdenchi_and_is_bound(self):
@@ -869,22 +869,81 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual((self.dll_records()[0]['phase'], self.dll_records()[0]['error']['check']), ('failed', 'read-asset'))
         self.assertFalse((self.wow64() / 'mfc42.dll').exists())
 
-    def test_records_of_0_29_0_are_resumed(self):
-        self.initialize()
-        self.run_menu('12\n1\n1\n1\n')  # creates one record with the current version
-        (current,) = self.dll_records()
-        self.wow64().joinpath('mfc42.dll').unlink()
-        legacy = {**current, 'tool_version': '0.29.0', 'phase': 'failed', 'file_identity': None,
-                  'error': {'check': 'copy', 'error_class': 'OSError', 'errno': 95}}
+    def write_legacy_record(self, record_id, **changes):
+        """A record exactly as 0.29.0 wrote it (fixed field set and values), for the initialized game."""
         with PrivateStore(self.f.store_root) as store:
-            raw = store.read_record(prefix_dll.RECORDS, current['record_id'] + '.json')[1]
+            (item,) = store.inventory()['game_prefixes']
+        spec_item = next(r for r in self.config['game_preparation']['recipes'] if r['dependency_id'] == 'mfc42-prefix')
+        wow64 = self.wow64().stat()
+        legacy = {'schema_version': 1, 'tool_version': '0.29.0', 'scope': 'registered-game-prefix-dll',
+                  'record_id': record_id, 'created_ns': 1700000000000000000, 'app_id': item['app_id'],
+                  'trial_id': item['trial_id'], 'dependency_id': 'mfc42-prefix', 'recipe_revision': 1,
+                  'recipe_digest': one_pass.digest_json(spec_item), 'asset_sha256': spec_item['asset']['expected_sha256'],
+                  'input_digest': '0' * 64, 'destination': 'syswow64', 'name': 'mfc42.dll',
+                  'directory': {'device': wow64.st_dev, 'inode': wow64.st_ino}, 'file_identity': None, 'phase': 'failed',
+                  'resumed_from': None, 'error': {'check': 'copy', 'error_class': 'OSError', 'errno': 95},
+                  'preparation_complete': False}
+        legacy.update(changes)
+        with PrivateStore(self.f.store_root) as store:
             lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
             with store.locked(lock):
-                store.write_record(prefix_dll.RECORDS, current['record_id'] + '.json', legacy, expected_hash=raw)
+                store.write_record(prefix_dll.RECORDS, record_id + '.json', legacy)
+
+    def test_failed_record_of_0_29_0_resumes_with_a_new_creation(self):
+        self.initialize()
+        self.write_legacy_record('prefixdll-' + '1' * 32)
         _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(report['steps'][0]['plan']['action'], 'install')
+        self.assertEqual(report['steps'][0]['plan']['previous_record']['error']['errno'], 95)
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), DLL_DATA)
+
+    def test_linked_record_of_0_29_0_is_accepted_or_stops_when_the_file_is_gone(self):
+        self.initialize()
+        (self.wow64() / 'mfc42.dll').write_bytes(DLL_DATA)
+        inode = (self.wow64() / 'mfc42.dll').stat().st_ino
+        self.write_legacy_record('prefixdll-' + '2' * 32, phase='linked', error=None,
+                                 file_identity={'device': (self.wow64() / 'mfc42.dll').stat().st_dev, 'inode': inode})
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(report['steps'][0]['plan']['action'], 'skip')
+        (self.wow64() / 'mfc42.dll').unlink()
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('absent after linked', report['reason'])
+
+    def test_write_failure_after_creation_keeps_the_file_and_stops_next_time(self):
+        self.initialize()
+        with patch.object(prefix_dll, '_write_all', side_effect=OSError(28, 'No space left on device')):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('書きかけの可能性', report['next_step'])
+        (saved,) = self.dll_records()
+        self.assertEqual((saved['phase'], saved['error']['check'], saved['error']['errno']), ('created', 'write', 28))
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('operator-recovery:incompatible', report['reason'])
+        self.assertEqual(report['steps'][0]['plan']['destination_file']['size'], 0)
+        self.assertEqual(report['steps'][0]['plan']['destination_file']['identity'], saved['file_identity'])
+
+    def test_process_view_changing_before_creation_creates_nothing(self):
+        self.initialize()
+        real_guard = prefix_dll.PrefixDllSession._guard
+        calls = []
+
+        def guard(session):
+            calls.append(1)
+            if len(calls) == 2:
+                raise prefix_dll.Invalid("target process view not clear")
+            return real_guard(session)
+
+        with patch.object(prefix_dll.PrefixDllSession, '_guard', guard):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('ファイルは作っていません', report['next_step'])
+        (saved,) = self.dll_records()
+        self.assertEqual((saved['phase'], saved['error']['check']), ('failed', 'create'))
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
 
     def test_binding_plan_requires_the_dll_in_the_prefix(self):
         record, digest = self.initialize()

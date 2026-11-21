@@ -12,9 +12,9 @@ any byte is written, and the content is written and read back through the same
 descriptor. Nothing is ever removed or renamed. A partly written file (``created``) left
 by an interrupted run is never touched again: inode numbers can be reused across runs, so
 it cannot be proven to be this tool's file; the run stops and the operator recovers it.
-Every step works relative to one opened
-``syswow64`` whose identity is part of the plan. (0.29.0 named an ``O_TMPFILE`` file
-through ``/proc/self/fd``; that failed on the device with errno 95.)
+Every step works relative to one opened ``syswow64`` whose identity is part of the plan.
+(0.29.0 named an ``O_TMPFILE`` file through ``/proc/self/fd``; that failed on the device
+with errno 95.)
 
 ``present-verified`` means a match with the declaration; whether a game loads the file is
 only observable at launch.
@@ -194,11 +194,11 @@ def _write_all(fd, data):
 def load_asset(root, spec):
     """The asset bytes, read once and checked against the declaration (before anything is created)."""
     with regular_open(source_path(root, spec), LIMIT) as source:
-        before = os.fstat(source.fileno())
+        size = os.fstat(source.fileno()).st_size
         data = source.read(LIMIT + 1)
-        after = os.fstat(source.fileno())
-    require((before.st_ino, before.st_size) == (after.st_ino, after.st_size) and len(data) == before.st_size,
-            "asset changed while reading")
+    # The SHA-256 below is the guarantee. Timestamps are not compared: on Android's shared storage
+    # they were seen to change while a copied file was read (menu 12, 2026-11-21).
+    require(len(data) == size, "asset changed while reading")
     machine = pe_machine(io.BytesIO(data), len(data))
     require((len(data), hashlib.sha256(data).hexdigest(), machine) ==
             (spec["expected_size"], spec["expected_sha256"], spec["pe_machine"]), "asset differs from its declaration")
@@ -325,7 +325,7 @@ def resume_action(latest, invalid, directory, facts, spec):
     if current == "absent" and phase in (None, "planned", "failed", "created"):
         return "install", None
     if phase == "created":
-        return "stop", "partial-file-of-the-previous-run-operator-recovery"
+        return "stop", "partial-file-of-the-previous-run-operator-recovery:" + current
     return "stop", "prefix-dll-state-" + current + ("" if phase is None else " after " + phase)
 
 
@@ -339,6 +339,7 @@ class PrefixDllPlan:
     state: dict = field(repr=False)
     directory: dict = field(repr=False)
     latest: object = field(repr=False)
+    facts: dict = field(repr=False)
     action: str
     reason: object
     capacity: dict = field(repr=False)
@@ -351,7 +352,10 @@ class PrefixDllPlan:
                 "recipe_revision": self.item["revision"], "destination": DESTINATION + "/" + target_name(self.item),
                 "asset": {"filename": spec["filename"], "sha256": spec["expected_sha256"], "size": spec["expected_size"],
                           "measured_sha256": self.measured and self.measured["sha256"]},
-                "state": self.state, "previous_record": self.latest and {k: self.latest[k] for k in ("record_id", "phase")},
+                "state": self.state,
+                "destination_file": {key: self.facts[key] for key in ("kind", "name", "size", "identity", "links")
+                                     if key in self.facts},
+                "previous_record": self.latest and {k: self.latest[k] for k in ("record_id", "phase", "file_identity", "error")},
                 "action": self.action, "reason": self.reason, "capacity": self.capacity, "blockers": list(self.blockers),
                 "registry_changed": False, "dll_overrides_changed": False, "overwrite": False, "wine_started": False,
                 "preparation_complete": False}
@@ -419,14 +423,7 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
                  "latest": latest and digest_json(latest), "facts": digest_json(facts),
                  "action": action, "capacity_sufficient": capacity["sufficient"], "blockers": sorted(blockers)}
     return PrefixDllPlan(digest_json(signature), base, item, directory, report["measured"], state, identity, latest,
-                         action, reason, capacity, tuple(sorted(blockers)))
-
-
-class _Step:
-    """Names the operation in progress, so a failure records which one it was."""
-
-    def __init__(self):
-        self.name = "prepare"
+                         facts, action, reason, capacity, tuple(sorted(blockers)))
 
 
 class PrefixDllSession:
@@ -437,7 +434,8 @@ class PrefixDllSession:
         require(isinstance(plan, PrefixDllPlan), "trusted prefix DLL plan required")
         self.plan, self.store, self.refresh, self.confirmation, self.stop = plan, store, refresh, confirmation, stop_check
         self.base_guard = RecheckSession(plan.recheck, store, None, None, stop_check)
-        self.hash, self.step = None, _Step()
+        # ``step`` names the operation in progress, so a failure records which one it was.
+        self.hash, self.step = None, "prepare"
         p = plan.recheck
         self.record = {"schema_version": 1, "tool_version": VERSION, "scope": SCOPE,
                        "record_id": ID_PREFIX + secrets.token_hex(16), "created_ns": time.time_ns(),
@@ -484,9 +482,9 @@ class PrefixDllSession:
 
     def _verify(self, fd, data):
         """Content and identity through the descriptor that was written."""
-        self.step.name = "fsync-file"
+        self.step = "fsync-file"
         os.fsync(fd)
-        self.step.name = "read-back"
+        self.step = "read-back"
         info = os.fstat(fd)
         require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and _identity(info) == self.record["file_identity"],
                 "written file is not the recorded file")
@@ -497,27 +495,27 @@ class PrefixDllSession:
         self._save()  # planned, before anything is created
         created = None
         try:
-            self.step.name = "read-asset"
+            self.step = "read-asset"
             data = load_asset(self.plan.asset_root, self.plan.item["asset"])
-            self.step.name = "create"
+            self.step = "create"
             self._guard()
             self._directory(fd)
             require(not _matches(fd, name), "destination appeared")
-            blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+            blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT})
             try:
                 created = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
-                self.step.name = "record-created"
+                self.step = "record-created"
                 self.record.update(phase="created", file_identity=_identity(os.fstat(created)))
                 self._save()  # identity before any byte, whatever the checks below say
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
-            self.step.name = "identity"
+            self.step = "identity"
             info = os.fstat(created)
             require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == 0, "created file is not a new file")
-            self.step.name = "write"
+            self.step = "write"
             _write_all(created, data)
             self._verify(created, data)
-            self.step.name = "fsync-directory"
+            self.step = "fsync-directory"
             os.fsync(fd)
         except (OSError, ValueError, TypeError, KeyError) as error:
             return self._fail(error)
@@ -528,7 +526,7 @@ class PrefixDllSession:
 
     def _post(self, fd):
         try:
-            self.step.name = "post-inspection"
+            self.step = "post-inspection"
             self._guard()
             self._directory(fd)
             from preparation_dependency_install import _tool_directory
@@ -539,15 +537,16 @@ class PrefixDllSession:
             require(_identity(placed) == self.record["file_identity"], "destination is not the recorded file")
             require(self.stop.check()["clear_in_view"], "target process view not clear")
             require(state["state"] == "present-verified", "placed DLL not verified: " + state.get("reason", state["state"]))
-            self.record["phase"] = "present-verified"
-            return self._save()
         except (OSError, ValueError, TypeError, KeyError) as error:
             return self._fail(error)
+        # Outside the failure path: a failed final save is not recorded as an error of a verified file.
+        self.record["phase"] = "present-verified"
+        return self._save()
 
     def _fail(self, error):
         # Nothing is removed. Before creation the copy failed; after it the phase stays and resumes from the record.
         if self.record["phase"] == "planned":
             self.record["phase"] = "failed"
-        self.record["error"] = {"check": self.step.name, "error_class": type(error).__name__,
+        self.record["error"] = {"check": self.step, "error_class": type(error).__name__,
                                 "errno": getattr(error, "errno", None)}
         return self._save()

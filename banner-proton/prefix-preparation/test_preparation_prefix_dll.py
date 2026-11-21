@@ -221,12 +221,44 @@ class ResumeTests(unittest.TestCase):
             with self.subTest(args=args):
                 self.assertEqual(self.action(*args)[0], expected)
         self.assertEqual(self.action(previous('created'), facts('file', data=DATA[:100])),
-                         ('stop', 'partial-file-of-the-previous-run-operator-recovery'))
+                         ('stop', 'partial-file-of-the-previous-run-operator-recovery:incompatible:size, hash or architecture differs'))
         self.assertEqual(self.action(previous('planned'), facts('file')),
                          ('skip', 'placed-before-the-record-was-completed'))
         self.assertEqual(self.action(None, facts(), invalid=1), ('stop', 'invalid-prefix-dll-record-present'))
         self.assertEqual(self.action(previous('failed'), facts(), directory={'device': 1, 'inode': 3}),
                          ('stop', 'syswow64-replaced-since-previous-record'))
+
+
+class HelperTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def test_read_and_write_all(self):
+        path = self.root / 'file'
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        data = os.urandom(3 * 1024 * 1024 + 7)
+        dll._write_all(fd, data)
+        self.assertEqual(dll._read_all(fd, len(data)), data)
+        with self.assertRaisesRegex(Invalid, 'grew'):
+            dll._read_all(fd, len(data) - 1)
+        with self.assertRaisesRegex(Invalid, 'shrank'):
+            dll._read_all(fd, len(data) + 1)
+
+    def test_load_asset_checks_the_declaration(self):
+        (self.root / 'mfc42.dll').write_bytes(DATA)
+        self.assertEqual(dll.load_asset(self.root, asset()), DATA)
+        for spec in (asset(expected_sha256='0' * 64), asset(expected_size=len(DATA) + 1), asset(pe_machine='x86_64')):
+            with self.subTest(spec=spec), self.assertRaises(Invalid):
+                dll.load_asset(self.root, spec)
+        (self.root / 'mfc42.dll').write_bytes(b'not a PE at all')
+        with self.assertRaises(Invalid):
+            dll.load_asset(self.root, asset())
+        (self.root / 'mfc42.dll').unlink()
+        with self.assertRaises(FileNotFoundError):
+            dll.load_asset(self.root, asset())
 
 
 class RecordTests(unittest.TestCase):
