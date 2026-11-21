@@ -269,11 +269,16 @@ def _game(key, listed, title, context):
         stage = "status-assignment"
         if slot["slot"] != "verified":
             # Without a verified slot the comparison with it cannot be made: only the current names are shown.
-            found = {**assignment(steam, settings, key, None), "kind": "undetermined"}
+            files = assignment(steam, settings, key, None)
+            found = {**files, "kind": "undetermined", "files_kind": files["kind"]}
             entry["assignment"] = found
             entry["next"] = {"next": "undetermined", "reason": "slot-" + slot["slot"]}
-            print("  割り当て: 今の名前 " + text(str(found["current_tool"] or "なし")) +
-                  "（このバンドルの準備用Protonかどうかは判定できません）", file=output)
+            if files["kind"] == "other-disagreeing":
+                # The three files disagree among themselves whatever the slot is.
+                print("  割り当て: " + _assignment_text(files, text) + "。このバンドルの準備用Protonかどうかは判定できません", file=output)
+            else:
+                print("  割り当て: 今の名前 " + text(str(found["current_tool"] or "なし")) +
+                      "（このバンドルの準備用Protonかどうかは判定できません）", file=output)
             print("  依存・次にすること: 判定できません（このバンドルの準備用Protonを照合できないため）。", file=output)
             return entry
         found = assignment(steam, settings, key, slot["directory"])

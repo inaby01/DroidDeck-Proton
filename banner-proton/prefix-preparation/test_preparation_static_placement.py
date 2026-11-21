@@ -477,6 +477,17 @@ class ConfirmedPlanTests(ConfirmedFixture):
         with self.assertRaisesRegex(Invalid, 'ambiguous confirmation registration'):
             self.confirmed_plan()
 
+    def test_game_folder_inside_the_settings_is_refused_by_the_plan_too(self):
+        inside = self.f.settings / 'games'
+        inside.mkdir()
+        exe = inside / 'Inside.exe'
+        exe.write_bytes(self.f.exe.read_bytes() + b'inside')
+        games = json.loads(self.f.added.read_bytes())
+        games.append({'appid': 45, 'exe': str(exe), 'name': 'Inside'})
+        self.f.added.write_text(json.dumps(games))
+        with self.assertRaisesRegex(Invalid, 'game folder overlaps tool folders'):
+            self.confirmed_plan('45', inside)
+
     def test_witness_is_part_of_the_confirmation_digest(self):
         plan = self.confirmed_plan()
         installation = plan.installation
@@ -496,6 +507,7 @@ class ConfirmedPlanTests(ConfirmedFixture):
             str(2**32 - 5): {'exe': str(other / 'b.exe')},
             '60': {'exe': str(self.f.steam / 'game.exe')},
             '61': {'exe': str(self.f.root / 'c.exe')},
+            '62': {'exe': str(self.f.settings / 'inside' / 'e.exe')},
             '70': {'exe': str(other / 'd.exe')},
             '71': {'exe': str(other / 'd.exe')},
         }
@@ -507,7 +519,8 @@ class ConfirmedPlanTests(ConfirmedFixture):
         selectable, excluded = placement._confirmation_candidates(games, self.f.steam, self.f.settings, management)
         self.assertEqual(selectable, ['42'])
         self.assertEqual(dict(excluded), {'50': 'prefix is a symbolic link', str(2**32 - 5): 'two prefix aliases exist',
-                                          '60': 'game folder contains tool folders', '61': 'game folder contains tool folders',
+                                          '60': 'game folder overlaps tool folders', '61': 'game folder overlaps tool folders',
+                                          '62': 'game folder overlaps tool folders',
                                           '70': 'ambiguous confirmation registration', '71': 'ambiguous confirmation registration'})
 
     def test_stop_by_a_changing_input_names_the_fields(self):

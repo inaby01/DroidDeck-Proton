@@ -333,8 +333,11 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
             if plan.action == "skip":
                 continue
             blockers = list(plan.blockers)
-            if not blockers and not _capacity(consumed + list(dll_needs(plan.recheck, item["asset"])))["sufficient"]:
-                blockers = ["insufficient-capacity"]
+            if not blockers:
+                joint = _capacity(consumed + list(dll_needs(plan.recheck, item["asset"])))
+                steps[-1]["capacity_after_earlier_steps"] = joint
+                if not joint["sufficient"]:
+                    blockers = ["insufficient-capacity"]
             if blockers:
                 return stopped("prefix-dll", "prefix-dll-blocked:" + ",".join(blockers), PREFIX_DLL_BLOCKED.format(target_name(item)))
             consumed.append((plan.recheck.compatdata, item["asset"]["expected_size"] or 0))
@@ -363,8 +366,11 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
                 steps.append({"step": "softdenchi-silent", "evaluated": True, "plan": plan.summary()})
                 blockers = list(plan.blockers)
                 needs = installer_needs(plan.recheck, common["config"]["dependency_installation"]["asset"], common["home"])
-                if not blockers and not _capacity(consumed + list(needs))["sufficient"]:
-                    blockers = ["insufficient-capacity"]
+                if not blockers:
+                    joint = _capacity(consumed + list(needs))
+                    steps[-1]["capacity_after_earlier_steps"] = joint
+                    if not joint["sufficient"]:
+                        blockers = ["insufficient-capacity"]
                 if blockers:
                     return stopped("softdenchi-silent", "dependency-plan-blocked:" + ",".join(blockers))
                 # One installation satisfies every dependency handled by SoftDenchi.

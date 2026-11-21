@@ -290,6 +290,23 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         self.assertIn('判定できません', output)
         self.assertNotIn('対象外', output)
 
+    def test_unverified_slot_still_shows_disagreeing_files(self):
+        self.initialize()
+        self.other_proton(games_entry=False)
+        slot = self.f.steam / 'compatibilitytools.d'
+        moved = self.f.root / 'moved-tools'
+        slot.rename(moved)
+        slot.mkdir(mode=0o700)
+        try:
+            _, report, output = self.status()
+        finally:
+            slot.rmdir()
+            moved.rename(slot)
+        entry = self.entry(report)
+        self.assertEqual((entry['assignment']['kind'], entry['assignment']['files_kind']), ('undetermined', 'other-disagreeing'))
+        self.assertIn('3つのファイルで食い違っています', output)
+        self.assertIn('判定できません', output)
+
     def test_input_changing_during_the_check_is_shown_as_not_checkable(self):
         self.initialize()
         with patch.object(status, 'evaluate_resume',
@@ -501,9 +518,50 @@ class DllStatusTests(StatusMixin, ONE['PrefixDllOnePassTests']):
             entry = self.entry(report)
             self.assertEqual((entry['next']['stage'], entry['next']['reason']),
                              ('softdenchi-silent', 'dependency-plan-blocked:insufficient-capacity'))
+            steps = {step['step']: step for step in entry['evaluated_steps']}
+            self.assertFalse(steps['softdenchi-silent']['capacity_after_earlier_steps']['sufficient'])
             _, menu, _, _ = self.run_menu('1\n1\n1\n')
-        self.agrees(entry, menu)
-        self.assertEqual(self.dll_records(), [])
+            self.agrees(entry, menu)
+            self.assertEqual(self.dll_records(), [])
+            # Without the evaluation the run writes the DLL first and its own plan then stops the same way.
+            proceed = {'next': 'continue', 'actions': [], 'steps': []}
+            with patch.object(ONE['one_pass'], 'evaluate_resume', return_value=proceed):
+                _, menu, _, _ = self.run_menu('1\n1\n1\n')
+        self.assertEqual((menu['stage'], menu['reason']), (entry['next']['stage'], entry['next']['reason']))
+        self.assertEqual([record['phase'] for record in self.dll_records()], ['present-verified'])
+
+    def add_second_dll(self):
+        data = ONE['GAME']['synthetic_pe'](extra=b'second synthetic prefix library')
+        spec = ONE['DEP']['spec_for'](data, asset_id='second-fixture', filename='second.dll', version='1.0.0.0')
+        self.config['game_preparation']['recipes'].append({
+            'dependency_id': 'second-prefix', 'revision': 1, 'handler': 'prefix-dll', 'status': 'ready',
+            'reason': 'synthetic recipe', 'asset': spec, 'destination': 'syswow64'})
+        self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime', 'mfc42-prefix', 'second-prefix']
+        (self.f.fixture.source.root / 'second.dll').write_bytes(data)
+        return len(data)
+
+    def test_space_for_a_second_dll_counts_the_first_in_the_prefix(self):
+        second = self.add_second_dll()
+        first = len(ONE['DLL_DATA'])
+        self.initialize()
+        real = dep._capacity
+        prefix = self.game_compat
+
+        def capacity(needs):
+            # Only the prefix's filesystem is short: room for either DLL alone, not both.
+            used = sum(path.stat().st_size for path in self.wow64().glob('*.dll') if path.name in ('mfc42.dll', 'second.dll'))
+            required = sum(need for path, need in needs if Path(path).is_relative_to(prefix))
+            return {**real(needs), "sufficient": required + used <= max(first, second) + 1 + 5}
+        with patch.object(dep, '_capacity', capacity), patch.object(ONE['prefix_dll'], 'RESERVE', 1):
+            _, report, _ = self.status()
+            entry = self.entry(report)
+            self.assertEqual((entry['next']['stage'], entry['next']['reason']),
+                             ('prefix-dll', 'prefix-dll-blocked:insufficient-capacity'))
+            proceed = {'next': 'continue', 'actions': [], 'steps': []}
+            with patch.object(ONE['one_pass'], 'evaluate_resume', return_value=proceed):
+                _, menu, _, _ = self.run_menu('1\n1\n1\n')
+        self.assertEqual((menu['stage'], menu['reason']), (entry['next']['stage'], entry['next']['reason']))
+        self.assertEqual(len(self.dll_records()), 1)
 
     def test_different_dll_asset_stops_in_both(self):
         self.initialize()

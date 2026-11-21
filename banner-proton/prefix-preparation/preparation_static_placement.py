@@ -91,7 +91,14 @@ def _proof(installation, probe_store_root):
                    target.source, target.steam, probe_store_root)
 
 
-def _confirmation(installation):
+def game_folder_apart(folder, roots):
+    """A confirmation game folder may neither contain nor lie inside Steam, the settings or the tool store."""
+    folder = safe_path(folder)
+    require(not any(root == folder or root.is_relative_to(folder) or folder.is_relative_to(root) for root in map(safe_path, roots)),
+            "game folder overlaps tool folders")
+
+
+def _confirmation(installation, settings, store_root):
     """An ordinary registered game, only read: the registration source and the game EXE the tool sees are the
     ones DroidDeck records (pinned), and exactly one registration points at that EXE. Placement neither reads
     nor writes the game's prefix, so its presence does not matter (design: operational entry 4.2)."""
@@ -100,6 +107,7 @@ def _confirmation(installation):
     from preparation_target import registrations
     target = installation.target
     require(target.exe.name != EXE, "probe registrations use the detailed placement")
+    game_folder_apart(target.exe.parent, (target.steam, settings, store_root))
     target.verify()
     games = registrations(load_json(target.source)[0])
     matches = []
@@ -115,9 +123,9 @@ def _confirmation(installation):
             "source_inventory_digest": installation.inventory.digest}
 
 
-def _witness(plan_or_kind, installation, probe_store_root):
+def _witness(plan_or_kind, installation, probe_store_root, settings, store_root):
     kind = plan_or_kind if isinstance(plan_or_kind, str) else plan_or_kind.witness
-    return _proof(installation, probe_store_root) if kind == "probe" else _confirmation(installation)
+    return _proof(installation, probe_store_root) if kind == "probe" else _confirmation(installation, settings, store_root)
 
 
 def _private_xalia_context(installation, review):
@@ -178,7 +186,7 @@ def _plan_placement(installation, review, store_root, probe_store_root, settings
     else:
         require(str(installation.runtime.root) == "/", "live root required")
     _private_xalia_context(installation, review)
-    proof = _witness(witness, installation, probe_store_root)
+    proof = _witness(witness, installation, probe_store_root, settings, store_root)
     require(proof["source_archive_sha512"] == review["archive_sha512"] and
             proof["source_inventory_digest"] == installation.inventory.digest, "probe and placement archive identities differ")
     installation.target.verify()
@@ -221,7 +229,8 @@ def apply_static_placement(plan, refresh, store, confirmed_digest):
         store._guard()
         if private_xalia is not None and private_xalia.parent.exists():
             private_xalia.guard()
-        require(_witness(plan, installation, plan.probe_store_root) == plan.probe, "placement probe changed")
+        require(_witness(plan, installation, plan.probe_store_root, plan.settings, plan.store_root) == plan.probe,
+                "placement probe changed")
         installation.target.verify()
         installation.runtime.verify()
         destination = safe_path(installation.summary()["destination"])
@@ -385,9 +394,7 @@ def _confirmation_candidates(games, steam, settings, management):
             present = [name for name in names if os.path.lexists(base / name)]
             require(len(present) <= 1, "two prefix aliases exist")
             require(not present or not os.path.islink(base / present[0]), "prefix is a symbolic link")
-            parent = safe_path(exe.parent)
-            require(not any(root == parent or root.is_relative_to(parent) for root in (steam, settings, management)),
-                    "game folder contains tool folders")
+            game_folder_apart(exe.parent, (steam, settings, management))
             selectable.append(key)
         except (OSError, ValueError) as error:
             excluded.append((key, str(error) if isinstance(error, ValueError) else type(error).__name__))
@@ -490,6 +497,7 @@ def interactive_confirmed_placement(directory, renderer, config, *, input_stream
                        "payload permissions have not been reviewed for this archive": "payload-mode-review-mismatch",
                        "reviewed preparation slot required": "reviewed-payload-slot-mismatch",
                        "ambiguous confirmation registration": "confirmation-registration-ambiguous",
+                       "game folder overlaps tool folders": "confirmation-game-folder-overlaps",
                        "registration or executable changed": "confirmation-registration-changed",
                        "no registered game can confirm the placement": "no-confirmation-registration",
                        "no added games": "no-registered-games",

@@ -1123,7 +1123,8 @@ first screen offers four entries. A bundle missing one of them keeps the earlier
   only to confirm the registration source and the executable DroidDeck records; its
   prefix, settings and files are only read, and a prefix may exist. Exactly one
   registration must point at the executable; registrations with two prefix aliases, a
-  symbolic-link prefix, or a game folder that contains the tool folders are listed with
+  symbolic-link prefix, or a game folder that contains or lies inside Steam, the DroidDeck
+  settings or the tool store are listed with
   the reason and cannot be chosen. The plan carries `confirmation_registration` instead of
   `probe_registration`, and the witness kind is part of the confirmed digest. Placement
   itself (review, staging, full tree check, non-replacing publication, locks) is
@@ -1153,16 +1154,18 @@ first screen offers four entries. A bundle missing one of them keeps the earlier
   dependencies, DLL assets, the installer of a new prefix, binding records) and each
   step's decision (DLL resume, SoftDenchi state and installation plan, binding). The space
   check of each later step counts the bytes the earlier steps of the run write (a DLL before
-  the installer), and one SoftDenchi installation satisfies every dependency it handles. "Ready"
-  means every dependency is verified and the game is bound. When resuming, menu 1 now
+  the installer; recorded as `capacity_after_earlier_steps`), and one SoftDenchi
+  installation satisfies every dependency it handles. "Ready" means every dependency is verified and the game is bound. When resuming, menu 1 now
   stops before its confirmation, with the same stage and reason, when a later step would
   stop (for example a binding that cannot follow because a game-folder file is missing),
   instead of writing the earlier steps first. Each step still plans again under its locks.
 - Stops and lists: a stop caused by an input that changed while it was read records
   `reason: input-changed-during-read` and the names of the differing fields
   (`changed_fields`) in entry 3, menus 1, 4, 7 and the probe material. Menu 1's list shows
-  the current assignment name of each game it can resume. When resuming and the game or Wine is
-  running, menu 1 stops before its confirmation and asks to end them first. The resume
+  the current assignment name of each game it can resume. For a game assigned to another
+  Proton, menu 1 stops when this tool's records show an earlier verified binding (or one that
+  wrote files); otherwise it binds the game to this bundle's slot after the confirmation.
+  When resuming and the game or Wine is running, menu 1 stops before its confirmation and asks to end them first. The resume
   evaluation reuses the payload inventory read for the confirmation (one archive read).
   Entry 3 lists two registrations of one executable as ambiguous and keeps the excluded
   candidates and their reasons in the result.
