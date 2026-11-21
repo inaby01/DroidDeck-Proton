@@ -343,7 +343,13 @@ Its commit and SHA-256 are recorded in `banner-proton/PINS` and build metadata. 
 `PROTON_SOFTDENCHI_CLEANUP=1` additionally revalidates and sends SIGTERM to residual SdProxy
 processes after an observed game handoff and exit. Both are disabled by default. Cleanup requires
 pidfd support and confirmed process identity/origin; missing observations or unknown processes
-prevent cleanup. It does not terminate UCManSvc or reset authentication state.
+prevent cleanup. A thread group whose main thread has exited while other threads still run (shown
+as a zombie in `/proc`) also prevents cleanup when it belongs to the prefix or cannot be attributed.
+It does not terminate UCManSvc or reset authentication state.
+
+Observation records (schema 5) carry wall-clock time. The final `stop` record adds when the Wine
+launcher returned and the last completed process observation, so the time from game exit to the
+session ending can be split without adding work to the exit path.
 
 `banner-proton/install-softdenchi.py` verifies the supplied archive's SHA-512 and installs it as
 `SoftDenchi-Proton`, outside DroidDeck's official-build replacement family. The generic

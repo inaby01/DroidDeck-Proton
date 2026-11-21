@@ -3012,6 +3012,8 @@ class Session:
         rc = None
         try:
             rc = self.run_proc(adverb + argv + sys.argv[2:] + self.cmdlineappend)
+            if observer is not None:
+                observer.launcher_returned()
         finally:
             if observer is not None:
                 observer.stop(returncode=rc)

@@ -69,6 +69,91 @@ def read_stat(text):
     return fields[0], int(fields[1]), int(fields[19])
 
 
+def read_threads(text):
+    """num_threads (field 20): the thread group size, which keeps counting a zombie leader
+    while other threads of the group still run."""
+    return int(text[text.rindex(")") + 2:].split()[17])
+
+
+LINGERING_LIMIT = 64
+
+
+class Found(dict):
+    """Snapshot result: prefix processes by identity, plus thread groups whose leader has
+    exited (or is exiting) while other threads remain (``lingering``)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lingering = []
+
+
+def environment_prefix(data, expected):
+    """Classify an environment block: "prefix", "other" or None (empty block)."""
+    if not data:
+        return None
+    for item in data.split(b"\0"):
+        key, sep, value = item.partition(b"=")
+        if sep and key == b"WINEPREFIX":
+            return "prefix" if os.path.realpath(os.fsdecode(value)) == expected else "other"
+    return "other"
+
+
+def lingering_group(entry, started, expected):
+    """Attribute a thread group whose leader cannot attribute it, through its other threads.
+
+    Returns (attribution, reason): attribution is "prefix", "other", "ambiguous" or None when
+    the group has ended. Threads share the address space, so a live thread's environ is the
+    environment the process started with.
+    """
+    pid = entry.name
+    try:
+        tids = sorted(name for name in os.listdir(entry / "task") if name.isdecimal())
+    except (FileNotFoundError, ProcessLookupError):
+        tids = None
+        reason = "task_unlisted"
+    except OSError:
+        return "ambiguous", "task_unlisted"
+    unreadable = False
+    for tid in tids or ():
+        if tid == pid:
+            continue
+        task = entry / "task" / tid
+        try:
+            if read_stat((task / "stat").read_text())[0] in {"Z", "X"}:
+                continue
+            data = (task / "environ").read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except (OSError, ValueError, IndexError):
+            unreadable = True
+            continue
+        try:
+            leader = read_stat((entry / "stat").read_text())
+        except (FileNotFoundError, ProcessLookupError):
+            return None, "group_ended"
+        except (OSError, ValueError, IndexError):
+            return "ambiguous", "leader_unreadable"
+        if leader[2] != started:
+            return "ambiguous", "identity_changed"
+        found = environment_prefix(data, expected)
+        return ("other", "empty_environment") if found is None else (found, "task_environ")
+    try:
+        text = (entry / "stat").read_text()
+        leader = read_stat(text)
+        threads = read_threads(text)
+    except (FileNotFoundError, ProcessLookupError):
+        return None, "group_ended"
+    except (OSError, ValueError, IndexError):
+        return "ambiguous", "leader_unreadable"
+    if leader[2] != started:
+        return None, "group_ended"
+    if threads <= 1:
+        return None, "group_ended"
+    if tids is None:
+        return "ambiguous", reason
+    return "ambiguous", "permission" if unreadable else "no_readable_thread"
+
+
 def executable_identity(entry, references):
     """Verify a native helper by executable inode, never by argv[0] alone."""
     executable = entry / "exe"
@@ -115,7 +200,7 @@ def pidfd_preflight():
 
 def snapshot(prefix, proc=Path("/proc"), native_references=None):
     """Read only selected env keys and argv[0]; never log full env or arguments."""
-    found = {}
+    found = Found()
     unreadable = 0
     expected = os.path.realpath(prefix)
     references = NATIVE_AUXILIARIES if native_references is None else native_references
@@ -125,11 +210,28 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
         try:
             if entry.stat().st_uid != os.getuid():
                 continue
-            before = read_stat((entry / "stat").read_text())
+            text = (entry / "stat").read_text()
+            before = read_stat(text)
             if before[0] in {"Z", "X"}:
+                if read_threads(text) >= 2:
+                    linger(found, entry, before[2], expected)
+                continue
+            try:
+                raw_env = (entry / "environ").read_bytes()
+            except (FileNotFoundError, ProcessLookupError):
+                raw_env = None
+            if not raw_env:
+                # The leader may be exiting: its address space (and so environ) goes before
+                # it becomes a zombie. Other threads can still run the process.
+                try:
+                    text = (entry / "stat").read_text()
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if read_stat(text)[2] == before[2] and read_threads(text) >= 2:
+                    linger(found, entry, before[2], expected)
                 continue
             env = {}
-            for item in (entry / "environ").read_bytes().split(b"\0"):
+            for item in raw_env.split(b"\0"):
                 key, sep, value = item.partition(b"=")
                 if sep and key in {b"WINEPREFIX", b"SteamGameId"}:
                     env[key] = os.fsdecode(value)
@@ -153,6 +255,13 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
     return found, unreadable
 
 
+def linger(found, entry, started, expected):
+    attribution, reason = lingering_group(entry, started, expected)
+    if attribution is not None:
+        found.lingering.append({"pid": int(entry.name), "started": started,
+                                "attribution": attribution, "reason": reason})
+
+
 class Tracker:
     def __init__(self, target, game_id, grace=5):
         self.target = target_path(target)
@@ -168,6 +277,7 @@ class Tracker:
         self.tracked_game = set()
         self.native_origins = {}
         self.last_proxy_state = None
+        self.known = set()
 
     def role(self, process):
         image = process.image
@@ -286,6 +396,16 @@ class Tracker:
             blockers.append("unclassified_prefix_process")
         if any(p.identity in self.baseline for p in proxies):
             blockers.append("preexisting_proxy")
+        lingering = []
+        for item in getattr(processes, "lingering", ()):
+            identity = (item["pid"], item["started"])
+            if identity in self.known:
+                lingering.append({**item, "attribution": "observed"})
+            elif item["attribution"] in {"prefix", "ambiguous"}:
+                lingering.append(item)
+        if lingering:
+            blockers.append("zombie_leader_with_live_threads")
+        self.known.update(processes)
         if game:
             self.seen_game = True
             self.gone_since = None
@@ -316,6 +436,8 @@ class Tracker:
                     "session_exit_verified": False,
                     "game_handoff_observed": self.seen_handoff,
                     "unreadable_processes": unreadable, "cleanup_requires_revalidation": True}
+        if lingering:
+            decision["lingering_processes"] = sorted(lingering, key=lambda item: item["pid"])[:LINGERING_LIMIT]
         if decision != self.last_decision:
             events.append({"event": "decision", **decision})
         self.last_decision = decision
@@ -611,13 +733,23 @@ class Observer:
         self.stop_event = threading.Event()
         self.thread = None
         self.started = time.monotonic()
+        self.launcher_returned_at = None
+        # (processes, unreadable, wall, elapsed, kind), replaced as one value after each read.
+        self.last_observation = None
         self.cleanup_enabled = env.get("PROTON_SOFTDENCHI_CLEANUP") == "1"
         self.cleaner = (ProxyCleanup(self.prefix, self.tracker, self.emit, self.stop_event.is_set,
+                                    reader=lambda prefix: self.observe(prefix, "pre_send"),
                                     wineserver_path=wineserver_path)
                         if self.cleanup_enabled else None)
 
+    def observe(self, prefix, kind):
+        processes, unreadable = snapshot(prefix)
+        self.last_observation = (processes, unreadable, time.time(), time.monotonic(), kind)
+        return processes, unreadable
+
     def emit(self, event):
-        event = {"schema": 4, "elapsed": round(time.monotonic() - self.started, 3), **event}
+        event = {"schema": 5, "elapsed": round(time.monotonic() - self.started, 3),
+                 "wall": round(time.time(), 3), **event}
         line = "softdenchi-observer " + json.dumps(event, ensure_ascii=True) + "\n"
         for output in self.outputs:
             try:
@@ -628,7 +760,7 @@ class Observer:
                 pass
 
     def poll(self):
-        processes, unreadable = snapshot(self.prefix)
+        processes, unreadable = self.observe(self.prefix, "periodic")
         for event in self.tracker.update(processes, unreadable, time.monotonic()):
             self.emit(event)
         if self.cleaner is not None:
@@ -673,10 +805,36 @@ class Observer:
         except Exception as exc:  # noqa: BLE001 -- diagnostics must not affect game execution
             self.emit({"event": "observation_failed", "error_type": type(exc).__name__})
 
+    def launcher_returned(self):
+        """Called by Proton right after the Wine launcher returned a value (not on exceptions)."""
+        self.launcher_returned_at = (time.time(), time.monotonic())
+
+    def observation_summary(self):
+        observation = self.last_observation
+        if observation is None:
+            return None
+        processes, unreadable, wall, monotonic, kind = observation
+        listed = sorted(processes.values(), key=lambda p: p.pid)
+        return {"kind": kind, "wall": round(wall, 3), "elapsed": round(monotonic - self.started, 3),
+                "unreadable_processes": unreadable, "omitted": max(0, len(listed) - LINGERING_LIMIT),
+                "processes": [{"pid": p.pid, "started": p.started, "image": p.image,
+                               "role": self.tracker.role(p)} for p in listed[:LINGERING_LIMIT]]}
+
     def stop(self, returncode=None):
+        returned = self.launcher_returned_at
         self.stop_event.set()
+        timed_out = False
         if self.thread is not None and self.thread.ident is not None:
             self.thread.join(timeout=2)
+            timed_out = self.thread.is_alive()
+        try:
+            summary = self.observation_summary()
+        except Exception as exc:  # noqa: BLE001 -- diagnostics must not affect game execution
+            summary = {"error_type": type(exc).__name__}
         self.emit({"event": "stop", "observe_only": not self.cleanup_enabled,
                    "launcher_returncode": returncode,
+                   "launcher_returned_wall": None if returned is None else round(returned[0], 3),
+                   "launcher_returned_elapsed": None if returned is None else round(returned[1] - self.started, 3),
+                   "observer_join_timed_out": timed_out,
+                   "last_observation": summary,
                    "cleanup_signalled": [list(key) for key in self.cleaner.signalled] if self.cleaner else []})

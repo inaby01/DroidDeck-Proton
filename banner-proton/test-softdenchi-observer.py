@@ -21,6 +21,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(DIST))
 from softdenchi_observer import (
     SOFTDENCHI_PROXY,
+    Found,
     Observer,
     Process,
     ProxyCleanup,
@@ -28,6 +29,7 @@ from softdenchi_observer import (
     image_path,
     pidfd_preflight,
     read_stat,
+    read_threads,
     snapshot,
 )
 
@@ -233,13 +235,72 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(result["native_auxiliary_processes"], [])
 
 
+def with_lingering(processes, *items):
+    found = Found({p.identity: p for p in processes})
+    found.lingering = [{"pid": pid, "started": started, "attribution": attribution, "reason": "task_environ"}
+                       for pid, started, attribution in items]
+    return found
+
+
+class LingeringTrackerTests(unittest.TestCase):
+    def setUp(self):
+        self.tracker = Tracker("/games/Another Title/launch.exe", "test-game")
+        sample(self.tracker, [], 0)
+        self.launcher = process(10, r"Z:\games\Another Title\launch.exe")
+        self.payload = process(11, r"Z:\games\Another Title\payload.log", parent=10)
+        self.service = process(30, r"C:\Program Files (x86)\SoftDenchi\UCManSvc.exe")
+        self.proxy = process(20, SOFTDENCHI_PROXY, parent=30)
+        sample(self.tracker, [self.launcher, self.payload, self.service, self.proxy], 1)
+
+    def update(self, found, now):
+        self.tracker.update(found, 0, now)
+        return self.tracker.last_decision
+
+    def test_observed_game_whose_main_thread_exited_blocks(self):
+        # The payload's leader exited but its threads run: snapshot can no longer attribute it.
+        found = with_lingering([self.service, self.proxy], (11, 10, "other"))
+        result = self.update(found, 2)
+        self.assertEqual(result["phase"], "indeterminate")
+        self.assertIn("zombie_leader_with_live_threads", result["blockers"])
+        self.assertEqual(result["lingering_processes"][0]["attribution"], "observed")
+        self.assertEqual(self.update(found, 9)["phase"], "indeterminate")
+
+    def test_prefix_or_ambiguous_unknown_group_blocks(self):
+        for attribution in ("prefix", "ambiguous"):
+            with self.subTest(attribution=attribution):
+                self.setUp()
+                result = self.update(with_lingering([self.service, self.proxy], (99, 50, attribution)), 2)
+                self.assertIn("zombie_leader_with_live_threads", result["blockers"])
+
+    def test_unknown_other_group_does_not_block(self):
+        result = self.update(with_lingering([self.service, self.proxy], (99, 50, "other")), 2)
+        self.assertNotIn("zombie_leader_with_live_threads", result["blockers"])
+        self.assertNotIn("lingering_processes", result)
+        self.assertEqual(result["phase"], "game_absence_grace")
+
+    def test_reused_pid_is_not_the_observed_identity(self):
+        result = self.update(with_lingering([self.service, self.proxy], (11, 77, "other")), 2)
+        self.assertNotIn("zombie_leader_with_live_threads", result["blockers"])
+
+    def test_grace_restarts_after_blocker_clears(self):
+        self.update(with_lingering([self.service, self.proxy], (11, 10, "other")), 2)
+        plain = {p.identity: p for p in [self.service, self.proxy]}
+        self.assertEqual(self.update(plain, 6)["phase"], "game_absence_grace")
+        self.assertEqual(self.update(plain, 10)["phase"], "game_absence_grace")
+        self.assertEqual(self.update(plain, 11)["phase"], "helpers_remaining_candidate")
+
+
+def stat_text(pid, state="S", threads=1, started=123):
+    # stat field 20 is num_threads, field 22 is starttime; comm has ')' and spaces.
+    fields = [state, "1"] + ["0"] * 15 + [str(threads), "0", str(started)]
+    return f"{pid} (name ) with spaces) " + " ".join(fields)
+
+
 class SnapshotTests(unittest.TestCase):
-    def make_process(self, root, pid, prefix, state="S", argv0=SOFTDENCHI_PROXY):
+    def make_process(self, root, pid, prefix, state="S", argv0=SOFTDENCHI_PROXY, threads=1):
         directory = root / str(pid)
         directory.mkdir()
-        # stat field 22 is starttime; comm intentionally has ')' and spaces.
-        fields = [state, "1"] + ["0"] * 17 + ["123"]
-        (directory / "stat").write_text(f"{pid} (name ) with spaces) " + " ".join(fields))
+        (directory / "stat").write_text(stat_text(pid, state, threads))
         (directory / "environ").write_bytes(
             os.fsencode(f"WINEPREFIX={prefix}\0SteamGameId=test-game\0SECRET=do-not-log\0"))
         (directory / "cmdline").write_bytes(os.fsencode(argv0 + "\0/m\0do-not-log\0"))
@@ -276,6 +337,156 @@ class SnapshotTests(unittest.TestCase):
     def test_stat_parser(self):
         fields = ["S", "42"] + ["0"] * 17 + ["456"]
         self.assertEqual(read_stat("10 (name ) spaces) " + " ".join(fields)), ("S", 42, 456))
+        self.assertEqual(read_threads(stat_text(10, threads=3)), 3)
+        self.assertEqual(read_stat(stat_text(10, threads=3)), ("S", 1, 123))
+
+    def add_thread(self, entry, tid, prefix=None, state="S", environ=None):
+        task = entry / "task" / str(tid)
+        task.mkdir(parents=True)
+        (task / "stat").write_text(stat_text(tid, state))
+        if environ is None and prefix is not None:
+            environ = os.fsencode(f"SteamGameId=test-game\0WINEPREFIX={prefix}\0")
+        if environ is not None:
+            (task / "environ").write_bytes(environ)
+        return task
+
+    def zombie_leader(self, root, pid=100001, state="Z", threads=2, environ=b""):
+        entry = self.make_process(root, pid, "/test/pfx", state=state, threads=threads)
+        if environ is None:
+            (entry / "environ").unlink()
+        else:
+            (entry / "environ").write_bytes(environ)
+        self.add_thread(entry, pid, state="Z", environ=b"")
+        return entry
+
+    def lingering(self, root):
+        found, unreadable = snapshot("/test/pfx", root)
+        self.assertEqual(unreadable, 0)
+        self.assertNotIn((100001, 123), found)
+        return [(item["attribution"], item["reason"]) for item in found.lingering]
+
+    def test_zombie_leader_with_prefix_worker_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.add_thread(self.zombie_leader(root), 100002, "/test/pfx")
+            self.assertEqual(self.lingering(root), [("prefix", "task_environ")])
+
+    def test_leader_without_environment_before_zombie_state_is_reported(self):
+        # The leader's address space goes before it becomes a zombie: still "S", empty environ.
+        for environ in (b"", None):
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                self.add_thread(self.zombie_leader(root, state="S", environ=environ), 100002, "/test/pfx")
+                self.assertEqual(self.lingering(root), [("prefix", "task_environ")])
+
+    def test_leader_environ_lookup_error_is_not_a_vanished_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root, state="S", environ=b"WINEPREFIX=/test/pfx\0")
+            self.add_thread(entry, 100002, "/test/pfx")
+            real = Path.read_bytes
+            def read(path):
+                if path == entry / "environ":
+                    raise ProcessLookupError
+                return real(path)
+            with patch.object(Path, "read_bytes", read):
+                self.assertEqual(self.lingering(root), [("prefix", "task_environ")])
+
+    def test_other_prefix_or_plain_process_is_not_lingering_blocker(self):
+        cases = [("/other/pfx", None, "other"), (None, b"HOME=/root\0", "other"), (None, b"", "other")]
+        for prefix, environ, expected in cases:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                self.add_thread(self.zombie_leader(root), 100002, prefix, environ=environ)
+                self.assertEqual([item[0] for item in self.lingering(root)], [expected])
+
+    def test_vanished_worker_falls_through_to_next_worker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root, threads=3)
+            self.add_thread(entry, 100002, environ=None)  # environ vanished mid-read
+            self.add_thread(entry, 100003, "/test/pfx")
+            self.assertEqual(self.lingering(root), [("prefix", "task_environ")])
+
+    def test_group_that_ended_is_skipped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root)
+            self.add_thread(entry, 100002, environ=None)
+            real = Path.read_text
+            def read(path):
+                if path == entry / "stat" and read.count:
+                    return stat_text(100001, "Z", threads=1)
+                read.count += path == entry / "stat"
+                return real(path)
+            read.count = 0
+            with patch.object(Path, "read_text", read):
+                self.assertEqual(self.lingering(root), [])
+
+    def test_ordinary_zombie_is_skipped_without_reading_tasks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.zombie_leader(root, threads=1)
+            self.assertEqual(self.lingering(root), [])
+
+    def test_unreadable_workers_are_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root)
+            self.add_thread(entry, 100002, "/test/pfx")
+            real = Path.read_bytes
+            def read(path):
+                if path.parent.parent.name == "task":
+                    raise PermissionError
+                return real(path)
+            with patch.object(Path, "read_bytes", read):
+                self.assertEqual(self.lingering(root), [("ambiguous", "permission")])
+
+    def test_unlisted_tasks_are_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.zombie_leader(root)
+            real = os.listdir
+            with patch.object(os, "listdir", lambda path: (_ for _ in ()).throw(PermissionError)
+                              if str(path).endswith("task") else real(path)):
+                self.assertEqual(self.lingering(root), [("ambiguous", "task_unlisted")])
+
+    def test_leader_identity_change_while_reading_worker_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root)
+            self.add_thread(entry, 100002, "/test/pfx")
+            real = Path.read_bytes
+            def read(path):
+                data = real(path)
+                if path.parent.parent.name == "task":
+                    (entry / "stat").write_text(stat_text(100001, "S", threads=2, started=999))
+                return data
+            with patch.object(Path, "read_bytes", read):
+                self.assertEqual(self.lingering(root), [("ambiguous", "identity_changed")])
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and Path("/proc/self/task").is_dir(), "needs Linux /proc")
+    def test_real_process_whose_main_thread_exited(self):
+        import subprocess
+        import time
+        code = ("import ctypes,threading,time\n"
+                "threading.Thread(target=time.sleep,args=(5,)).start()\n"
+                "time.sleep(0.3)\nctypes.CDLL(None).pthread_exit(None)\n")
+        with tempfile.TemporaryDirectory() as prefix:
+            child = subprocess.Popen([sys.executable, "-I", "-c", code], env={**os.environ, "WINEPREFIX": prefix})
+            try:
+                for _ in range(50):
+                    time.sleep(0.1)
+                    text = Path(f"/proc/{child.pid}/stat").read_text()
+                    if read_stat(text)[0] == "Z":
+                        break
+                self.assertEqual(read_stat(text)[0], "Z")
+                self.assertGreaterEqual(read_threads(text), 2)
+                found, _ = snapshot(prefix)
+                self.assertEqual([(item["pid"], item["attribution"]) for item in found.lingering],
+                                 [(child.pid, "prefix")])
+            finally:
+                child.wait(timeout=10)
 
     def test_native_executable_identity_uses_inode_not_command_name(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -326,13 +537,95 @@ class SnapshotTests(unittest.TestCase):
         mirror = io.StringIO()
         Observer({"WINEPREFIX": "/test/pfx"}, "/games/launch.exe", output, mirror=mirror).stop()
         event = json.loads(mirror.getvalue().split(" ", 1)[1])
-        self.assertEqual(event["schema"], 4)
+        self.assertEqual(event["schema"], 5)
         self.assertEqual(event["event"], "stop")
 
     def test_same_output_is_not_duplicated(self):
         output = io.StringIO()
         Observer({"WINEPREFIX": "/test/pfx"}, "/games/launch.exe", output, mirror=output).stop()
         self.assertEqual(len(output.getvalue().splitlines()), 1)
+
+
+def events_of(output):
+    return [json.loads(line.split(" ", 1)[1]) for line in output.getvalue().splitlines()]
+
+
+class TimingTests(unittest.TestCase):
+    def setUp(self):
+        self.wall = [1000.0]
+        self.mono = [50.0]
+        patches = [patch("softdenchi_observer.time.time", lambda: self.wall[0]),
+                   patch("softdenchi_observer.time.monotonic", lambda: self.mono[0])]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        self.output = io.StringIO()
+        self.observer = Observer({"WINEPREFIX": "/test/pfx"}, "/games/launch.exe", self.output)
+
+    def advance(self, seconds):
+        self.wall[0] += seconds
+        self.mono[0] += seconds
+
+    def test_every_event_has_wall_time_and_schema_5(self):
+        with patch("softdenchi_observer.snapshot", return_value=({}, 0)), \
+                patch("threading.Thread.start"):
+            self.observer.start()
+        self.observer.stop()
+        events = events_of(self.output)
+        self.assertTrue(all(event["schema"] == 5 and event["wall"] == 1000.0 for event in events))
+
+    def test_wall_time_does_not_repeat_unchanged_decisions(self):
+        with patch("softdenchi_observer.snapshot", return_value=({}, 0)):
+            self.observer.poll()
+            self.advance(1)
+            self.observer.poll()
+        self.assertEqual([event["event"] for event in events_of(self.output)], ["decision"])
+
+    def test_stop_reports_launcher_return_and_last_observation_without_rereading(self):
+        game = process(10, r"Z:\games\launch.exe")
+        with patch("softdenchi_observer.snapshot", return_value=({game.identity: game}, 0)):
+            self.advance(1)
+            self.observer.poll()
+        self.advance(2)
+        self.observer.launcher_returned()
+        self.advance(0.5)
+        with patch("softdenchi_observer.snapshot", side_effect=AssertionError("no /proc read at stop")):
+            self.observer.stop(returncode=3)
+        stop = events_of(self.output)[-1]
+        self.assertEqual(stop["launcher_returncode"], 3)
+        self.assertEqual((stop["launcher_returned_wall"], stop["launcher_returned_elapsed"]), (1003.0, 3.0))
+        self.assertEqual((stop["wall"], stop["elapsed"]), (1003.5, 3.5))
+        observation = stop["last_observation"]
+        self.assertEqual((observation["kind"], observation["wall"], observation["elapsed"]), ("periodic", 1001.0, 1.0))
+        self.assertEqual(observation["processes"], [{"pid": 10, "started": 10, "image": game.image, "role": "game_image"}])
+        self.assertFalse(stop["observer_join_timed_out"])
+
+    def test_stop_without_launcher_return_or_observation(self):
+        self.observer.stop()
+        stop = events_of(self.output)[-1]
+        self.assertIsNone(stop["launcher_returned_wall"])
+        self.assertIsNone(stop["launcher_returned_elapsed"])
+        self.assertIsNone(stop["last_observation"])
+
+    def test_pre_send_read_becomes_last_observation(self):
+        observer = Observer({"WINEPREFIX": "/test/pfx", "PROTON_SOFTDENCHI_CLEANUP": "1"}, "/games/launch.exe", self.output)
+        with patch("softdenchi_observer.snapshot", return_value=({}, 2)):
+            observer.cleaner.reader("/test/pfx")
+        self.assertEqual(observer.last_observation[1], 2)
+        self.assertEqual(observer.last_observation[4], "pre_send")
+
+    def test_last_observation_is_capped(self):
+        processes = {(pid, 1): process(pid, SOFTDENCHI_PROXY, started=1) for pid in range(1, 71)}
+        with patch("softdenchi_observer.snapshot", return_value=(processes, 0)):
+            self.observer.poll()
+        self.observer.stop()
+        observation = events_of(self.output)[-1]["last_observation"]
+        self.assertEqual((len(observation["processes"]), observation["omitted"]), (64, 6))
+
+    def test_join_timeout_is_reported(self):
+        self.observer.thread = SimpleNamespace(ident=1, join=lambda timeout: None, is_alive=lambda: True)
+        self.observer.stop()
+        self.assertTrue(events_of(self.output)[-1]["observer_join_timed_out"])
 
 
 class CleanupTests(unittest.TestCase):
@@ -603,6 +896,23 @@ class CleanupTests(unittest.TestCase):
         self.reader.side_effect = [(self.current, 0), (fresh, 0)]
         self.assertEqual(self.attempt()[1].call_count, 1)
 
+    def test_lingering_game_before_first_signal_sends_nothing(self):
+        fresh = with_lingering(self.current.values(), (11, 10, "other"))
+        self.reader.side_effect = [(fresh, 0)]
+        opened, sent, closed = self.attempt()
+        self.assertEqual(sent.call_count, 0)
+        self.assertEqual(closed.call_count, opened.call_count)
+
+    def test_lingering_game_between_signals_stops_batch(self):
+        fresh = with_lingering(self.current.values(), (11, 10, "other"))
+        self.reader.side_effect = [(self.current, 0), (fresh, 0)]
+        self.assertEqual(self.attempt()[1].call_count, 1)
+
+    def test_unrelated_lingering_group_keeps_cleanup(self):
+        fresh = with_lingering(self.current.values(), (99, 50, "other"))
+        self.reader.side_effect = [(fresh, 0), (fresh, 0)]
+        self.assertEqual(self.attempt()[1].call_count, 2)
+
     def test_stop_request_before_send_cancels_cleanup(self):
         self.stopped.side_effect = [False, False, True]
         opened, sent, closed = self.attempt()
@@ -675,6 +985,9 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(self.run_launcher("0", lambda _: 7, cleanup="1"), 7)
         observer.start.assert_called_once()
         observer.stop.assert_called_once_with(returncode=7)
+        observer.launcher_returned.assert_called_once_with()
+        self.assertLess(observer.method_calls.index(unittest.mock.call.launcher_returned()),
+                        observer.method_calls.index(unittest.mock.call.stop(returncode=7)))
 
     def test_observer_start_failure_preserves_game_launch_and_status(self):
         with patch("softdenchi_observer.Observer.start", side_effect=OSError):
@@ -693,6 +1006,13 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.run_launcher("1", fail)
         observer.stop.assert_called_once()
+        observer.launcher_returned.assert_not_called()
+
+    def test_nonzero_launcher_status_still_records_return(self):
+        observer = unittest.mock.MagicMock()
+        with patch("softdenchi_observer.Observer", return_value=observer):
+            self.assertEqual(self.run_launcher("1", lambda _: 53), 53)
+        observer.launcher_returned.assert_called_once_with()
 
 
 if __name__ == "__main__":
