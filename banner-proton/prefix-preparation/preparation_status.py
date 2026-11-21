@@ -13,6 +13,7 @@ from pathlib import Path
 from preparation_binding import (
     FILES,
     STEAM_PATH,
+    _choice,
     _games_document,
     _json,
     _raw,
@@ -22,15 +23,13 @@ from preparation_binding import (
 from preparation_common import MAX_JSON, VERSION, input_change, require, safe_path
 from preparation_dependency_install import describe_error
 from preparation_game_prefix import RECORDS, validate_game_config
-from preparation_one_pass import _game_records, action_text, evaluate_resume
+from preparation_one_pass import UNCLEAR, _game_records, action_text, evaluate_resume
 from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore
 from preparation_vdf import Document
 
 MODE = "game-status-result"
 SCOPE = "read-only-game-status"
-# A process appeared or the view was not clear while reading (design 6.1: shown as running or changing).
-UNCLEAR = ("concurrent-process-observed", "target-process-view-not-clear", "dependency-state-uninspected")
 FILE_NAMES = {"games": "games.json", "config": "config.vdf", "state": "state.json"}
 
 
@@ -46,8 +45,9 @@ def _current(steam, settings, key):
     games = _games_document(_raw(safe_path(settings / "games.json", settings)))["games"].get(key)
     state = _json(_raw(safe_path(settings / "state.json", settings)), {})
     applied = state.get("games_applied")
-    return {"config": None if name is None else str(name.value), "games": games,
-            "state": applied.get(key) if type(applied) is dict else None}
+    applied = applied.get(key) if type(applied) is dict else None
+    _choice(applied)  # a malformed entry stops this game, not the whole check
+    return {"config": None if name is None else str(name.value), "games": games, "state": applied}
 
 
 def _tool_id(steam, directory):
@@ -175,6 +175,9 @@ def interactive_status(directory, renderer, config, *, input_stream=None, output
             records, unreadable = [], 0
         else:
             records, unreadable = _game_records(management)
+            if not records:
+                report["status"] = "no-prepared-games"
+                print("準備したゲームはありません（初期化の記録がありません）。", file=output)
         report["unreadable_game_prefix_records"] = unreadable
         if unreadable:
             print(f"読めない初期化記録が{unreadable}件あります（どの登録のものか分からないため、表示に使いません）。", file=output)
@@ -235,8 +238,14 @@ def _game(key, listed, title, context):
     entry = {}
     stage = "status-record"
     try:
+        if title is None:
+            entry.update(record="several" if len(listed) != 1 else listed[0]["status"],
+                         next={"next": "not-listed", "reason": "registration-missing"})
+            print("  DroidDeckの登録が見つからないため、1（新しいゲームを準備）の一覧に出ません。", file=output)
+            return entry
+        # The same checks and stage names as menu 1 when the game is selected (profile-selection).
         if len(listed) != 1:
-            entry.update(record="several", next={"next": "stop", "stage": "registration-selection",
+            entry.update(record="several", next={"next": "stop", "stage": "profile-selection",
                                                   "reason": "several game prefix records for this registration"})
             print("  初期化の記録: 同じIDの記録が複数あります。1（新しいゲームを準備）はこのゲームで止まります。", file=output)
             return entry
@@ -248,14 +257,13 @@ def _game(key, listed, title, context):
                   "（作成物は削除せずに残しています）。", file=output)
             return entry
         print("  初期化の記録: 初期化済み / prefix: " + text(str(steam / "steamapps/compatdata" / key)), file=output)
-        if title is None:
-            entry["next"] = {"next": "not-listed", "reason": "registration-missing"}
-            print("  DroidDeckの登録が見つからないため、1（新しいゲームを準備）の一覧に出ません。", file=output)
-            return entry
         with PrivateStore(context["management"]) as store:
             record, record_digest = store.read_record(RECORDS, item["trial_id"] + ".json")
         profile = context["profiles"].get(record["profile"]["profile_id"])
-        require(profile is not None, "game profile changed since initialization")
+        if profile is None:
+            entry["next"] = {"next": "stop", "stage": "profile-selection", "reason": "game profile changed since initialization"}
+            print("  作品プロファイル: このバンドルにありません。1（新しいゲームを準備）はこのゲームで止まります。", file=output)
+            return entry
         entry["profile_id"] = profile["profile_id"]
         print("  作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）", file=output)
         stage = "status-assignment"
@@ -274,6 +282,7 @@ def _game(key, listed, title, context):
         if found["kind"] == "other":
             entry["next"] = {"next": "out-of-scope"}
             print("  このバンドルの対象外です（別のProtonに割り当て済み）。依存と次にすることは表示しません。", file=output)
+            print("  1（新しいゲームを準備）でこのゲームを選ぶと、このバンドルの準備用Protonへ割り当て直しになります。", file=output)
             return entry
         stage = "status-evaluation"
         compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)

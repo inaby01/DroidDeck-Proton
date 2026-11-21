@@ -179,7 +179,10 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         self.assertEqual(entry['next'], {'next': 'out-of-scope'})
         self.assertIn('別のProton（Other-Proton-Tool）', output)
         self.assertIn('このバンドルの対象外', output)
+        self.assertIn('割り当て直しになります', output)
         self.assertNotIn('依存:', output)
+        _, _, menu_output, _ = self.run_menu('1\nq\n')
+        self.assertIn('今の割り当て: Other-Proton-Tool', menu_output)
 
     def test_disagreeing_files_of_another_proton_are_shown_as_such(self):
         self.initialize()
@@ -197,6 +200,31 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
             _, report, output = self.status()
         self.assertEqual(self.entry(report)['next'], {'next': 'undetermined', 'reason': 'game-running'})
         self.assertIn('確認できません（動作中または変化中）', output)
+
+    def test_running_game_at_resume_asks_to_end_it(self):
+        self.initialize()
+        with patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):
+            _, menu, _, _ = self.run_menu('1\n1\n')
+        self.assertEqual(menu['status'], 'stopped')
+        self.assertIn('ゲームとWineを終了してから、もう一度 1 を実行', menu['next_step'])
+
+    def test_malformed_state_entry_stops_only_that_game(self):
+        self.initialize()
+        state_path = self.f.settings / 'state.json'
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        state['games_applied'] = {'42': 'not-an-object'}
+        state_path.write_text(json.dumps(state))
+        code, report, output = self.status()
+        self.assertEqual((code, report['status']), (2, 'reported'))
+        self.assertEqual(self.entry(report)['next']['reason'], 'unreadable')
+        self.assertIn('照合できません: status-assignment', output)
+
+    def test_store_without_records_says_so(self):
+        self.f.store_root.parent.mkdir(parents=True, exist_ok=True)
+        with patch.object(status, '_game_records', return_value=([], 0)):
+            _, report, output = self.status()
+        self.assertEqual((report['status'], report['games']), ('no-prepared-games', []))
+        self.assertIn('初期化の記録がありません', output)
 
     def test_unplaced_slot_or_missing_payload_leaves_dependencies_undetermined(self):
         self.initialize()
@@ -276,10 +304,22 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         self.assertIn('読めない初期化記録が1件', output)
         _, menu, _, _ = self.run_menu('1\n1\n1\n')
         self.assertEqual(menu['status'], 'ready-to-launch')
-        with patch.object(status, '_game_records', return_value=([listed[0], listed[0]], 0)):
+        several = ([listed[0], listed[0]], 0)
+        with patch.object(status, '_game_records', return_value=several):
             _, report, output = self.status()
-        self.assertEqual(self.entry(report)['record'], 'several')
+        entry = self.entry(report)
+        self.assertEqual(entry['record'], 'several')
         self.assertIn('同じIDの記録が複数', output)
+        with patch.object(ONE['one_pass'], '_game_records', return_value=several):
+            _, menu, _, _ = self.run_menu('1\n1\n')
+        self.agrees(entry, menu)
+        profiles = self.config['game_preparation']['profiles']
+        self.config['game_preparation']['profiles'] = [{**profiles[0], 'profile_id': 'other-profile'}]
+        _, report, output = self.status()
+        entry = self.entry(report)
+        self.assertEqual(entry['next']['stage'], 'profile-selection')
+        _, menu, _, _ = self.run_menu('1\n1\n')
+        self.agrees(entry, menu)
 
     def test_archive_is_read_once_and_the_inventory_is_only_for_game_prefixes(self):
         self.initialize()
@@ -288,6 +328,10 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
             _, report, _ = self.status()
         self.assertEqual(self.entry(report)['next']['next'], 'continue')
         self.assertEqual((loose.call_count, strict.call_count), (1, 0))
+        with patch.object(recheck, 'inspect_archive_from_folder', wraps=recheck.inspect_archive_from_folder) as loose:
+            _, menu, _, _ = self.run_menu('1\n1\nq\n')
+        self.assertIsNone(menu)
+        self.assertEqual(loose.call_count, 1)
         inventory = recheck.read_payload_inventory(self.config, self.f.fixture.source.root)
         source, _, games = ONE['GAME']['DEP']['TRIAL']['BASE']['selection'].registration_catalog(self.environment)
         common = {'config': self.config, 'directory': self.f.fixture.source.root, 'renderer': self.f.fixture.options['renderer'],

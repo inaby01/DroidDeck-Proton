@@ -1155,3 +1155,12 @@ first screen offers four entries. A bundle missing one of them keeps the earlier
   stops before its confirmation, with the same stage and reason, when a later step would
   stop (for example a binding that cannot follow because a game-folder file is missing),
   instead of writing the earlier steps first. Each step still plans again under its locks.
+- Stops and lists: a stop caused by an input that changed while it was read records
+  `reason: input-changed-during-read` and the names of the differing fields
+  (`changed_fields`) in entry 3, menus 1, 4, 7 and the probe material. Menu 1's list shows
+  the current assignment name of each game it can resume; choosing a game assigned to
+  another Proton rebinds it to this bundle's slot. When resuming and the game or Wine is
+  running, menu 1 stops before its confirmation and asks to end them first. The resume
+  evaluation reuses the payload inventory read for the confirmation (one archive read).
+  Entry 3 lists two registrations of one executable as ambiguous and keeps the excluded
+  candidates and their reasons in the result.

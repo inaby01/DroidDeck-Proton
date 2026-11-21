@@ -364,10 +364,22 @@ def _confirmation_candidates(games, steam, settings, management):
     from preparation_probe import EXE
     selectable, excluded = [], []
     base = steam / "steamapps/compatdata"
+    # One executable registered twice is ambiguous for the confirmation (the plan would stop); list it as such.
+    identities = {}
+    for key, game in games.items():
+        try:
+            info = os.stat(game["exe"])
+            identities.setdefault((info.st_dev, info.st_ino), []).append(key)
+        except (OSError, ValueError):
+            continue
+    shared = {key for keys in identities.values() if len(keys) > 1 for key in keys}
     for key, game in games.items():
         exe = Path(game["exe"])
         if exe.name == EXE:
             continue  # probe registrations belong to the detailed menu
+        if key in shared:
+            excluded.append((key, "ambiguous confirmation registration"))
+            continue
         try:
             names = [key] + ([str(int(key) - 2**32)] if int(key) >= 2**31 else [])
             present = [name for name in names if os.path.lexists(base / name)]
@@ -401,12 +413,13 @@ def interactive_confirmed_placement(directory, renderer, config, *, input_stream
     settings = safe_path(settings if settings is not None else home / ".local/share/droiddeck-compat")
     management = safe_path(home / ".local/state/droiddeck-prefix-preparation/tool-store")
     protected = [steam, settings]
-    stage, started, report = "confirmed-placement-selection", False, None
+    stage, started, report, report_excluded = "confirmed-placement-selection", False, None, []
     try:
         config = selection.validate_selection_config(copy.deepcopy(config))
         require("placement_review" in config, "reviewed build distribution required")
         source, _, games = selection.registration_catalog(environment)
         protected.extend(Path(game["exe"]).parent for game in games.values())
+        print("登録済みのゲームを照合しています（EXEを読みます。変更はしません）。", file=output, flush=True)
         selectable, excluded = _confirmation_candidates(games, steam, settings, management)
         checked_keys = []
         for key in selectable:
@@ -419,6 +432,7 @@ def interactive_confirmed_placement(directory, renderer, config, *, input_stream
         print("選んだゲームは確認に使うだけで、変更しません（prefix・割り当て・ゲームのファイルには書きません）。", file=output)
         for index, key in enumerate(checked_keys, 1):
             print(f"{index}. {selection._text(games[key]['title'])}  [ID {key}]", file=output)
+        report_excluded = [{"app_id": key, "reason": reason} for key, reason in excluded]
         for key, reason in excluded:
             print(f"-  {selection._text(games[key]['title'])}  [ID {key}]（選べません: {selection._text(reason)}）", file=output)
         require(checked_keys, "no registered game can confirm the placement")
@@ -478,6 +492,7 @@ def interactive_confirmed_placement(directory, renderer, config, *, input_stream
                        "ambiguous confirmation registration": "confirmation-registration-ambiguous",
                        "registration or executable changed": "confirmation-registration-changed",
                        "no registered game can confirm the placement": "no-confirmation-registration",
+                       "no added games": "no-registered-games",
                        "existing installation differs from approved generated trees": "existing-preparation-tree-differs",
                        "insufficient estimated static placement space": "insufficient-static-capacity",
                        "runtime source/library/label changed since audit": "runtime-identity-changed",
@@ -493,7 +508,8 @@ def interactive_confirmed_placement(directory, renderer, config, *, input_stream
         if not started:
             print("確認用のゲームの読み取りで止まった場合は、もう一度実行するか、別のゲームを選んでください。", file=output)
         print("途中のtoolやstaging、記録は削除せず保持します。結果JSONを確認してください。", file=output)
-    report.update(schema_version=1, tool_version=VERSION, preparation_complete=False)
+    report.update(schema_version=1, tool_version=VERSION, preparation_complete=False,
+                  excluded_confirmation_candidates=report_excluded)
     try:
         saved, _ = selection.save_selection_result(directory, home, report, protected)
     except (OSError, ValueError):

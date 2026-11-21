@@ -152,6 +152,22 @@ class MeasureTests(unittest.TestCase):
         with common.regular_open(self.path, 1024 * 1024) as stream, self.assertRaises(Invalid):
             assets.measure_stream(stream, 1024 * 1024, 'pe', timestamps=False)
 
+    def test_loose_read_finds_a_pe_header_far_into_the_file(self):
+        data = bytearray(synthetic_pe(extra=b'\0' * (200 * 1024)))
+        header = bytes(data[0x80:0x200])
+        data[0x80:0x200] = b'\0' * (0x200 - 0x80)
+        offset = 150 * 1024
+        data[offset:offset + len(header)] = header
+        struct.pack_into('<I', data, 0x3C, offset)
+        self.path.write_bytes(bytes(data))
+        for timestamps in (True, False):
+            with common.regular_open(self.path, 1 << 20) as stream:
+                self.assertEqual(assets.measure_stream(stream, 1 << 20, 'pe', timestamps=timestamps)['pe_machine'], 'x86')
+        struct.pack_into('<I', data, 0x3C, len(data) - 10)
+        self.path.write_bytes(bytes(data))
+        with common.regular_open(self.path, 1 << 20) as stream, self.assertRaises(Invalid):
+            assets.measure_stream(stream, 1 << 20, 'pe', timestamps=False)
+
     def test_folder_entry_of_inspect_assets_is_loose_and_the_default_is_strict(self):
         spec = {'asset_id': 'runtime', 'revision': 1, 'version': '1', 'purpose': 'test', 'filename': 'runtime.dll',
                 'format': 'pe', 'pe_machine': 'x86', 'expected_size': len(self.data),

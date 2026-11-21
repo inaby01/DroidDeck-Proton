@@ -45,7 +45,7 @@ def pe_machine(stream, size):
     require(64 <= offset <= size - 26, "invalid PE offset")
     stream.seek(offset)
     header = stream.read(26)
-    require(header[:4] == b"PE\0\0", "missing PE signature")
+    require(len(header) == 26 and header[:4] == b"PE\0\0", "missing PE signature")
     optional_size = struct.unpack_from("<H", header, 20)[0]
     require(optional_size >= 2 and offset + 24 + optional_size <= size, "truncated PE optional header")
     machine = struct.unpack_from("<H", header, 4)[0]
@@ -54,7 +54,14 @@ def pe_machine(stream, size):
     return MACHINES[machine]
 
 
-PE_HEAD = 64 * 1024
+PE_HEAD_LIMIT = 16 * 1024 * 1024  # bytes kept for the PE header of a loose read (e_lfanew is normally small)
+
+
+def _pe_head_needed(head):
+    """How many leading bytes the PE header check needs, known once the DOS header is read."""
+    if len(head) < 64 or head[:2] != b"MZ":
+        return 64
+    return min(max(64, struct.unpack_from("<I", head, 60)[0] + 26), PE_HEAD_LIMIT)
 
 
 def measure_stream(stream, limit, kind, destination=None, timestamps=True):
@@ -73,8 +80,11 @@ def measure_stream(stream, limit, kind, destination=None, timestamps=True):
         require(length <= before.st_size, "asset grew during read")
         require(length <= limit, "asset exceeds trusted input ceiling")
         digest.update(chunk)
-        if not timestamps and len(head) < PE_HEAD:
-            head += chunk[:PE_HEAD - len(head)]
+        rest = chunk
+        while not timestamps and kind == "pe" and rest and len(head) < _pe_head_needed(head):
+            take = _pe_head_needed(head) - len(head)
+            head += rest[:take]
+            rest = rest[take:]
         if destination is not None:
             destination.write(chunk)
     unchanged(before, os.fstat(stream.fileno()), timestamps)

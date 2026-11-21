@@ -227,10 +227,23 @@ def binding_action(binding, history):
     return "apply", None
 
 
+# A process appeared or the view was not clear while reading: the game or Wine is running (or changing).
+UNCLEAR = ("concurrent-process-observed", "target-process-view-not-clear", "dependency-state-uninspected")
+
+
 def action_text(action, recipes):
     if action.startswith("prefix-dll:"):
         return "DLL（" + target_name(recipes[action.split(":", 1)[1]]) + "）を入れる"
     return {"softdenchi-silent": "ソフト電池を画面なしで入れる", "binding": "準備用Protonに割り当てる"}[action]
+
+
+def current_tool(steam, settings, key):
+    """The tool name config.vdf maps this registration to, for the selection list (read-only)."""
+    from preparation_status import _current  # defined after this module in the bundle
+    try:
+        return _current(steam, settings, key)["config"] or "なし"
+    except (OSError, ValueError, TypeError, KeyError):
+        return "読めません"
 
 
 def pre_write_stops(*, profile, recipes, directory, record=None, softdenchi=None, installer=None):
@@ -493,6 +506,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         for number, (key_, label) in enumerate(candidates, 1):
             print(f"{number}. [{label}] {text(games[key_]['title'])} [ID {key_}]", file=output)
             print("   " + text(games[key_]["exe"]), file=output)
+            if label == "続きから":
+                print("   今の割り当て: " + text(current_tool(steam, settings, key_)), file=output)
         print("準備するゲームの番号（qで取消）: ", end="", file=output, flush=True)
         answer = stream.readline(32).strip()
         if answer == "q":
@@ -580,11 +595,16 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             stage = "one-pass-evaluation"
             evaluation = evaluate_resume(record=record, record_digest=record_digest, profile=profile, recipes=recipes,
                                          softdenchi=softdenchi, source=source, games=catalog(), common=common,
-                                         stop_check=ProcessStopCheck(compatdata), silent_launch=silent_launch)
+                                         stop_check=ProcessStopCheck(compatdata), silent_launch=silent_launch,
+                                         inventory=base.inventory)
             report["evaluation"] = {"next": evaluation["next"], "actions": evaluation["actions"]}
             if evaluation["next"] == "stop":
                 report["steps"].extend(evaluation["steps"])
-                raise Stopped(evaluation["stage"], evaluation["reason"], evaluation["next_step"])
+                next_step = evaluation["next_step"]
+                if any(mark in evaluation["reason"] for mark in UNCLEAR):
+                    next_step = ("ゲームまたはWineが動いているため確認できませんでした。何も変更していません。"
+                                 "すべてのゲームとWineを終了してから、もう一度 " + one_pass_ref(config) + " を実行してください。")
+                raise Stopped(evaluation["stage"], evaluation["reason"], next_step)
             stage = "one-pass-plan"
         print("ゲーム: " + text(games[key]["title"]) + f" [ID {key}]", file=output)
         print("作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）/ 依存 " +

@@ -496,7 +496,10 @@ class ConfirmedPlanTests(ConfirmedFixture):
             str(2**32 - 5): {'exe': str(other / 'b.exe')},
             '60': {'exe': str(self.f.steam / 'game.exe')},
             '61': {'exe': str(self.f.root / 'c.exe')},
+            '70': {'exe': str(other / 'd.exe')},
+            '71': {'exe': str(other / 'd.exe')},
         }
+        (other / 'd.exe').write_bytes(b'x')
         (base / '50').symlink_to(other)
         (base / str(2**32 - 5)).mkdir()
         (base / '-5').mkdir()
@@ -504,7 +507,8 @@ class ConfirmedPlanTests(ConfirmedFixture):
         selectable, excluded = placement._confirmation_candidates(games, self.f.steam, self.f.settings, management)
         self.assertEqual(selectable, ['42'])
         self.assertEqual(dict(excluded), {'50': 'prefix is a symbolic link', str(2**32 - 5): 'two prefix aliases exist',
-                                          '60': 'game folder contains tool folders', '61': 'game folder contains tool folders'})
+                                          '60': 'game folder contains tool folders', '61': 'game folder contains tool folders',
+                                          '70': 'ambiguous confirmation registration', '71': 'ambiguous confirmation registration'})
 
     def test_stop_by_a_changing_input_names_the_fields(self):
         with patch.object(placement, 'plan_confirmed_placement', side_effect=Invalid('input changed during read (size,mtime_ns)')):
@@ -523,6 +527,7 @@ class ConfirmedPlanTests(ConfirmedFixture):
                 self.assertEqual(status, 2)
                 self.assertEqual(report['error']['reason'], 'input-rejected')
                 self.assertEqual([w['scope'] for w in report['writes']], ['report-only'])
+                self.assertEqual(report['excluded_confirmation_candidates'], [])
                 (self.f.fixture.source.root / report_name(output)).unlink()
             else:
                 self.assertEqual((status, report), (0, None))
