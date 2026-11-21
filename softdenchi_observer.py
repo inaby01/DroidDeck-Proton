@@ -79,7 +79,7 @@ def has_memory(path):
     before it becomes a zombie, and its environ then reads empty; a live process whose environment
     is really empty keeps it."""
     try:
-        return b"\nVmSize:" in path.read_bytes()
+        return any(line.startswith(b"VmSize:") for line in path.read_bytes().split(b"\n"))
     except (FileNotFoundError, ProcessLookupError):
         return False
 
@@ -91,6 +91,7 @@ def read_threads(text):
 
 
 LINGERING_LIMIT = 64
+UNREAD_REASONS = {"identity_changed", "environment_changing"}
 IMAGE_LIMIT = 260
 SUMMARY_BYTES = 16384
 
@@ -258,17 +259,26 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
             if not raw_env:
                 # The leader may be exiting: its address space (and so environ) goes before
                 # it becomes a zombie. Other threads can still run the process.
-                if raw_env is not None and has_memory(entry / "status"):
-                    continue  # a live process whose environment is really empty
                 try:
                     text = stat_of(entry / "stat")
                 except (FileNotFoundError, ProcessLookupError):
                     continue
                 if read_stat(text)[2] != before[2]:
                     # Another process now has this PID: it is unread in this pass.
-                    found.lingering.append({"pid": int(entry.name), "started": before[2], "threads": read_threads(text),
-                                            "attribution": "ambiguous", "reason": "identity_changed"})
-                elif read_threads(text) >= 2:
+                    unread(found, entry, before[2], read_threads(text), "identity_changed")
+                    continue
+                if raw_env is not None and has_memory(entry / "status"):
+                    # Possibly a live process whose environment is really empty. An execve in
+                    # progress also has memory and an empty environ for a moment: read again.
+                    try:
+                        again = (entry / "environ").read_bytes()
+                        text = stat_of(entry / "stat")
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+                    if again or read_stat(text)[2] != before[2]:
+                        unread(found, entry, before[2], read_threads(text), "environment_changing")
+                    continue
+                if read_threads(text) >= 2:
                     linger(found, entry, before[2], expected, read_threads(text))
                 continue
             env = {}
@@ -302,6 +312,12 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
     return found, unreadable
 
 
+def unread(found, entry, started, threads, reason):
+    """A process of this user that changed while read: unknown in this pass (blocks cleanup)."""
+    found.lingering.append({"pid": int(entry.name), "started": started, "threads": threads,
+                            "attribution": "ambiguous", "reason": reason})
+
+
 def linger(found, entry, started, expected, threads):
     attribution, reason = lingering_group(entry, started, expected)
     if attribution is not None:
@@ -325,6 +341,7 @@ class Tracker:
         self.native_origins = {}
         self.last_proxy_state = None
         self.known = set()
+        self.observation_incomplete = False
         # Identities this launch sent SIGTERM to: their own exit is expected, not a live game.
         self.signalled = set()
 
@@ -446,22 +463,27 @@ class Tracker:
         if any(p.identity in self.baseline for p in proxies):
             blockers.append("preexisting_proxy")
         lingering = []
-        exiting = []
+        incomplete = []
         for item in getattr(processes, "lingering", ()):
             identity = (item["pid"], item["started"])
-            if identity in self.signalled or item["attribution"] == "other":
+            if item["reason"] in UNREAD_REASONS:
+                # Whatever had this identity, the process now behind this PID is unread.
+                incomplete.append(item)
+            elif identity in self.signalled or item["attribution"] == "other":
                 # Our own SIGTERM target finishing its exit, or a group positively read as foreign.
                 continue
-            if item["reason"] == "exited_while_reading":
-                exiting.append(item)
+            elif item["reason"] == "exited_while_reading":
+                incomplete.append(item)
             elif identity in self.known:
                 lingering.append({**item, "attribution": "observed"})
             else:
                 lingering.append(item)
         if lingering:
             blockers.append("zombie_leader_with_live_threads")
-        if exiting and "incomplete_proc_snapshot" not in blockers:
+        if incomplete and "incomplete_proc_snapshot" not in blockers:
             blockers.append("incomplete_proc_snapshot")
+        # Read by ProxyCleanup.observe_origins: no new ancestry proof from an incomplete view.
+        self.observation_incomplete = bool(unreadable or incomplete or lingering)
         self.known.update(processes)
         if game:
             self.seen_game = True
@@ -493,8 +515,8 @@ class Tracker:
                     "session_exit_verified": False,
                     "game_handoff_observed": self.seen_handoff,
                     "unreadable_processes": unreadable, "cleanup_requires_revalidation": True}
-        if lingering or exiting:
-            decision["lingering_processes"] = sorted(lingering + exiting, key=lambda item: item["pid"])[:LINGERING_LIMIT]
+        if lingering or incomplete:
+            decision["lingering_processes"] = sorted(lingering + incomplete, key=lambda item: item["pid"])[:LINGERING_LIMIT]
         if decision != self.last_decision:
             events.append({"event": "decision", **decision})
         self.last_decision = decision
@@ -563,7 +585,7 @@ class ProxyCleanup:
             if key in processes and self.fingerprint(processes[key]) == proof["fingerprint"]
             and proof["launcher"] == signature
         }
-        if unreadable or not self.tracker.game_id:
+        if unreadable or self.tracker.observation_incomplete or not self.tracker.game_id:
             return
         by_pid = {p.pid: p for p in processes.values()}
         games = {p.pid: p for p in processes.values()

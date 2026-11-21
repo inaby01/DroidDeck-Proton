@@ -291,6 +291,17 @@ class LingeringTrackerTests(unittest.TestCase):
         self.tracker.signalled.add((11, 10))
         self.assertEqual(self.update(found, 3)["blockers"], [])
 
+    def test_changed_identity_blocks_even_for_signalled_pid(self):
+        for reason in ("identity_changed", "environment_changing"):
+            with self.subTest(reason=reason):
+                self.setUp()
+                self.tracker.signalled.add((20, 10))
+                found = with_lingering([self.service])
+                found.lingering = [{"pid": 20, "started": 10, "threads": 1, "attribution": "ambiguous",
+                                    "reason": reason}]
+                self.assertIn("incomplete_proc_snapshot", self.update(found, 2)["blockers"])
+                self.assertTrue(self.tracker.observation_incomplete)
+
     def test_reused_pid_is_not_the_observed_identity(self):
         result = self.update(with_lingering([self.service, self.proxy], (11, 77, "other")), 2)
         self.assertNotIn("zombie_leader_with_live_threads", result["blockers"])
@@ -432,6 +443,35 @@ class SnapshotTests(unittest.TestCase):
             with patch.object(os, "listdir", lambda path: (_ for _ in ()).throw(AssertionError("tasks listed"))
                               if str(path).endswith("task") else real(path)):
                 self.assertEqual(self.lingering(root), [])
+
+    def test_memory_but_changing_environment_is_unread(self):
+        # An execve in progress: memory present, environ empty, then filled on the second read.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root, state="S", threads=1)
+            (entry / "status").write_bytes(b"VmSize:\t10 kB\n")
+            real = Path.read_bytes
+            def read(path):
+                data = real(path)
+                if path == entry / "environ":
+                    (entry / "environ").write_bytes(b"WINEPREFIX=/test/pfx\0")
+                return data
+            with patch.object(Path, "read_bytes", read):
+                self.assertEqual(self.lingering(root), [("ambiguous", "environment_changing")])
+
+    def test_pid_reuse_with_memory_after_empty_environ_is_unread(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root, state="S", threads=1)
+            (entry / "status").write_bytes(b"VmSize:\t10 kB\n")
+            real = Path.read_bytes
+            def read(path):
+                data = real(path)
+                if path == entry / "environ":
+                    (entry / "stat").write_text(stat_text(100001, "S", threads=1, started=999))
+                return data
+            with patch.object(Path, "read_bytes", read):
+                self.assertEqual(self.lingering(root), [("ambiguous", "identity_changed")])
 
     def test_pid_reuse_by_single_thread_process_after_empty_environ_is_ambiguous(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -911,7 +951,7 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(len(self.cleaner.signalled), 2)
         self.assertEqual(self.attempt()[0].call_count, 0)
 
-    def observe_game_proxies(self, unreadable=0, game_changes=None):
+    def observe_game_proxies(self, unreadable=0, game_changes=None, exiting_other=False):
         self.tracker = Tracker("/games/Another Title/launch.exe", "test-game")
         self.cleaner.tracker = self.tracker
         self.game = replace(self.game, parent=self.root.pid, started=4,
@@ -923,6 +963,11 @@ class CleanupTests(unittest.TestCase):
         original_parent = replace(self.parent, parent=self.game.pid)
         live = {p.identity: p for p in [self.root, self.services, self.service, self.server,
                                        self.game, self.payload, original_parent, self.child]}
+        if exiting_other:
+            # Another prefix process began exiting while this pass read it.
+            live = Found(live)
+            live.lingering = [{"pid": 60, "started": 6, "threads": 1, "attribution": "prefix",
+                               "reason": "exited_while_reading"}]
         sample(self.tracker, [], 0)
         self.tracker.update(live, unreadable, 1)
         self.cleaner.observe_origins(live, unreadable)
@@ -932,6 +977,11 @@ class CleanupTests(unittest.TestCase):
         self.cleaner.observe_origins(self.current, 0)
         self.tracker.update(self.current, 0, 7)
         self.reader.return_value = (self.current, 0)
+
+    def test_incomplete_view_does_not_establish_game_origin(self):
+        self.observe_game_proxies(exiting_other=True)
+        self.assertEqual(self.cleaner.game_origins, {})
+        self.assertEqual(self.attempt()[1].call_count, 0)
 
     def test_observed_game_proxy_survives_game_exit_and_reparenting(self):
         self.observe_game_proxies()
@@ -1229,6 +1279,122 @@ class CleanupTests(unittest.TestCase):
             self.assertTrue(pidfd_preflight()["available"])
         self.assertIn("pidfd_send_signal(fd,0,None,0)", run.call_args.args[0][2])
         self.assertEqual(run.call_args.kwargs["timeout"], 5)
+
+
+class EndToEndTests(unittest.TestCase):
+    """snapshot() over a fake /proc feeds Tracker and ProxyCleanup.attempt() unchanged."""
+
+    PREFIX = "/test/pfx"
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.root = self.base / "proc"
+        self.root.mkdir()
+        self.wine = self.base / "wine-preloader"
+        self.wine.write_bytes(b"wine fixture")
+        self.server = self.base / "wineserver"
+        self.server.write_bytes(b"wineserver fixture")
+        self.tracker = Tracker("/games/Another Title/launch.exe", "test-game")
+        self.events = []
+        self.cleaner = ProxyCleanup(self.PREFIX, self.tracker, self.events.append, lambda: False,
+                                    reader=lambda prefix: snapshot(prefix, self.root), launcher_pid=1,
+                                    wineserver_path=str(self.server))
+
+    def add(self, pid, ppid, started, image, exe=None, environ=None):
+        entry = self.root / str(pid)
+        entry.mkdir()
+        fields = ["S", str(ppid)] + ["0"] * 15 + ["1", "0", str(started)]
+        (entry / "stat").write_text(f"{pid} (p) " + " ".join(fields))
+        (entry / "environ").write_bytes(
+            os.fsencode(f"WINEPREFIX={self.PREFIX}\0SteamGameId=test-game\0") if environ is None else environ)
+        (entry / "cmdline").write_bytes(os.fsencode(image + "\0"))
+        (entry / "exe").symlink_to(self.wine if exe is None else exe)
+        return entry
+
+    def remove(self, pid):
+        entry = self.root / str(pid)
+        for child in entry.iterdir():
+            child.unlink()
+        entry.rmdir()
+
+    def update(self, now):
+        found, unreadable = snapshot(self.PREFIX, self.root)
+        self.tracker.update(found, unreadable, now)
+        self.cleaner.observe_origins(found, unreadable)
+        return found
+
+    def armed(self):
+        self.update(0)
+        self.add(70, 1, 1, r"C:\windows\system32\steam.exe")
+        self.add(71, 70, 2, r"C:\windows\system32\services.exe")
+        self.add(72, 70, 3, str(self.server), exe=self.server)
+        self.add(30, 71, 3, r"C:\Program Files (x86)\SoftDenchi\UCManSvc.exe")
+        self.add(20, 30, 10, SOFTDENCHI_PROXY)
+        self.add(21, 20, 11, SOFTDENCHI_PROXY)
+        self.add(10, 70, 4, r"Z:\games\Another Title\launch.exe")
+        self.add(11, 10, 5, r"Z:\games\Another Title\payload.log")
+        self.update(1)
+        self.remove(11)
+        self.remove(10)
+        self.update(2)
+        found = self.update(7)
+        self.assertEqual(self.tracker.last_decision["phase"], "helpers_remaining_candidate")
+        return found
+
+    def attempt(self, found, after_first=None):
+        def send(fd, signum, info, flags):
+            if after_first is not None and send.count == 0:
+                after_first()
+            send.count += 1
+        send.count = 0
+        with patch.object(os, "pidfd_open", create=True, side_effect=lambda pid, flags: pid + 1000), \
+                patch.object(signal, "pidfd_send_signal", create=True, side_effect=send), \
+                patch.object(os, "close"), \
+                patch.object(os, "kill", side_effect=AssertionError("PID fallback forbidden")):
+            self.cleaner.attempt(found, 7)
+        return send.count
+
+    def test_two_proxies_receive_one_batch(self):
+        self.assertEqual(self.attempt(self.armed()), 2)
+
+    def test_reused_pid_of_signalled_parent_stops_the_batch(self):
+        found = self.armed()
+        entry = self.root / "20"
+        real = Path.read_bytes
+        def read(path):
+            data = real(path)
+            if path == entry / "environ" and not data:
+                # While the old parent is read, a new process takes its PID.
+                fields = ["S", "70"] + ["0"] * 15 + ["1", "0", "99"]
+                (entry / "stat").write_text("20 (p) " + " ".join(fields))
+            return data
+        with patch.object(Path, "read_bytes", read):
+            # After the SIGTERM the parent's address space is gone (empty environ).
+            self.assertEqual(self.attempt(found, lambda: (entry / "environ").write_bytes(b"")), 1)
+
+    def test_signalled_parent_exiting_with_same_identity_still_reaches_child(self):
+        found = self.armed()
+        # After the SIGTERM the parent's address space is gone; same PID and start time.
+        self.assertEqual(self.attempt(found, lambda: (self.root / "20" / "environ").write_bytes(b"")), 2)
+
+    def test_parent_gone_after_signal_still_reaches_child(self):
+        found = self.armed()
+        self.assertEqual(self.attempt(found, lambda: self.remove(20)), 2)
+
+    def test_process_in_execve_blocks_before_first_signal(self):
+        found = self.armed()
+        entry = self.add(40, 70, 12, r"C:\windows\system32\conhost.exe", environ=b"")
+        (entry / "status").write_bytes(b"VmSize:\t10 kB\n")
+        real = Path.read_bytes
+        def read(path):
+            data = real(path)
+            if path == entry / "environ":
+                (entry / "environ").write_bytes(os.fsencode(f"WINEPREFIX={self.PREFIX}\0"))
+            return data
+        with patch.object(Path, "read_bytes", read):
+            self.assertEqual(self.attempt(found), 0)
 
 
 class LauncherTests(unittest.TestCase):
