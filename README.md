@@ -348,8 +348,9 @@ as a zombie in `/proc`) also prevents cleanup when it belongs to the prefix or c
 It does not terminate UCManSvc or reset authentication state.
 
 Observation records (schema 5) carry wall-clock time. The final `stop` record adds when the Wine
-launcher returned and the last completed process observation, so the time from game exit to the
-session ending can be split without adding work to the exit path.
+launcher returned and the last completed process observation (bounded in size), so the time from
+game exit to the session ending can be split. No helper process or new `/proc` scan is added to the
+exit path; the `stop` record itself is still written synchronously, as before.
 
 `banner-proton/install-softdenchi.py` verifies the supplied archive's SHA-512 and installs it as
 `SoftDenchi-Proton`, outside DroidDeck's official-build replacement family. The generic
