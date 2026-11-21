@@ -65,7 +65,8 @@ class DeclarationTests(unittest.TestCase):
         broken += [recipe(pe_machine='x86_64'), recipe(format='opaque', pe_machine=None), recipe(terms_status='unconfirmed'),
                    recipe(provenance_status='unconfirmed'), recipe(expected_size=None), recipe(expected_sha256=None),
                    recipe(hash_kind='local-measurement'), {**recipe(), 'destination': 'system32'},
-                   {**recipe(), 'handler': 'mfc-local'}, {k: v for k, v in recipe().items() if k != 'asset'}]
+                   {**recipe(), 'handler': 'mfc-local'}, {k: v for k, v in recipe().items() if k != 'asset'},
+                   recipe(expected_size=dll.LIMIT + 1)]
         for item in broken:
             with self.subTest(item=item), self.assertRaises(Invalid):
                 game.validate_game_config({'profiles': [PROFILE], 'recipes': [SOFTDENCHI, item]})
@@ -134,6 +135,18 @@ class StateTests(unittest.TestCase):
         inventory = Inventory({member: {'kind': 'file'}})
         (self.dir / 'kernel32.dll').symlink_to(tool / member)
         self.assertEqual(dll.check_layout(self.fd, self.dir, inventory, tool), 'payload-link')
+        # Another spelling of the same tool path (as Proton may write it) is the same file.
+        (self.dir / 'kernel32.dll').unlink()
+        (self.dir / 'kernel32.dll').symlink_to(os.path.relpath(tool / member, self.dir))
+        self.assertEqual(dll.check_layout(self.fd, self.dir, inventory, tool), 'payload-link')
+        # A copy with the same content elsewhere is not the payload file.
+        (self.dir / 'kernel32.dll').unlink()
+        (self.root / 'copy.dll').write_bytes((tool / member).read_bytes())
+        (self.dir / 'kernel32.dll').symlink_to(self.root / 'copy.dll')
+        with self.assertRaisesRegex(Invalid, 'outside the selected Proton'):
+            dll.check_layout(self.fd, self.dir, inventory, tool)
+        (self.dir / 'kernel32.dll').unlink()
+        (self.dir / 'kernel32.dll').symlink_to(tool / member)
         with self.assertRaisesRegex(Invalid, 'payload lacks'):
             dll.check_layout(self.fd, self.dir, Inventory({}), tool)
         (self.dir / 'kernel32.dll').unlink()
@@ -160,8 +173,9 @@ class StateTests(unittest.TestCase):
         inventory = Inventory({'files/lib/wine/i386-windows/MSVCRT.dll': {'kind': 'file'},
                                'files/share/default_pfx_arm64/drive_c/windows/syswow64/ole32.dll': {'kind': 'hardlink'},
                                'files/share/fonts/arial.ttf': {'kind': 'file'},
+                               'files/share/default_pfx/drive_c/windows/syswow64/OLEAUT32.DLL': {'kind': 'symlink'},
                                'files/lib/wine/i386-windows': {'kind': 'directory'}})
-        self.assertEqual(dll.builtin_names(inventory), {'msvcrt.dll', 'ole32.dll'})
+        self.assertEqual(dll.builtin_names(inventory), {'msvcrt.dll', 'ole32.dll', 'oleaut32.dll'})
 
 
 def facts(kind='none', identity=None, links=1, data=DATA):
@@ -214,6 +228,10 @@ class ResumeTests(unittest.TestCase):
             ((None, facts(), unknown), 'stop'),
             ((None, facts('file', links=2)), 'stop'),
             ((previous('temp-written', TEMP), facts('file', TEMP, 1), own1), 'stop'),
+            ((previous('linked', TEMP), facts(), own1), 'stop'),
+            ((previous('failed', TEMP), facts(), own1), 'remove-temporary-then-install'),
+            ((previous('failed', TEMP), facts(), unknown), 'stop'),
+            ((previous('failed', TEMP), facts('file'), own1), 'stop'),
         ]
         for args, expected in cases:
             with self.subTest(args=args):

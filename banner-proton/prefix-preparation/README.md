@@ -1059,8 +1059,8 @@ folder. `mfc-local` stays reserved and blocked.
 - Refused: a name that the selected payload ships under `files/lib/wine/` or
   `files/share/default_pfx*/` (a native copy would hide the builtin); a `syswow64` whose
   x86 layout cannot be confirmed. The layout check reads `syswow64/kernel32.dll`, which
-  must be a link to the verified payload's `files/lib/wine/i386-windows/kernel32.dll` or an
-  x86 regular file; `system32` is not used, since on ARM64 devices it holds ARM64 and x64
+  must be a link resolving to the verified payload's `files/lib/wine/i386-windows/kernel32.dll`
+  (compared by file identity, not by the spelling of the link) or an x86 regular file; `system32` is not used, since on ARM64 devices it holds ARM64 and x64
   images.
 - State (read-only): `absent`, `present-verified` (exactly one single-link regular file
   whose size, SHA-256 and PE architecture match the declaration), `incompatible` (case
@@ -1078,17 +1078,23 @@ folder. `mfc-local` stays reserved and blocked.
   temporary name is removed. A filesystem without hard links fails the copy; no other
   placement is tried.
 - Records: `prefix-dlls` (phases `planned`, `temp-created`, `temp-written`, `linked`,
-  `present-verified`, `failed`). A copy that never linked ends `failed` and leaves no
-  temporary file; after the link the destination is never removed.
+  `present-verified`, `failed`); the temporary file is `.prefixdll-<hex>.tmp`. A copy that
+  never linked ends `failed` and removes its temporary file; after the link the
+  destination is never removed. The asset is limited to 64 MiB.
 - Resume: the latest record of the same initialization, dependency and destination
   decides with the current state. An interrupted copy whose temporary name is still the
-  recorded file is removed and copied again; a link interrupted before the temporary name
-  was removed is completed by removing only that name; a destination already verified is
-  skipped. A temporary name that is not the recorded file, a replaced `syswow64`, a
+  recorded file is removed and copied again (also after a failed copy that could not
+  remove it); the previous temporary file is removed before a new record is written. A
+  link interrupted before the temporary name was removed is completed by removing only
+  that name, without a new record (the result keeps it); a destination already verified
+  is skipped. A temporary name that is not the recorded file, a replaced `syswow64`, a
   record for another recipe or asset, an unreadable record or any other combination
   stops and nothing is repaired.
 - Menu 12: the confirmation lists each DLL (name, asset hash, destination); the fixed
   values gain `dlls` (recipe digest and measured asset per DLL); a missing or different
-  asset stops before anything is written.
+  asset stops before anything is written, also when resuming a game whose DLL is already
+  placed (the asset is part of the confirmed values). On resume, a profile that changed
+  since the initialization (other than an accepted later revision) stops before any step.
+  The plan observes the process view before and after inspecting; an unclear view stops.
 - Not measured on a device: placement with hard links on the device filesystem, loading
   from `syswow64`, and whether the file stays through Proton updates.

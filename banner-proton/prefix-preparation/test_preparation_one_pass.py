@@ -710,6 +710,46 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual((commands, self.dll_records()), ([], []))
         self.assertEqual(before, self.protected())
 
+    def test_unclear_process_view_stops_before_the_dll_is_written(self):
+        self.initialize()
+        with patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(report['stage'], 'prefix-dll')
+        self.assertIn('uninspected:target-process-view-not-clear', report['reason'])
+        self.assertEqual((self.dll_records(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
+
+    def test_failed_copy_whose_temporary_file_stayed_is_cleaned_by_identity_next_time(self):
+        self.initialize()
+        real_unlink = os.unlink
+
+        def link_fails(*args, **kwargs):
+            raise OSError(1, 'Operation not permitted')
+
+        def keep_temporary(path, *args, **kwargs):
+            if str(path).startswith('.prefixdll-'):
+                raise OSError(13, 'Permission denied')
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(prefix_dll.os, 'link', side_effect=link_fails), \
+                patch.object(prefix_dll.os, 'unlink', side_effect=keep_temporary):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        (failed,) = self.dll_records()
+        self.assertEqual(failed['phase'], 'failed')
+        self.assertEqual(self.leftovers(), [failed['temporary']])
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(report['steps'][0]['plan']['action'], 'remove-temporary-then-install')
+        self.assertEqual(self.leftovers(), [])
+
+    def test_reason_never_carries_the_os_error_text(self):
+        self.initialize()
+        with patch.object(prefix_dll, '_pe_of', side_effect=PermissionError(13, 'denied', '/private/secret/path')):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('x86 system directory not confirmed: PermissionError', report['reason'])
+        self.assertNotIn('/private/secret/path', json.dumps(report))
+
     def test_binding_plan_requires_the_dll_in_the_prefix(self):
         record, digest = self.initialize()
         self.install_dependency(record, digest)

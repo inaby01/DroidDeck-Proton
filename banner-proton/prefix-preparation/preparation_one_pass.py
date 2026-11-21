@@ -454,21 +454,22 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         if label == "新規" and not init_plan.exe_path_ascii:
             print(NON_ASCII_NOTE, file=output)
         print("行うこと:", file=output)
+        steps = iter(range(1, 10))
         if label == "新規":
-            print("  1) prefixを初期化（準備用Protonで cmd.exe /d /c exit 0。ゲームは起動しません）", file=output)
+            print(f"  {next(steps)}) prefixを初期化（準備用Protonで cmd.exe /d /c exit 0。ゲームは起動しません）", file=output)
         for item in dll_items:
-            print("  2) prefixの" + DESTINATION + "に " + text(target_name(item)) + " が入っていなければ入れる（資材 " +
+            print(f"  {next(steps)}) prefixの" + DESTINATION + "に " + text(target_name(item)) + " が入っていなければ入れる（資材 " +
                   text(item["asset"]["filename"]) + "、SHA-256 " + item["asset"]["expected_sha256"][:16] +
                   "…）。既存のファイルは上書きせず、レジストリ・DLLの上書き設定は変えません", file=output)
         if uses_softdenchi:
-            print("  3) ソフト電池が入っていなければ、インストーラー（" + text(spec["filename"]) + "、SHA-256 " +
+            print(f"  {next(steps)}) ソフト電池が入っていなければ、インストーラー（" + text(spec["filename"]) + "、SHA-256 " +
                   spec["expected_sha256"][:16] + "…）を画面なしで実行（" + " ".join(asset["arguments"]) + "）", file=output)
             print("     インストーラーに同梱された使用許諾に同意したうえで導入します。この確認の1は、その同意を含みます。", file=output)
             print("     使用許諾を画面で読んでから導入したい場合は、ここでqを選び、メニュー8を使ってください。", file=output)
             print("     導入後にSdProxyが残った場合は、メニュー8と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。",
                   file=output)
-        print("  4) ゲームフォルダーのファイルなど、ほかの依存は読み取りで照合（配置はしません）", file=output)
-        print("  5) 依存がすべて検証済みなら、このゲームだけを準備用Protonへ割り当て（" +
+        print(f"  {next(steps)}) ゲームフォルダーのファイルなど、ほかの依存は読み取りで照合（配置はしません）", file=output)
+        print(f"  {next(steps)}) 依存がすべて検証済みなら、このゲームだけを準備用Protonへ割り当て（" +
               text(", ".join(binding.summary()["planned_files"]) or "変更なし") + "）", file=output)
         print("書くもの: 新規prefix・専用work/HOME・prefix内（" + ("DLL・" if dll_items else "") + "ソフト電池）・このゲームの設定項目・私有記録/lock・結果JSON。"
               "既存の他prefix・ゲームフォルダー・認証・セーブは変更しません。", file=output)
@@ -519,7 +520,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
 
                 def refresh_dll(item=item):
                     return plan_prefix_dll(record=record, record_sha256=record_digest, item=item, source=source,
-                                           games=catalog(), **common)
+                                           games=catalog(), stop_check=stop, **common)
 
                 dll_plan = refresh_dll()
                 check_fixed(from_base(dll_plan.recheck, asset, plan_binding(steam, settings, key, proton["directory"]).digest))
@@ -528,7 +529,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                     continue
                 if dll_plan.blockers:
                     raise Stopped(stage, "prefix-dll-blocked:" + ",".join(dll_plan.blockers),
-                                  "prefixの" + DESTINATION + "の " + target_name(item) + " に確認が要ります。上書き・修復はしていません。")
+                                  "DLL（" + target_name(item) + "）を入れる前の確認で止まりました。理由は結果JSONにあります。"
+                                  "上書き・修復はしていません。")
                 print("prefixに " + text(target_name(item)) + " を入れています。", file=output, flush=True)
                 with droiddeck_lock(settings):
                     session = PrefixDllSession(dll_plan, store, refresh_dll, dll_plan.digest, stop)

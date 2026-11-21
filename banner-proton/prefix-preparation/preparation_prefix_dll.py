@@ -73,6 +73,7 @@ def validate_prefix_dll_recipe(item):
     validate_manifest({"schema_version": 1, "assets": [spec]})
     require(type(spec["filename"]) is str and NAME.fullmatch(spec["filename"]) is not None, "invalid prefix DLL file name")
     require(spec["format"] == "pe" and spec["pe_machine"] == "x86", "prefix DLL must be an x86 PE")
+    require(spec["expected_size"] is None or spec["expected_size"] <= LIMIT, "prefix DLL larger than the copy limit")
     if item["status"] == "ready":
         # Static declaration blockers (provenance, terms, unknown hash or size) keep a recipe from being ready.
         declared = {"sha256": spec["expected_sha256"], "size": spec["expected_size"], "pe_machine": spec["pe_machine"]}
@@ -92,7 +93,7 @@ def system_directory(compatdata):
 def builtin_names(inventory):
     """Basenames (lower case) the verified Proton payload ships as builtins or prefix templates."""
     return {name.rsplit("/", 1)[-1].lower() for name, entry in inventory.entries.items()
-            if entry["kind"] in ("file", "hardlink") and name.startswith(BUILTIN_ROOTS)}
+            if entry["kind"] in ("file", "hardlink", "symlink") and name.startswith(BUILTIN_ROOTS)}
 
 
 def _identity(info):
@@ -124,10 +125,11 @@ def check_layout(fd, directory, inventory, tool):
     if stat.S_ISLNK(info.st_mode):
         entry = inventory.entries.get(member)
         require(entry is not None and entry["kind"] in ("file", "hardlink"), "payload lacks the reference builtin")
-        target = os.readlink(REFERENCE, dir_fd=fd)
-        resolved = os.path.normpath(os.path.join(str(directory), target))
-        expected = os.path.normpath(str(tool / member))
-        require(resolved == expected, "reference builtin links outside the selected Proton")
+        # Compared by identity: Proton may write the link with another spelling of the tool path.
+        expected = safe_path(tool / member, safe_path(tool))
+        resolved = os.stat(REFERENCE, dir_fd=fd, follow_symlinks=True)
+        require(stat.S_ISREG(resolved.st_mode) and _identity(resolved) == _identity(os.stat(expected, follow_symlinks=False)),
+                "reference builtin links outside the selected Proton")
         require(_pe_of(expected) == "x86", "reference builtin is not x86")
         return "payload-link"
     require(stat.S_ISREG(info.st_mode), "reference builtin is not a regular file or payload link")
@@ -199,7 +201,9 @@ def inspect_prefix_dll(compatdata, item, inventory, tool):
         try:
             layout = check_layout(fd, directory, inventory, tool)
         except (OSError, Invalid) as error:
-            return {"state": "incompatible", "reason": "x86 system directory not confirmed: " + str(error)}
+            # Only our own messages; an OSError text may carry local paths.
+            detail = str(error) if isinstance(error, Invalid) else type(error).__name__
+            return {"state": "incompatible", "reason": "x86 system directory not confirmed: " + detail}
         if name in builtin_names(inventory):
             return {"state": "incompatible", "reason": "the selected Proton ships a builtin of this name"}
         try:
@@ -291,7 +295,7 @@ def resume_action(latest, invalid, directory, facts, spec, temporary):
                 return "stop", "temporary-name-without-recorded-identity"
             if current == "absent":
                 return "install", None
-        elif temporary["kind"] == "own":
+        elif temporary["kind"] == "own" and phase in ("temp-created", "temp-written"):
             pair = (facts["kind"] == "file" and facts["identity"] == latest["temporary_identity"] and
                     temporary["links"] == 2 and facts["links"] == 2 and matches_asset(facts, spec))
             if phase == "temp-written" and pair:
@@ -304,6 +308,9 @@ def resume_action(latest, invalid, directory, facts, spec, temporary):
             if current == "present-verified" and phase in ("temp-written", "linked"):
                 return "skip", "interrupted-after-link"
         return "stop", "previous-prefix-dll-" + phase + "-state-" + current
+    if phase == "failed" and temporary["kind"] == "own" and temporary["links"] == 1 and current == "absent":
+        # A failed copy whose temporary file could not be removed then: still the recorded file.
+        return "remove-temporary-then-install", "failed-copy-left-its-temporary-file"
     if temporary["kind"] != "none":
         return "stop", "temporary-name-present"
     if current == "present-verified" and phase in (None, "present-verified"):
@@ -342,10 +349,15 @@ class PrefixDllPlan:
 
 
 def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer, source, games, steam, settings, home,
-                    environment, runtime_root):
-    """Read-only plan for one ``prefix-dll`` dependency of an initialized game prefix."""
+                    environment, runtime_root, stop_check):
+    """Read-only plan for one ``prefix-dll`` dependency of an initialized game prefix.
+
+    The process view is observed before and after the inspection; an unclear view makes the
+    state ``uninspected`` (design 5), which stops.
+    """
     from preparation_dependency_install import _capacity, _tool_directory
     from preparation_game_prefix import RECORDS as GAME_RECORDS
+    from preparation_processes import ProcessStopCheck
     from preparation_recheck import plan_recheck
     from preparation_store import PrivateStore
     validate_prefix_dll_recipe(item)
@@ -357,7 +369,14 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
     directory = safe_path(directory)
     report = inspect_assets({"schema_version": 1, "assets": [spec]}, directory)[0]
     blockers = ["asset:" + reason for reason in report["blockers"]]
-    state = inspect_prefix_dll(base.compatdata, item, base.inventory, _tool_directory(base))
+    require(isinstance(stop_check, ProcessStopCheck) and stop_check.compatdata == base.compatdata,
+            "matching process observation required")
+    if stop_check.check()["clear_in_view"]:
+        state = inspect_prefix_dll(base.compatdata, item, base.inventory, _tool_directory(base))
+        if not stop_check.check()["clear_in_view"]:
+            state = {"state": "uninspected", "reason": "concurrent-process-observed"}
+    else:
+        state = {"state": "uninspected", "reason": "target-process-view-not-clear"}
     name = target_name(item)
     latest, invalid, facts, temporary = None, 0, {"kind": "none"}, {"kind": "none"}
     identity = state.get("directory")
@@ -381,14 +400,11 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
                     temporary = _temporary_facts(fd, latest)
             finally:
                 os.close(fd)
-            if state["state"] == "incompatible" and "layout" not in state:
-                # Common conditions first (design 7): directory layout and Proton builtin names.
-                action, reason = "stop", "prefix-dll-state-incompatible:" + state["reason"]
-            else:
-                action, reason = resume_action(latest, invalid, identity, facts, spec, temporary)
+            # The common conditions (design 7 step 1: view, layout, builtin names) were checked above.
+            action, reason = resume_action(latest, invalid, identity, facts, spec, temporary)
         if action == "stop" and reason not in blockers:
             blockers.append(reason if reason.startswith("prefix-dll") else "prefix-dll-" + reason)
-    capacity = _capacity(((base.compatdata, (spec["expected_size"] or 0) + RESERVE),))
+    capacity = {**_capacity(((base.compatdata, (spec["expected_size"] or 0) + RESERVE),)), "reserve_bytes": RESERVE}
     if action != "skip" and not capacity["sufficient"]:
         blockers.append("insufficient-capacity")
     signature = {"version": VERSION, "scope": SCOPE, "recheck_plan": base.digest, "recipe": digest_json(item),
@@ -550,7 +566,10 @@ class PrefixDllSession:
         try:
             self._guard()
             self._directory(fd)
-            state = state_of(examine(fd, self.record["name"]), self.plan.item["asset"])
+            from preparation_dependency_install import _tool_directory
+            p = self.plan.recheck
+            state = inspect_prefix_dll(p.compatdata, self.plan.item, p.inventory, _tool_directory(p))
+            require(state.get("directory") in (None, self.plan.directory), "syswow64 replaced")
             require(self.stop.check()["clear_in_view"], "target process view not clear")
             require(state["state"] == "present-verified", "placed DLL not verified: " + state.get("reason", state["state"]))
             self.record["phase"] = "present-verified"
@@ -565,7 +584,7 @@ class PrefixDllSession:
                 if self._remove_temporary(fd, self.record["temporary"], self.temporary_identity):
                     os.fsync(fd)
             except (OSError, Invalid):
-                pass  # kept: the record names it with its identity for the next run
+                pass  # kept: the record names it with its identity; the next run removes it only if it still matches
         # After the link the destination stays; only a copy that never linked is a failure.
         if not self.linked:
             self.record["phase"] = "failed"
