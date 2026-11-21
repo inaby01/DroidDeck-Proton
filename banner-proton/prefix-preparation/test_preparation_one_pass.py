@@ -700,6 +700,64 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual(report['steps'][0]['plan']['action'], 'install')
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), DLL_DATA)
 
+    def test_signals_are_blocked_only_between_creation_and_its_record(self):
+        import signal
+        self.initialize()
+        before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        seen = []
+
+        def observe(real_open, *args, **kwargs):
+            seen.append(signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+            return real_open(*args, **kwargs)
+
+        with self.exclusive_create(observe):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue({signal.SIGINT, signal.SIGTERM} <= seen[0])
+        self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), before)
+
+    def saves_failing_at(self, number, effect):
+        real_save = prefix_dll.PrefixDllSession._save
+        calls = []
+
+        def counted(session):
+            calls.append(1)
+            if len(calls) == number:
+                raise effect
+            return real_save(session)
+
+        return patch.object(prefix_dll.PrefixDllSession, '_save', counted)
+
+    def test_killed_between_creation_and_its_record_leaves_an_empty_file_that_stops(self):
+        self.initialize()
+        with self.saves_failing_at(2, Killed()), self.assertRaises(Killed):
+            self.run_menu('12\n1\n1\n')
+        placed = self.wow64() / 'mfc42.dll'
+        self.assertEqual(placed.read_bytes(), b'')
+        (saved,) = self.dll_records()
+        self.assertEqual((saved['phase'], saved['file_identity']), ('planned', None))
+        before = placed.stat()
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        after = placed.stat()
+        self.assertEqual((placed.read_bytes(), after.st_ino, after.st_mtime_ns), (b'', before.st_ino, before.st_mtime_ns))
+        self.assertEqual(len(self.dll_records()), 1)
+
+    def test_failed_record_of_the_creation_keeps_the_file_and_the_created_phase(self):
+        self.initialize()
+        with self.saves_failing_at(2, OSError(28, 'No space left on device')):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        (saved,) = self.dll_records()
+        self.assertEqual((saved['phase'], saved['error']['check'], saved['error']['errno']), ('created', 'record-created', 28))
+        placed = self.wow64() / 'mfc42.dll'
+        self.assertTrue(placed.exists())
+        self.assertEqual(saved['file_identity']['inode'], placed.stat().st_ino)
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('partial-file-of-the-previous-run-operator-recovery', report['reason'])
+
     def test_killed_after_writing_is_accepted_without_copying_again(self):
         self.initialize()
         with patch.object(prefix_dll.PrefixDllSession, '_post', side_effect=Killed()), self.assertRaises(Killed):
