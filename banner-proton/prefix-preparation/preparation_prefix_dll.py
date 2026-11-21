@@ -361,6 +361,11 @@ class PrefixDllPlan:
                 "preparation_complete": False}
 
 
+def capacity_needs(base, spec):
+    """Bytes placing the DLL needs: its size and the reserve, in the prefix."""
+    return ((base.compatdata, (spec["expected_size"] or 0) + RESERVE),)
+
+
 def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer, source, games, steam, settings, home,
                     environment, runtime_root, stop_check, inventory=None):
     """Read-only plan for one ``prefix-dll`` dependency of an initialized game prefix.
@@ -415,7 +420,7 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
             action, reason = resume_action(latest, invalid, identity, facts, spec)
         if action == "stop" and reason not in blockers:
             blockers.append(reason if reason.startswith("prefix-dll") else "prefix-dll-" + reason)
-    capacity = {**_capacity(((base.compatdata, (spec["expected_size"] or 0) + RESERVE),)), "reserve_bytes": RESERVE}
+    capacity = {**_capacity(capacity_needs(base, spec)), "reserve_bytes": RESERVE}
     if action != "skip" and not capacity["sufficient"]:
         blockers.append("insufficient-capacity")
     signature = {"version": VERSION, "scope": SCOPE, "recheck_plan": base.digest, "recipe": digest_json(item),

@@ -282,7 +282,6 @@ def _game(key, listed, title, context):
         if found["kind"] == "other":
             entry["next"] = {"next": "out-of-scope"}
             print("  このバンドルの対象外です（別のProtonに割り当て済み）。依存と次にすることは表示しません。", file=output)
-            print("  1（新しいゲームを準備）でこのゲームを選ぶと、このバンドルの準備用Protonへ割り当て直しになります。", file=output)
             return entry
         stage = "status-evaluation"
         compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)

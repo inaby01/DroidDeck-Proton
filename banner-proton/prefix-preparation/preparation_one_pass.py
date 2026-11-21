@@ -295,8 +295,14 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
     Menu 1 still plans again under its locks before each write. ``inventory`` (the verified
     payload inventory) lets the status check read the archive once for every game.
     """
-    from preparation_dependency_install import _installations, plan_dependency_install
+    from preparation_dependency_install import (
+        _capacity,
+        _installations,
+        plan_dependency_install,
+    )
+    from preparation_dependency_install import capacity_needs as installer_needs
     from preparation_dependency_state import inspect_dependency_state
+    from preparation_prefix_dll import capacity_needs as dll_needs
     from preparation_recheck import plan_recheck
     key, actions, steps, stage = record["app_id"], [], [], ["one-pass-precheck"]
     extra = {} if inventory is None else {"inventory": inventory}
@@ -316,6 +322,9 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
             with PrivateStore(management) as store:
                 history = binding_history(store, key)
         pending = set()
+        # Bytes the earlier steps of this run write, per path: each later step's space check counts them,
+        # as its plan in the run would see the space after those writes.
+        consumed = []
         for item in [recipes[dep] for dep in profile["dependencies"] if recipes[dep]["handler"] == PREFIX_DLL]:
             stage.append("prefix-dll")
             plan = plan_prefix_dll(record=record, record_sha256=record_digest, item=item, source=source, games=games,
@@ -323,8 +332,12 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
             steps.append({"step": "prefix-dll", "evaluated": True, "plan": plan.summary()})
             if plan.action == "skip":
                 continue
-            if plan.blockers:
-                return stopped("prefix-dll", "prefix-dll-blocked:" + ",".join(plan.blockers), PREFIX_DLL_BLOCKED.format(target_name(item)))
+            blockers = list(plan.blockers)
+            if not blockers and not _capacity(consumed + list(dll_needs(plan.recheck, item["asset"])))["sufficient"]:
+                blockers = ["insufficient-capacity"]
+            if blockers:
+                return stopped("prefix-dll", "prefix-dll-blocked:" + ",".join(blockers), PREFIX_DLL_BLOCKED.format(target_name(item)))
+            consumed.append((plan.recheck.compatdata, item["asset"]["expected_size"] or 0))
             pending.add(item["dependency_id"])
             actions.append("prefix-dll:" + item["dependency_id"])
         if uses_softdenchi:
@@ -348,9 +361,14 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
                                                recipe=softdenchi, installer_mode="silent", silent_launch=silent_launch,
                                                **common, **extra)
                 steps.append({"step": "softdenchi-silent", "evaluated": True, "plan": plan.summary()})
-                if plan.blockers:
-                    return stopped("softdenchi-silent", "dependency-plan-blocked:" + ",".join(plan.blockers))
-                pending.add(next(dep for dep in profile["dependencies"] if recipes[dep]["handler"] == SOFTDENCHI))
+                blockers = list(plan.blockers)
+                needs = installer_needs(plan.recheck, common["config"]["dependency_installation"]["asset"], common["home"])
+                if not blockers and not _capacity(consumed + list(needs))["sufficient"]:
+                    blockers = ["insufficient-capacity"]
+                if blockers:
+                    return stopped("softdenchi-silent", "dependency-plan-blocked:" + ",".join(blockers))
+                # One installation satisfies every dependency handled by SoftDenchi.
+                pending.update(dep for dep in profile["dependencies"] if recipes[dep]["handler"] == SOFTDENCHI)
                 actions.append("softdenchi-silent")
         stage.append("binding")
         bplan = plan_game_binding(record=record, record_sha256=record_digest, source=source, games=games,

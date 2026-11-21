@@ -427,6 +427,13 @@ def _capacity(needs):
             "reserve_bytes": RESERVE, "growth_upper_bound_known": False}
 
 
+def capacity_needs(base, spec, home):
+    """Bytes the installation needs per path: the private cache, the work input copy and the prefix reserve."""
+    inputs_root = safe_path(base.work.parent / "inputs", safe_path(home))
+    size = spec["expected_size"]
+    return ((base.store_root, size), (inputs_root, size), (base.compatdata, RESERVE))
+
+
 def _records_of(record):
     """Journal of a managed origin record: probe trials or registered-game new prefixes."""
     from preparation_game_prefix import SCOPE as GAME_SCOPE
@@ -562,8 +569,7 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
     progress.append("capacity")
     home = safe_path(home)
     inputs_root = safe_path(base.work.parent / "inputs", home)
-    size = spec["expected_size"]
-    capacity = _capacity(((base.store_root, size), (inputs_root, size), (base.compatdata, RESERVE)))
+    capacity = _capacity(capacity_needs(base, spec, home))
     if not capacity["sufficient"]:
         blockers.append("insufficient-capacity")
     signature = {"version": VERSION, "scope": SCOPE, "recheck_plan": base.digest, "recheck": recheck_sha256,
@@ -878,7 +884,8 @@ class DependencyInstallSession:
             require(self.refresh().digest == self.plan.digest, "dependency installation plan changed")
             self._guard()
             self._clear()
-            self.store.cache_asset(self.plan.spec, self.plan.asset_root)
+            # The installer is read from the folder of prepare.sh (operator asset folder).
+            self.store.cache_asset(self.plan.spec, self.plan.asset_root, timestamps=False)
             self.staged = self._stage()
             self.record["prefix_allocation"] = {"before": self._measure(), "after": None}
             self.record.update(phase="installer-staged")

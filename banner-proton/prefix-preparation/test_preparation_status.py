@@ -179,7 +179,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         self.assertEqual(entry['next'], {'next': 'out-of-scope'})
         self.assertIn('別のProton（Other-Proton-Tool）', output)
         self.assertIn('このバンドルの対象外', output)
-        self.assertIn('割り当て直しになります', output)
+        self.assertNotIn('割り当て直し', output)
         self.assertNotIn('依存:', output)
         _, _, menu_output, _ = self.run_menu('1\nq\n')
         self.assertIn('今の割り当て: Other-Proton-Tool', menu_output)
@@ -200,6 +200,18 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
             _, report, output = self.status()
         self.assertEqual(self.entry(report)['next'], {'next': 'undetermined', 'reason': 'game-running'})
         self.assertIn('確認できません（動作中または変化中）', output)
+
+    def test_two_softdenchi_dependencies_are_satisfied_by_one_installation(self):
+        recipes = self.config['game_preparation']['recipes']
+        recipes.append({**next(item for item in recipes if item['dependency_id'] == 'softdenchi-runtime'),
+                        'dependency_id': 'softdenchi-runtime-alias'})
+        self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime', 'softdenchi-runtime-alias']
+        self.initialize()
+        _, report, _ = self.status()
+        entry = self.entry(report)
+        self.assertEqual(entry['next'], {'next': 'continue', 'actions': ['softdenchi-silent', 'binding']})
+        _, menu, _, _ = self.run_menu('1\n1\n1\n')
+        self.agrees(entry, menu)
 
     def test_running_game_at_resume_asks_to_end_it(self):
         self.initialize()
@@ -471,6 +483,27 @@ class DllStatusTests(StatusMixin, ONE['PrefixDllOnePassTests']):
         self.assertNotIn('この内容で準備する場合は1', output)
         self.assertEqual((commands, self.dll_records(), self.installs()), ([], [], []))
         self.assertFalse((self.wow64() / 'mfc42.dll').exists())
+
+    def test_space_for_the_installer_counts_the_dll_written_before_it(self):
+        self.initialize()
+        real = dep._capacity
+        wow64 = self.wow64()
+
+        def capacity(needs):
+            # A filesystem with room for either step alone but not both: the DLL written first uses space.
+            used = sum((wow64 / name).stat().st_size for name in ('mfc42.dll',) if (wow64 / name).exists())
+            result = real(needs)
+            required = sum(need for _, need in needs)
+            limit = 2 * self.config['dependency_installation']['asset']['expected_size'] + dep.RESERVE + 10
+            return {**result, "sufficient": required + used <= limit}
+        with patch.object(dep, '_capacity', capacity), patch.object(ONE['prefix_dll'], 'RESERVE', 1):
+            _, report, _ = self.status()
+            entry = self.entry(report)
+            self.assertEqual((entry['next']['stage'], entry['next']['reason']),
+                             ('softdenchi-silent', 'dependency-plan-blocked:insufficient-capacity'))
+            _, menu, _, _ = self.run_menu('1\n1\n1\n')
+        self.agrees(entry, menu)
+        self.assertEqual(self.dll_records(), [])
 
     def test_different_dll_asset_stops_in_both(self):
         self.initialize()

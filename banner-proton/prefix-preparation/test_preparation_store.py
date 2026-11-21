@@ -135,9 +135,16 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(store.inventory()["assets"][0]["status"], "integrity-checked")
 
     def test_asset_folder_timestamps_alone_do_not_stop_caching_and_the_private_copy_stays_strict(self):
+        # Other callers (such as --stage-local) keep the strict read; only the prepare.sh folder is loose.
+        with self.store() as store, store.locked(self.key), \
+                patch.object(storage, "regular_open", side_effect=FOLDER["touching_open"](self.source)), \
+                self.assertRaisesRegex(storage.Invalid, r"input changed during read \(mtime_ns"):
+            self.cache(store)
+        for leftover in sorted((self.store_root / "assets").rglob("*"), reverse=True):
+            leftover.unlink() if leftover.is_file() else leftover.rmdir()
         with self.store() as store, store.locked(self.key), \
                 patch.object(storage, "regular_open", side_effect=FOLDER["touching_open"](self.source)):
-            self.assertEqual(self.cache(store)["action"], "created")
+            self.assertEqual(store.cache_asset(self.spec, self.source_root, timestamps=False)["action"], "created")
         names = sorted(path.name for path in (self.store_root / "assets").rglob("*"))
         self.assertEqual(names, ["example-runtime-r1", "payload.bin", "receipt.json"])
         payload = self.store_root / "assets/example-runtime-r1/payload.bin"

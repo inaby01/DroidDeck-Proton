@@ -1131,7 +1131,8 @@ first screen offers four entries. A bundle missing one of them keeps the earlier
   prefix.
 - Reads from the asset folder (`prepare.sh`'s folder) do not compare timestamps: the
   payload archive for registered games (planning, staging, managed recheck), declared
-  assets (installer, DLLs) and the source of cached assets. Every byte is still hashed
+  assets (installer, DLLs) and the source of the installer copied into the private cache
+  (`cache_asset` stays strict for other callers such as `--stage-local`). Every byte is still hashed
   against the declared size and digest, a size or identity change still stops, and the PE
   architecture is taken from the hashed bytes. Shared storage was seen to change file
   times while reading. Probe trials, private records, Steam and DroidDeck settings,
@@ -1150,7 +1151,9 @@ first screen offers four entries. A bundle missing one of them keeps the earlier
 - The next step comes from the read-only evaluation that menu 1 uses before its
   confirmation (`evaluate_resume`): the pre-write stops (profile and revision, blocked
   dependencies, DLL assets, the installer of a new prefix, binding records) and each
-  step's decision (DLL resume, SoftDenchi state and installation plan, binding). "Ready"
+  step's decision (DLL resume, SoftDenchi state and installation plan, binding). The space
+  check of each later step counts the bytes the earlier steps of the run write (a DLL before
+  the installer), and one SoftDenchi installation satisfies every dependency it handles. "Ready"
   means every dependency is verified and the game is bound. When resuming, menu 1 now
   stops before its confirmation, with the same stage and reason, when a later step would
   stop (for example a binding that cannot follow because a game-folder file is missing),
@@ -1158,8 +1161,7 @@ first screen offers four entries. A bundle missing one of them keeps the earlier
 - Stops and lists: a stop caused by an input that changed while it was read records
   `reason: input-changed-during-read` and the names of the differing fields
   (`changed_fields`) in entry 3, menus 1, 4, 7 and the probe material. Menu 1's list shows
-  the current assignment name of each game it can resume; choosing a game assigned to
-  another Proton rebinds it to this bundle's slot. When resuming and the game or Wine is
+  the current assignment name of each game it can resume. When resuming and the game or Wine is
   running, menu 1 stops before its confirmation and asks to end them first. The resume
   evaluation reuses the payload inventory read for the confirmation (one archive read).
   Entry 3 lists two registrations of one executable as ambiguous and keeps the excluded
