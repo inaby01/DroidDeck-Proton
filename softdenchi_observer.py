@@ -278,6 +278,8 @@ class Tracker:
         self.native_origins = {}
         self.last_proxy_state = None
         self.known = set()
+        # Identities this launch sent SIGTERM to: their own exit is expected, not a live game.
+        self.signalled = set()
 
     def role(self, process):
         image = process.image
@@ -399,6 +401,8 @@ class Tracker:
         lingering = []
         for item in getattr(processes, "lingering", ()):
             identity = (item["pid"], item["started"])
+            if identity in self.signalled:
+                continue
             if identity in self.known:
                 lingering.append({**item, "attribution": "observed"})
             elif item["attribution"] in {"prefix", "ambiguous"}:
@@ -702,6 +706,7 @@ class ProxyCleanup:
                 self.attempted = True
                 self.sent_at = now
                 self.signalled.append(key)
+                self.tracker.signalled.add(key)
                 self.emit({"event": "cleanup_sigterm_sent", "pid": p.pid, "started": p.started,
                            "executable_id": p.executable_id, "method": "pidfd",
                            "origin": "observed_game_ancestry" if key in self.game_origins else "service_or_pinned_batch"})

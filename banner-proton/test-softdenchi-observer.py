@@ -465,6 +465,28 @@ class SnapshotTests(unittest.TestCase):
             with patch.object(Path, "read_bytes", read):
                 self.assertEqual(self.lingering(root), [("ambiguous", "identity_changed")])
 
+    def test_snapshot_lingering_reaches_tracker_blocker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.add_thread(self.zombie_leader(root), 100002, "/test/pfx")
+            proxy = self.make_process(root, 100005, "/test/pfx")
+            del proxy
+            found, unreadable = snapshot("/test/pfx", root)
+            tracker = Tracker("/games/launch.exe", "test-game")
+            tracker.update(found, unreadable, 0)
+            self.assertIn("zombie_leader_with_live_threads", tracker.last_decision["blockers"])
+            self.assertEqual(tracker.last_decision["lingering_processes"][0]["pid"], 100001)
+
+    def test_observer_paths_keep_lingering(self):
+        found = with_lingering([], (99, 50, "prefix"))
+        observer = Observer({"WINEPREFIX": "/test/pfx", "PROTON_SOFTDENCHI_CLEANUP": "1"}, "/games/launch.exe",
+                            io.StringIO())
+        with patch("softdenchi_observer.snapshot", return_value=(found, 0)):
+            observer.poll()
+            self.assertIn("zombie_leader_with_live_threads", observer.tracker.last_decision["blockers"])
+            processes, _ = observer.cleaner.reader("/test/pfx")
+        self.assertEqual(processes.lingering, found.lingering)
+
     @unittest.skipUnless(sys.platform.startswith("linux") and Path("/proc/self/task").is_dir(), "needs Linux /proc")
     def test_real_process_whose_main_thread_exited(self):
         import subprocess
@@ -907,6 +929,13 @@ class CleanupTests(unittest.TestCase):
         fresh = with_lingering(self.current.values(), (11, 10, "other"))
         self.reader.side_effect = [(self.current, 0), (fresh, 0)]
         self.assertEqual(self.attempt()[1].call_count, 1)
+
+    def test_exiting_signalled_parent_does_not_stop_the_batch(self):
+        # Right after the parent's SIGTERM, its main thread may be gone while its threads still exit.
+        fresh = with_lingering([p for key, p in self.current.items() if key != self.parent.identity],
+                               (20, 10, "prefix"))
+        self.reader.side_effect = [(self.current, 0), (fresh, 0)]
+        self.assertEqual(self.attempt()[1].call_count, 2)
 
     def test_unrelated_lingering_group_keeps_cleanup(self):
         fresh = with_lingering(self.current.values(), (99, 50, "other"))
