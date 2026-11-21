@@ -4,11 +4,14 @@
 import copy
 import hashlib
 import os
+import runpy
 import struct
 import tempfile
 import unittest
 from pathlib import Path
 
+# The trusted entry point inserts the distribution path, as under ``python3 -I`` in the container.
+runpy.run_path(str(Path(__file__).with_name("prepare_game.py")))
 import preparation_game_prefix as game
 import preparation_prefix_dll as dll
 from preparation_common import Invalid

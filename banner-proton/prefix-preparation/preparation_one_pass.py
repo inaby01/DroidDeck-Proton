@@ -544,6 +544,9 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                     step = text(str((result.get("error") or {}).get("check")))
                     if result["phase"] == "failed":
                         hint = "DLLのファイルは作っていません。原因を取り除いてから、もう一度 12 を実行してください。"
+                    elif result["phase"] == "planned":
+                        hint = ("DLLのファイルを作った直後に止まりました。空のファイルが残っている可能性があります（削除していません）。"
+                                "結果JSONを戻してください（回復の手順をお知らせします）。")
                     else:
                         hint = ("作ったDLLのファイル（書きかけの可能性があります）は削除していません。"
                                 "結果JSONを戻してください（回復の手順をお知らせします）。")

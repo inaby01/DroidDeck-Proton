@@ -53,6 +53,8 @@ for test in \
     /input/prefix-preparation/test_preparation_trial.py \
     /input/prefix-preparation/test_preparation_dependency_install.py \
     /input/prefix-preparation/test_preparation_game_prefix.py \
+    /input/prefix-preparation/test_preparation_prefix_dll.py \
+    /input/prefix-preparation/test_preparation_one_pass.py \
     /input/prefix-preparation/test_preparation_probe_recovery.py \
     /input/prefix-preparation/test_preparation_probe.py \
     /input/prefix-preparation/test_preparation_selection.py \

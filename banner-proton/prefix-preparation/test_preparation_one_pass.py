@@ -744,6 +744,34 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual((placed.read_bytes(), after.st_ino, after.st_mtime_ns), (b'', before.st_ino, before.st_mtime_ns))
         self.assertEqual(len(self.dll_records()), 1)
 
+    def test_identity_failure_right_after_creation_is_not_a_failed_copy(self):
+        self.initialize()
+        real_fstat = os.fstat
+        created = []
+
+        def opened(real_open, *args, **kwargs):
+            descriptor = real_open(*args, **kwargs)
+            created.append(descriptor)
+            return descriptor
+
+        def fstat(fd, *args, **kwargs):
+            if created and fd == created[0] and len(created) == 1:
+                created.append('failed')
+                raise OSError(5, 'Input/output error')
+            return real_fstat(fd, *args, **kwargs)
+
+        with self.exclusive_create(opened), patch.object(prefix_dll.os, 'fstat', side_effect=fstat):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('空のファイルが残っている可能性', report['next_step'])
+        (saved,) = self.dll_records()
+        self.assertEqual((saved['phase'], saved['file_identity'], saved['error']['check'], saved['error']['errno']),
+                         ('planned', None, 'record-created', 5))
+        self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), b'')
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), b'')
+
     def test_failed_record_of_the_creation_keeps_the_file_and_the_created_phase(self):
         self.initialize()
         with self.saves_failing_at(2, OSError(28, 'No space left on device')):

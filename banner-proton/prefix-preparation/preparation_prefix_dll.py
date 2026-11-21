@@ -436,6 +436,7 @@ class PrefixDllSession:
         self.base_guard = RecheckSession(plan.recheck, store, None, None, stop_check)
         # ``step`` names the operation in progress, so a failure records which one it was.
         self.hash, self.step = None, "prepare"
+        self.made = False  # whether this run created the destination (known from the descriptor, not the phase)
         p = plan.recheck
         self.record = {"schema_version": 1, "tool_version": VERSION, "scope": SCOPE,
                        "record_id": ID_PREFIX + secrets.token_hex(16), "created_ns": time.time_ns(),
@@ -504,6 +505,7 @@ class PrefixDllSession:
             blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT})
             try:
                 created = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+                self.made = True
                 self.step = "record-created"
                 self.record.update(phase="created", file_identity=_identity(os.fstat(created)))
                 self._save()  # identity before any byte, whatever the checks below say
@@ -544,8 +546,9 @@ class PrefixDllSession:
         return self._save()
 
     def _fail(self, error):
-        # Nothing is removed. Before creation the copy failed; after it the phase stays and resumes from the record.
-        if self.record["phase"] == "planned":
+        # Nothing is removed. Only a run that created nothing is ``failed``. If the destination was created
+        # but its identity could not be recorded, the phase stays ``planned``: the empty file stops the next run.
+        if self.record["phase"] == "planned" and not self.made:
             self.record["phase"] = "failed"
         self.record["error"] = {"check": self.step, "error_class": type(error).__name__,
                                 "errno": getattr(error, "errno", None)}
