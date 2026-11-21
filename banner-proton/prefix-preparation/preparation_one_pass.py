@@ -23,6 +23,7 @@ from preparation_game_prefix import (
     apply_game_binding,
     plan_game_binding,
     plan_game_prefix,
+    profile_revision_change,
     registration_identity,
     validate_game_config,
 )
@@ -378,6 +379,13 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             profile_id = record["profile"]["profile_id"]
             require(profile_id in profiles, "game profile changed since initialization")
         profile = profiles[profile_id]
+        if record is not None:
+            # Same rule as the binding plan, before anything is written (DLL and SoftDenchi steps come first).
+            try:
+                profile_revision_change(profile, record["profile"])
+            except Invalid as error:
+                raise Stopped("profile-selection", str(error),
+                              "初期化したときの作品プロファイルから内容が変わっています。何も変更していません。") from error
         report["profile_id"] = profile_id
         uses_softdenchi = any(recipes[dep]["handler"] == SOFTDENCHI for dep in profile["dependencies"])
         asset = (_asset(config, softdenchi, "silent", silent_launch) if uses_softdenchi else

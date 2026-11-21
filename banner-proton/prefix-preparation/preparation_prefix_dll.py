@@ -462,7 +462,7 @@ class PrefixDllSession:
             if p.action == "remove-temporary-then-recheck":
                 return self._complete_link(fd)
             if p.action == "remove-temporary-then-install":
-                self._save()
+                # Before any new record: interrupted after this, the previous record still resumes by the table.
                 require(self._remove_temporary(fd, p.latest["temporary"], p.latest["temporary_identity"]),
                         "previous temporary file changed")
                 os.fsync(fd)
@@ -471,10 +471,16 @@ class PrefixDllSession:
             os.close(fd)
 
     def _complete_link(self, fd):
-        """A previous run linked the destination and stopped before removing its temporary name."""
+        """A previous run linked the destination and stopped before removing its temporary name.
+
+        No new record is written (design 7): only the previous temporary name is removed and
+        the destination judged again; the result is kept in the menu result, the previous
+        record stays as it is. Interrupted after the removal, the previous record resumes as
+        "linked, temporary name gone".
+        """
         latest, name = self.plan.latest, self.record["name"]
-        self.record.update(temporary_identity=dict(latest["temporary_identity"]), phase="temp-written")
-        self._save()
+        result = {"phase": "unchanged", "record_written": False, "resumed_from": latest["record_id"],
+                  "removed_temporary": None, "state": None, "error": None}
         try:
             self._guard()
             self._directory(fd)
@@ -483,12 +489,17 @@ class PrefixDllSession:
                     matches_asset(facts, self.plan.item["asset"]), "previous link changed")
             require(self._remove_temporary(fd, latest["temporary"], latest["temporary_identity"]), "previous temporary file changed")
             os.fsync(fd)
-            self.linked = True
-            self.record["phase"] = "linked"
-            self._save()
-            return self._post(fd)
+            result["removed_temporary"] = latest["temporary"]
+            self._guard()
+            self._directory(fd)
+            result["state"] = state_of(examine(fd, name), self.plan.item["asset"])
+            require(self.stop.check()["clear_in_view"], "target process view not clear")
+            if result["state"]["state"] == "present-verified":
+                result["phase"] = "present-verified"
         except (OSError, ValueError, TypeError, KeyError) as error:
-            return self._fail("complete-previous-link", error)
+            result["error"] = {"check": "complete-previous-link", "error_class": type(error).__name__,
+                               "errno": getattr(error, "errno", None)}
+        return result
 
     def _install(self, fd):
         spec, name = self.plan.item["asset"], self.record["name"]

@@ -675,6 +675,41 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(report['steps'][0]['plan']['action'], 'skip')
 
+    def test_interrupted_while_removing_the_previous_temporary_file_resumes(self):
+        self.initialize()
+        with patch.object(prefix_dll.os, 'link', side_effect=Killed()), self.assertRaises(Killed):
+            self.run_menu('12\n1\n1\n')
+        (first,) = self.dll_records()
+        real_fsync = os.fsync
+        calls = []
+
+        def killed(fd):
+            calls.append(1)
+            if len(calls) == 1:
+                raise Killed()
+            return real_fsync(fd)
+
+        # Killed right after the previous temporary file was removed: no new record exists yet.
+        with patch.object(prefix_dll.os, 'fsync', side_effect=killed), self.assertRaises(Killed):
+            self.run_menu('12\n1\n1\n')
+        self.assertEqual([item['record_id'] for item in self.dll_records()], [first['record_id']])
+        self.assertEqual(self.leftovers(), [])
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(report['steps'][0]['plan']['action'], 'install')
+        self.assertEqual(self.leftovers(), [])
+
+    def test_profile_changed_since_initialization_stops_before_the_dll_is_written(self):
+        self.initialize()
+        self.config['game_preparation']['profiles'][0]['title'] = 'Edited after initialization'
+        before = self.protected()
+        _, report, _, commands = self.run_menu('12\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual((report['stage'], report['reason']), ('profile-selection', 'game profile changed since initialization'))
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
+        self.assertEqual((commands, self.dll_records()), ([], []))
+        self.assertEqual(before, self.protected())
+
     def test_binding_plan_requires_the_dll_in_the_prefix(self):
         record, digest = self.initialize()
         self.install_dependency(record, digest)
@@ -727,7 +762,12 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual(report['steps'][0]['plan']['action'], 'remove-temporary-then-recheck')
         self.assertEqual((placed.stat().st_nlink, placed.stat().st_ino), (1, inode))
         self.assertEqual(self.leftovers(), [])
-        self.assertEqual([item['phase'] for item in self.dll_records()], ['temp-written', 'present-verified'])
+        # No new record: the previous one stays, the completion is kept in the result.
+        self.assertEqual([item['phase'] for item in self.dll_records()], ['temp-written'])
+        self.assertEqual((report['steps'][0]['record']['phase'], report['steps'][0]['record']['record_written']),
+                         ('present-verified', False))
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['steps'][0]['plan']['action'], 'skip')
 
     def test_replaced_syswow64_is_refused_right_before_link(self):
         self.initialize()
