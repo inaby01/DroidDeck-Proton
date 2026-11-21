@@ -6,21 +6,26 @@ no DLL overrides, no registration, no overwrite, replacement or removal of an ex
 file, no game folder change, no Wine. A name that the selected Proton ships as a builtin
 is refused (a native copy would hide the builtin).
 
-The copy is written into an unnamed file (``O_TMPFILE``) in the opened ``syswow64``,
-compared through the same descriptor, and that very file is given its name with
-``linkat`` through ``/proc/self/fd`` (which never replaces an existing name). No temporary
-name exists, so nothing is ever removed by name, and an interrupted copy leaves nothing
-behind. Every step works relative to one opened ``syswow64`` whose identity is part of the
-plan. A filesystem or sandbox without ``O_TMPFILE`` or that link fails the copy; no other
-placement is tried.
+The asset is read into memory and checked first. The destination name is then created
+with ``O_EXCL`` (an existing name is never replaced), its device/inode is recorded before
+any byte is written, and the content is written and read back through the same
+descriptor. Nothing is ever removed or renamed. A partly written file (``created``) left
+by an interrupted run is never touched again: inode numbers can be reused across runs, so
+it cannot be proven to be this tool's file; the run stops and the operator recovers it.
+Every step works relative to one opened
+``syswow64`` whose identity is part of the plan. (0.29.0 named an ``O_TMPFILE`` file
+through ``/proc/self/fd``; that failed on the device with errno 95.)
 
 ``present-verified`` means a match with the declaration; whether a game loads the file is
 only observable at launch.
 """
 
+import hashlib
+import io
 import os
 import re
 import secrets
+import signal
 import stat
 import time
 from dataclasses import dataclass, field
@@ -57,7 +62,9 @@ REFERENCE = "kernel32.dll"
 NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,59}\.(?i:dll)\Z", re.ASCII)
 LIMIT = 64 * 1024 * 1024
 RESERVE = 16 * 1024 * 1024
-PHASES = ("planned", "linked", "present-verified", "failed")
+# ``linked`` is read from 0.29.0 records only.
+PHASES = ("planned", "created", "linked", "present-verified", "failed")
+IDENTIFIED = ("created", "linked", "present-verified")
 BUILTIN_ROOTS = ("files/lib/wine/", "files/share/default_pfx")
 WINE_MARKERS = (b"Wine builtin DLL", b"Wine placeholder DLL")
 
@@ -163,7 +170,39 @@ def examine(fd, name):
             measured = None
     marker = any(mark in head[0x40:0x80] for mark in WINE_MARKERS)
     return {"kind": "file", "name": matches[0], "identity": _identity(opened), "links": opened.st_nlink,
-            "measured": measured, "wine_marker": marker}
+            "size": opened.st_size, "measured": measured, "wine_marker": marker}
+
+
+def _read_all(fd, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = os.pread(fd, min(1024 * 1024, size - len(data)), len(data))
+        require(chunk, "file shrank while reading")
+        data += chunk
+    require(not os.pread(fd, 1, size), "file grew while reading")
+    return bytes(data)
+
+
+def _write_all(fd, data):
+    offset = 0
+    while offset < len(data):
+        written = os.pwrite(fd, data[offset:offset + 1024 * 1024], offset)
+        require(written > 0, "short write")
+        offset += written
+
+
+def load_asset(root, spec):
+    """The asset bytes, read once and checked against the declaration (before anything is created)."""
+    with regular_open(source_path(root, spec), LIMIT) as source:
+        before = os.fstat(source.fileno())
+        data = source.read(LIMIT + 1)
+        after = os.fstat(source.fileno())
+    require((before.st_ino, before.st_size) == (after.st_ino, after.st_size) and len(data) == before.st_size,
+            "asset changed while reading")
+    machine = pe_machine(io.BytesIO(data), len(data))
+    require((len(data), hashlib.sha256(data).hexdigest(), machine) ==
+            (spec["expected_size"], spec["expected_sha256"], spec["pe_machine"]), "asset differs from its declaration")
+    return data
 
 
 def matches_asset(facts, spec):
@@ -246,9 +285,8 @@ def validate_prefix_dll_record(record):
             record["name"] == record["name"].lower(), "invalid record destination")
     _identity_value(record["directory"])
     require(record["phase"] in PHASES, "invalid record phase")
-    # The placed file's identity is known exactly from the link on.
-    require((record["file_identity"] is not None) == (record["phase"] in ("linked", "present-verified")) or
-            record["phase"] == "failed" and record["file_identity"] is None, "file identity must follow the link")
+    # The created file's identity is recorded from its creation on; a failure means nothing was created.
+    require((record["file_identity"] is not None) == (record["phase"] in IDENTIFIED), "file identity must follow creation")
     if record["file_identity"] is not None:
         _identity_value(record["file_identity"])
     if record["resumed_from"] is not None:
@@ -271,10 +309,9 @@ def history(store, key, trial_id, dependency_id, name):
 def resume_action(latest, invalid, directory, facts, spec):
     """Design 7: (action, reason), action install / skip / stop.
 
-    The copy has no temporary name, so an interrupted copy leaves either nothing or the
-    placed file: a destination matching the declaration is accepted whatever the phase
-    (``planned`` covers a stop between the link and its record); an absent destination is
-    copied again unless a past record placed it (it disappeared since).
+    An interruption leaves nothing, a recorded partial file (``created``) or the finished
+    file. A destination matching the declaration is accepted whatever the phase. A partial
+    file is never written again (it cannot be proven to be this tool's file across runs).
     """
     if invalid:
         return "stop", "invalid-prefix-dll-record-present"
@@ -285,8 +322,10 @@ def resume_action(latest, invalid, directory, facts, spec):
     phase = latest and latest["phase"]
     if current == "present-verified":
         return "skip", None if phase in (None, "present-verified") else "placed-before-the-record-was-completed"
-    if current == "absent" and phase in (None, "planned", "failed"):
+    if current == "absent" and phase in (None, "planned", "failed", "created"):
         return "install", None
+    if phase == "created":
+        return "stop", "partial-file-of-the-previous-run-operator-recovery"
     return "stop", "prefix-dll-state-" + current + ("" if phase is None else " after " + phase)
 
 
@@ -383,9 +422,11 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
                          action, reason, capacity, tuple(sorted(blockers)))
 
 
-def _same(measured, spec):
-    return (measured["size"], measured["sha256"], measured["pe_machine"]) == (
-        spec["expected_size"], spec["expected_sha256"], spec["pe_machine"])
+class _Step:
+    """Names the operation in progress, so a failure records which one it was."""
+
+    def __init__(self):
+        self.name = "prepare"
 
 
 class PrefixDllSession:
@@ -396,7 +437,7 @@ class PrefixDllSession:
         require(isinstance(plan, PrefixDllPlan), "trusted prefix DLL plan required")
         self.plan, self.store, self.refresh, self.confirmation, self.stop = plan, store, refresh, confirmation, stop_check
         self.base_guard = RecheckSession(plan.recheck, store, None, None, stop_check)
-        self.hash, self.linked = None, False
+        self.hash, self.step = None, _Step()
         p = plan.recheck
         self.record = {"schema_version": 1, "tool_version": VERSION, "scope": SCOPE,
                        "record_id": ID_PREFIX + secrets.token_hex(16), "created_ns": time.time_ns(),
@@ -430,6 +471,8 @@ class PrefixDllSession:
         require(self.hash is None and self.confirmation == p.digest, "exact unused confirmation required")
         require(p.action == "install", "prefix DLL plan writes nothing")
         require(not p.blockers, "prefix DLL plan blocked")
+        # The plan digest includes the latest record: compare it before this run writes its own record.
+        # After that, the running guard (prefix, payload, settings, registration, process view, directory) applies.
         require(self.refresh().digest == p.digest, "prefix DLL plan changed")
         self._guard()
         fd = os.open(system_directory(p.recheck.compatdata), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -439,61 +482,72 @@ class PrefixDllSession:
         finally:
             os.close(fd)
 
+    def _verify(self, fd, data):
+        """Content and identity through the descriptor that was written."""
+        self.step.name = "fsync-file"
+        os.fsync(fd)
+        self.step.name = "read-back"
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and _identity(info) == self.record["file_identity"],
+                "written file is not the recorded file")
+        require(info.st_size == len(data) and _read_all(fd, info.st_size) == data, "written file differs from the asset")
+
     def _install(self, fd):
-        spec, name = self.plan.item["asset"], self.record["name"]
+        name = self.record["name"]
         self._save()  # planned, before anything is created
-        unnamed = None
+        created = None
         try:
-            # An unnamed file in syswow64: it disappears by itself unless it is linked below.
-            unnamed = os.open(".", os.O_TMPFILE | os.O_RDWR, 0o644, dir_fd=fd)
-            with os.fdopen(os.dup(unnamed), "r+b") as out:
-                with regular_open(source_path(self.plan.asset_root, spec), LIMIT) as source:
-                    copied = measure_stream(source, LIMIT, "pe", out)
-                out.flush()
-                os.fsync(out.fileno())
-                require(_same(copied, spec), "asset changed while copying")
-                # Read back through the same descriptor: the content that will be linked.
-                require(_same(measure_stream(out, LIMIT, "pe"), spec), "copied file differs from the asset")
-            created = os.fstat(unnamed)
-            require(stat.S_ISREG(created.st_mode) and created.st_nlink == 0, "copied file is not unnamed")
-            # Right before link: guard, process view, directory, destination absent (any case).
+            self.step.name = "read-asset"
+            data = load_asset(self.plan.asset_root, self.plan.item["asset"])
+            self.step.name = "create"
             self._guard()
             self._directory(fd)
             require(not _matches(fd, name), "destination appeared")
-            # Links the verified file itself (its descriptor), never a name; an existing name is never replaced.
-            os.link("/proc/self/fd/" + str(unnamed), name, dst_dir_fd=fd, follow_symlinks=True)
-            self.linked = True
-            placed = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            require(_identity(placed) == _identity(os.fstat(unnamed)) and placed.st_nlink == 1,
-                    "linked file differs from the copied file")
+            blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+            try:
+                created = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+                self.step.name = "record-created"
+                self.record.update(phase="created", file_identity=_identity(os.fstat(created)))
+                self._save()  # identity before any byte, whatever the checks below say
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+            self.step.name = "identity"
+            info = os.fstat(created)
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == 0, "created file is not a new file")
+            self.step.name = "write"
+            _write_all(created, data)
+            self._verify(created, data)
+            self.step.name = "fsync-directory"
             os.fsync(fd)
-            self.record.update(phase="linked", file_identity=_identity(placed))
-            self._save()
         except (OSError, ValueError, TypeError, KeyError) as error:
-            return self._fail("copy", error)
+            return self._fail(error)
         finally:
-            if unnamed is not None:
-                os.close(unnamed)
+            if created is not None:
+                os.close(created)
         return self._post(fd)
 
     def _post(self, fd):
         try:
+            self.step.name = "post-inspection"
             self._guard()
             self._directory(fd)
             from preparation_dependency_install import _tool_directory
             p = self.plan.recheck
             state = inspect_prefix_dll(p.compatdata, self.plan.item, p.inventory, _tool_directory(p))
             require(state.get("directory") in (None, self.plan.directory), "syswow64 replaced")
+            placed = os.stat(self.record["name"], dir_fd=fd, follow_symlinks=False)
+            require(_identity(placed) == self.record["file_identity"], "destination is not the recorded file")
             require(self.stop.check()["clear_in_view"], "target process view not clear")
             require(state["state"] == "present-verified", "placed DLL not verified: " + state.get("reason", state["state"]))
             self.record["phase"] = "present-verified"
             return self._save()
         except (OSError, ValueError, TypeError, KeyError) as error:
-            return self._fail("post-inspection", error)
+            return self._fail(error)
 
-    def _fail(self, check, error):
-        # Nothing to clean up: an unlinked copy has no name. After the link the destination stays.
-        if not self.linked:
+    def _fail(self, error):
+        # Nothing is removed. Before creation the copy failed; after it the phase stays and resumes from the record.
+        if self.record["phase"] == "planned":
             self.record["phase"] = "failed"
-        self.record["error"] = {"check": check, "error_class": type(error).__name__, "errno": getattr(error, "errno", None)}
+        self.record["error"] = {"check": self.step.name, "error_class": type(error).__name__,
+                                "errno": getattr(error, "errno", None)}
         return self._save()

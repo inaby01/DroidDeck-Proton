@@ -531,7 +531,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 if dll_plan.blockers:
                     raise Stopped(stage, "prefix-dll-blocked:" + ",".join(dll_plan.blockers),
                                   "DLL（" + target_name(item) + "）を入れる前の確認で止まりました。理由は結果JSONにあります。"
-                                  "上書き・修復はしていません。")
+                                  "上書き・修復・削除はしていません。置き先に書きかけの " + target_name(item) +
+                                  " が残っている場合は、結果JSONを戻してください（回復の手順をお知らせします）。")
                 print("prefixに " + text(target_name(item)) + " を入れています。", file=output, flush=True)
                 with droiddeck_lock(settings):
                     session = PrefixDllSession(dll_plan, store, refresh_dll, dll_plan.digest, stop)
@@ -541,7 +542,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 live.clear()
                 if result["phase"] != "present-verified":
                     raise Stopped(stage, "prefix-dll-" + result["phase"],
-                                  "DLLを入れられませんでした。置いたファイルは削除していません。もう一度 12 を実行すると、記録から続きを判定します。")
+                                  "DLLを入れられませんでした（段階: " + text(str((result.get("error") or {}).get("check"))) + "）。"
+                                  "作ったファイルは削除していません。もう一度 12 を実行すると、記録から続きを判定します。")
             if uses_softdenchi:
                 stage = "softdenchi-state"
                 base = base_plan(record, record_digest)

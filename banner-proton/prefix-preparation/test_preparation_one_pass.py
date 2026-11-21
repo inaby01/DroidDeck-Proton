@@ -596,40 +596,53 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertIn('prefixに入れるDLL', report['next_step'])
         self.assertFalse((self.wow64() / 'mfc42.dll').exists())
 
-    def test_failed_copy_leaves_no_temporary_file_and_is_retried(self):
+    def exclusive_create(self, effect):
+        """Wraps os.open only for the O_EXCL creation of the destination; other opens are untouched."""
+        real_open = os.open
+
+        def wrapped(path, flags, *args, **kwargs):
+            if path == 'mfc42.dll' and flags & os.O_EXCL:
+                return effect(real_open, path, flags, *args, **kwargs)
+            return real_open(path, flags, *args, **kwargs)
+
+        return patch.object(prefix_dll.os, 'open', side_effect=wrapped)
+
+    def test_failed_creation_leaves_nothing_and_is_retried(self):
         self.initialize()
-        real_link = os.link
-        with patch.object(prefix_dll.os, 'link', side_effect=OSError(1, 'Operation not permitted')):
+
+        def refused(real_open, *args, **kwargs):
+            raise OSError(1, 'Operation not permitted')
+
+        with self.exclusive_create(refused):
             _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['reason'], 'prefix-dll-failed')
+        self.assertIn('段階: create', report['next_step'])
         (failed,) = self.dll_records()
-        self.assertEqual((failed['phase'], failed['error']['check'], failed['error']['errno']), ('failed', 'copy', 1))
-        self.assertEqual(self.leftovers(), [])
-        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
-        self.assertIs(prefix_dll.os.link, real_link)
+        self.assertEqual((failed['phase'], failed['error']['check'], failed['error']['errno'], failed['file_identity']),
+                         ('failed', 'create', 1, None))
+        self.assertEqual((self.leftovers(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
         _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual([item['phase'] for item in self.dll_records()], ['failed', 'present-verified'])
         self.assertEqual(self.dll_records()[1]['resumed_from'], failed['record_id'])
 
-    def test_destination_appearing_right_before_link_is_kept(self):
+    def test_destination_appearing_right_before_creation_is_kept(self):
         self.initialize()
-        real_link = os.link
         intruder = GAME['synthetic_pe'](extra=b'appeared concurrently')
 
-        def racing(*args, **kwargs):
+        def racing(real_open, *args, **kwargs):
             (self.wow64() / 'mfc42.dll').write_bytes(intruder)
-            return real_link(*args, **kwargs)
+            return real_open(*args, **kwargs)
 
-        with patch.object(prefix_dll, '_matches', return_value=[]), patch.object(prefix_dll.os, 'link', side_effect=racing):
+        with self.exclusive_create(racing):
             _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), intruder)
         self.assertEqual(self.leftovers(), [])
-        self.assertEqual(self.dll_records()[0]['phase'], 'failed')
+        self.assertEqual((self.dll_records()[0]['phase'], self.dll_records()[0]['error']['errno']), ('failed', 17))
 
-    def test_case_variant_appearing_right_before_link_stops_without_linking(self):
+    def test_case_variant_appearing_right_before_creation_stops(self):
         self.initialize()
         real_directory = prefix_dll.PrefixDllSession._directory
         calls = []
@@ -675,9 +688,9 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertIn('x86 system directory not confirmed: PermissionError', report['reason'])
         self.assertNotIn('/private/secret/path', json.dumps(report))
 
-    def test_killed_before_the_link_leaves_nothing_and_copies_again(self):
+    def test_killed_before_creation_leaves_nothing_and_copies_again(self):
         self.initialize()
-        with patch.object(prefix_dll.os, 'link', side_effect=Killed()), self.assertRaises(Killed):
+        with patch.object(prefix_dll, 'load_asset', side_effect=Killed()), self.assertRaises(Killed):
             self.run_menu('12\n1\n1\n')
         (interrupted,) = self.dll_records()
         self.assertEqual(interrupted['phase'], 'planned')
@@ -687,19 +700,14 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual(report['steps'][0]['plan']['action'], 'install')
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), DLL_DATA)
 
-    def test_killed_right_after_the_link_is_accepted_without_copying_again(self):
+    def test_killed_after_writing_is_accepted_without_copying_again(self):
         self.initialize()
-        real_link = os.link
-
-        def link_then_killed(*args, **kwargs):
-            real_link(*args, **kwargs)
-            raise Killed()
-
-        with patch.object(prefix_dll.os, 'link', side_effect=link_then_killed), self.assertRaises(Killed):
+        with patch.object(prefix_dll.PrefixDllSession, '_post', side_effect=Killed()), self.assertRaises(Killed):
             self.run_menu('12\n1\n1\n')
         placed = self.wow64() / 'mfc42.dll'
         self.assertEqual((placed.read_bytes(), placed.stat().st_nlink), (DLL_DATA, 1))
-        self.assertEqual(self.dll_records()[0]['phase'], 'planned')
+        (saved,) = self.dll_records()
+        self.assertEqual((saved['phase'], saved['file_identity']['inode']), ('created', placed.stat().st_ino))
         inode = placed.stat().st_ino
         _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
@@ -707,77 +715,118 @@ class PrefixDllOnePassTests(OnePassTests):
                          ('skip', 'placed-before-the-record-was-completed'))
         self.assertEqual((placed.stat().st_ino, len(self.dll_records())), (inode, 1))
 
-    def test_failure_after_the_link_keeps_the_file_and_is_not_a_failed_copy(self):
+    def test_partial_file_of_an_interrupted_write_is_never_written_again(self):
         self.initialize()
-        real_stat = os.stat
+        real_write = prefix_dll._write_all
 
-        def refused(path, *args, **kwargs):
-            if path == 'mfc42.dll' and kwargs.get('dir_fd') is not None and not refused.done:
-                refused.done = True
-                raise OSError(5, 'Input/output error')
-            return real_stat(path, *args, **kwargs)
+        def half_then_killed(fd, data):
+            real_write(fd, data[:len(data) // 2])
+            raise Killed()
 
-        refused.done = False
-        with patch.object(prefix_dll.os, 'stat', side_effect=refused):
+        with patch.object(prefix_dll, '_write_all', side_effect=half_then_killed), self.assertRaises(Killed):
+            self.run_menu('12\n1\n1\n')
+        placed = self.wow64() / 'mfc42.dll'
+        partial = placed.read_bytes()
+        self.assertEqual(partial, DLL_DATA[:len(DLL_DATA) // 2])
+        self.assertEqual(self.dll_records()[0]['phase'], 'created')
+        before = placed.stat()
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('partial-file-of-the-previous-run-operator-recovery', report['reason'])
+        self.assertIn('回復の手順', report['next_step'])
+        after = placed.stat()
+        self.assertEqual((placed.read_bytes(), after.st_ino, after.st_mtime_ns), (partial, before.st_ino, before.st_mtime_ns))
+        self.assertEqual(len(self.dll_records()), 1)
+        # The operator removes the partial file; the next run creates it anew.
+        placed.unlink()
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(placed.read_bytes(), DLL_DATA)
+        self.assertEqual([item['phase'] for item in self.dll_records()], ['created', 'present-verified'])
+
+    def test_failure_after_creation_keeps_the_file_and_the_created_phase(self):
+        self.initialize()
+        real_read = prefix_dll._read_all
+
+        def differs(fd, size):
+            return b'x' + real_read(fd, size)[1:]
+
+        with patch.object(prefix_dll, '_read_all', side_effect=differs):
             _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         (saved,) = self.dll_records()
-        self.assertEqual((saved['phase'], saved['error']['check']), ('planned', 'copy'))
+        self.assertEqual((saved['phase'], saved['error']['check']), ('created', 'read-back'))
+        self.assertIn('段階: read-back', report['next_step'])
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), DLL_DATA)
         _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(report['steps'][0]['plan']['action'], 'skip')
 
-    def test_placed_name_that_is_not_the_copied_file_stops(self):
+    def test_destination_that_is_not_the_recorded_file_stops_the_post_inspection(self):
         self.initialize()
         real_stat = os.stat
 
+        calls = []
+
         def other_inode(path, *args, **kwargs):
             info = real_stat(path, *args, **kwargs)
-            if path == 'mfc42.dll' and kwargs.get('dir_fd') is not None and not other_inode.done:
-                other_inode.done = True
-                values = list(info)
-                values[1] += 1  # st_ino
-                return os.stat_result(values)
+            if path == 'mfc42.dll' and kwargs.get('dir_fd') is not None:
+                calls.append(1)
+                # The first lookup is the post-inspection's own read; the second is the identity check of the name.
+                if len(calls) == 2:
+                    values = list(info)
+                    values[1] += 1  # st_ino
+                    return os.stat_result(values)
             return info
 
-        other_inode.done = False
         with patch.object(prefix_dll.os, 'stat', side_effect=other_inode):
             _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         (saved,) = self.dll_records()
-        self.assertEqual((saved['phase'], saved['file_identity'], saved['error']['error_class']), ('planned', None, 'Invalid'))
+        self.assertEqual((saved['phase'], saved['error']['check']), ('created', 'post-inspection'))
 
-    def test_copy_differing_from_the_asset_is_never_named(self):
+    def test_unsupported_creation_fails_without_another_placement(self):
         self.initialize()
-        real_measure = prefix_dll.measure_stream
-        calls = []
 
-        def drifting(*args, **kwargs):
-            measured = real_measure(*args, **kwargs)
-            calls.append(1)
-            return {**measured, 'sha256': '0' * 64} if len(calls) == 2 else measured
+        def unsupported(real_open, *args, **kwargs):
+            raise OSError(95, 'Operation not supported')
 
-        with patch.object(prefix_dll, 'measure_stream', side_effect=drifting):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
-        self.assertEqual(report['status'], 'stopped', report)
-        self.assertEqual(self.dll_records()[0]['phase'], 'failed')
-        self.assertEqual((self.leftovers(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
-
-    def test_filesystem_without_unnamed_files_fails_without_another_placement(self):
-        self.initialize()
-        real_open = os.open
-
-        def no_tmpfile(path, flags, *args, **kwargs):
-            if flags & os.O_TMPFILE == os.O_TMPFILE:
-                raise OSError(95, 'Operation not supported')
-            return real_open(path, flags, *args, **kwargs)
-
-        with patch.object(prefix_dll.os, 'open', side_effect=no_tmpfile):
+        with self.exclusive_create(unsupported):
             _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual((self.dll_records()[0]['phase'], self.dll_records()[0]['error']['errno']), ('failed', 95))
         self.assertEqual((self.leftovers(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
+
+    def test_asset_changed_in_the_shared_folder_stops_before_creation(self):
+        self.initialize()
+        real_load = prefix_dll.load_asset
+
+        def changed(root, spec):
+            (self.f.fixture.source.root / 'mfc42.dll').write_bytes(DLL_DATA + b'changed')
+            return real_load(root, spec)
+
+        with patch.object(prefix_dll, 'load_asset', side_effect=changed):
+            _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual((self.dll_records()[0]['phase'], self.dll_records()[0]['error']['check']), ('failed', 'read-asset'))
+        self.assertFalse((self.wow64() / 'mfc42.dll').exists())
+
+    def test_records_of_0_29_0_are_resumed(self):
+        self.initialize()
+        self.run_menu('12\n1\n1\n1\n')  # creates one record with the current version
+        (current,) = self.dll_records()
+        self.wow64().joinpath('mfc42.dll').unlink()
+        legacy = {**current, 'tool_version': '0.29.0', 'phase': 'failed', 'file_identity': None,
+                  'error': {'check': 'copy', 'error_class': 'OSError', 'errno': 95}}
+        with PrivateStore(self.f.store_root) as store:
+            raw = store.read_record(prefix_dll.RECORDS, current['record_id'] + '.json')[1]
+            lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
+            with store.locked(lock):
+                store.write_record(prefix_dll.RECORDS, current['record_id'] + '.json', legacy, expected_hash=raw)
+        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual(report['steps'][0]['plan']['action'], 'install')
+        self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), DLL_DATA)
 
     def test_binding_plan_requires_the_dll_in_the_prefix(self):
         record, digest = self.initialize()
@@ -786,13 +835,8 @@ class PrefixDllOnePassTests(OnePassTests):
         (self.wow64() / 'mfc42.dll').write_bytes(DLL_DATA)
         self.assertEqual(self.binding_plan(record, digest).blockers, ())
 
-    def test_replaced_syswow64_is_refused_right_before_link(self):
+    def test_replaced_syswow64_is_refused_right_before_creation(self):
         self.initialize()
-        real_link = os.link
-
-        def swap(*args, **kwargs):
-            raise AssertionError('link must not run')
-
         real_directory = prefix_dll.PrefixDllSession._directory
         calls = []
 
@@ -804,14 +848,12 @@ class PrefixDllOnePassTests(OnePassTests):
                 self.wow64().mkdir()
             return real_directory(session, fd)
 
-        with patch.object(prefix_dll.PrefixDllSession, '_directory', directory), \
-                patch.object(prefix_dll.os, 'link', side_effect=swap):
+        with patch.object(prefix_dll.PrefixDllSession, '_directory', directory):
             _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(self.dll_records()[0]['phase'], 'failed')
-        self.assertIs(prefix_dll.os.link, real_link)
         self.assertEqual(list(self.wow64().iterdir()), [])
-
+        self.assertFalse(self.wow64().with_name('syswow64-moved').joinpath('mfc42.dll').exists())
 
 # Only the one-pass tests run here; the inherited fixtures' own tests run in their modules.
 for _name in dir(GAME['GamePrefixTests']):

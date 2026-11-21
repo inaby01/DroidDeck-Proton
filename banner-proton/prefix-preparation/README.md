@@ -1068,31 +1068,36 @@ folder. `mfc-local` stays reserved and blocked.
   `present-verified` is a match with the declaration only; whether the game loads the
   file is observable at launch. Menu 11 and the binding step include it in the
   dependency check and in the readiness callback before each settings write.
-- Copy: under the private and DroidDeck locks, with the managed recheck guard and a clear
-  process view. Every step works relative to one opened `syswow64` whose device and
-  inode are part of the plan. The asset is written into an unnamed file created in that
-  directory (`O_TMPFILE`), read back and compared through the same descriptor; then the
-  guard, process view, directory identity and the absence of the destination (any case)
-  are checked again, and that very file is named with `linkat` through `/proc/self/fd`
-  (`AT_SYMLINK_FOLLOW`), which never replaces an existing name. No temporary name exists,
-  so nothing is ever removed by name and an interrupted copy leaves nothing behind. A
-  filesystem or sandbox without `O_TMPFILE` or this link fails the copy; no other
-  placement is tried. The asset is limited to 64 MiB.
-- Records: `prefix-dlls` (phases `planned`, `linked`, `present-verified`, `failed`; the
-  placed file's identity is recorded from the link on). A copy that never linked ends
-  `failed`; after the link the destination is never removed.
-- Resume: the latest record of the same initialization, dependency and destination
-  decides with the current state. A destination matching the declaration is accepted
-  whatever the phase (a stop between the link and its record leaves `planned`); an absent
-  destination is copied again after no record, `planned` or `failed`, and stops after
-  `linked` or `present-verified` (it disappeared). A replaced `syswow64`, a record for
-  another recipe or asset, an unreadable record, or an incompatible destination stops and
-  nothing is repaired.
+- Copy (0.29.1): under the private and DroidDeck locks, with the managed recheck guard and a
+  clear process view. Every step works relative to one opened `syswow64` whose device and
+  inode are part of the plan. The plan digest (which includes the latest record) is compared
+  before this run writes its own record; afterwards the running guard applies. The asset is
+  read into memory once and checked (size, SHA-256, PE architecture) before anything is
+  created. The destination name is then created with `O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW`
+  (an existing name is never replaced); its device/inode is recorded as `created` right
+  away, with SIGINT/SIGTERM blocked between the creation and that record. The content is
+  written and read back through the same descriptor. Nothing is ever removed, renamed,
+  truncated or written again later. (0.29.0 named an `O_TMPFILE` file through
+  `/proc/self/fd`; that failed on the device with errno 95.)
+- Records: `prefix-dlls` (phases `planned`, `created`, `present-verified`, `failed`; 0.29.0's
+  `linked` is still read). A failure before the creation ends `failed`; after it the phase
+  stays `created` and the error names the step (`read-asset`, `create`, `record-created`,
+  `identity`, `write`, `fsync-file`, `read-back`, `fsync-directory`, `post-inspection`). The
+  asset is limited to 64 MiB.
+- Resume: the latest record of the same initialization, dependency and destination decides
+  with the current state. A destination matching the declaration is accepted whatever the
+  phase. An absent destination is created after no record, `planned`, `failed` or `created`,
+  and stops after `linked` or `present-verified` (it disappeared). A partial file left by an
+  interrupted write (`created`) is never written again, since inode numbers can be reused
+  across runs; the run stops and the operator removes it. An empty file left between the
+  creation and its record also stops. A replaced `syswow64`, a record for another recipe or
+  asset (the recipe must stay unchanged to continue 0.29.0 records), or an unreadable record
+  stops.
 - Menu 12: the confirmation lists each DLL (name, asset hash, destination); the fixed
   values gain `dlls` (recipe digest and measured asset per DLL); a missing or different
   asset stops before anything is written, also when resuming a game whose DLL is already
   placed (the asset is part of the confirmed values). On resume, a profile that changed
   since the initialization (other than an accepted later revision) stops before any step.
   The plan observes the process view before and after inspecting; an unclear view stops.
-- Not measured on a device: placement with hard links on the device filesystem, loading
-  from `syswow64`, and whether the file stays through Proton updates.
+- Not measured on a device: the 0.29.1 creation in the prefix's `syswow64`, loading from
+  `syswow64`, and whether the file stays through Proton updates.

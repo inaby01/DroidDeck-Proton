@@ -202,13 +202,17 @@ class ResumeTests(unittest.TestCase):
             ((None, facts()), 'install'),
             ((previous('planned'), facts()), 'install'),
             ((previous('failed'), facts()), 'install'),
+            ((previous('created'), facts()), 'install'),
             ((previous('linked'), facts()), 'stop'),
             ((previous('present-verified'), facts()), 'stop'),
             ((None, facts('file')), 'skip'),
             ((previous('planned'), facts('file')), 'skip'),
+            ((previous('created'), facts('file')), 'skip'),
             ((previous('linked'), facts('file')), 'skip'),
             ((previous('failed'), facts('file')), 'skip'),
             ((previous('present-verified'), facts('file')), 'skip'),
+            ((previous('created'), facts('file', data=DATA[:100])), 'stop'),
+            ((previous('created'), facts('file', data=b'')), 'stop'),
             ((None, facts('file', links=2)), 'stop'),
             ((previous('planned'), facts('file', data=DATA + b'x')), 'stop'),
             ((None, {'kind': 'symlink', 'name': 'mfc42.dll'}), 'stop'),
@@ -216,6 +220,8 @@ class ResumeTests(unittest.TestCase):
         for args, expected in cases:
             with self.subTest(args=args):
                 self.assertEqual(self.action(*args)[0], expected)
+        self.assertEqual(self.action(previous('created'), facts('file', data=DATA[:100])),
+                         ('stop', 'partial-file-of-the-previous-run-operator-recovery'))
         self.assertEqual(self.action(previous('planned'), facts('file')),
                          ('skip', 'placed-before-the-record-was-completed'))
         self.assertEqual(self.action(None, facts(), invalid=1), ('stop', 'invalid-prefix-dll-record-present'))
@@ -233,12 +239,13 @@ class RecordTests(unittest.TestCase):
                   'preparation_complete': False}
         dll.validate_prefix_dll_record(copy.deepcopy(record))
         placed = {'device': 1, 'inode': 3}
-        for change in ({'phase': 'linked'}, {'phase': 'planned', 'file_identity': placed}, {'name': 'MFC42.dll'},
+        for change in ({'phase': 'linked'}, {'phase': 'created'}, {'phase': 'planned', 'file_identity': placed}, {'name': 'MFC42.dll'},
                        {'preparation_complete': True}, {'destination': 'system32'}, {'phase': 'unknown'},
                        {'phase': 'failed', 'file_identity': placed}, {'phase': 'linked', 'file_identity': {'device': 1}}):
             with self.subTest(change=change), self.assertRaises((Invalid, TypeError, KeyError)):
                 dll.validate_prefix_dll_record({**copy.deepcopy(record), **change})
-        dll.validate_prefix_dll_record({**record, 'phase': 'linked', 'file_identity': placed})
+        dll.validate_prefix_dll_record({**record, 'phase': 'linked', 'file_identity': placed})  # 0.29.0
+        dll.validate_prefix_dll_record({**record, 'phase': 'created', 'file_identity': placed})
         dll.validate_prefix_dll_record({**record, 'phase': 'present-verified', 'file_identity': placed})
         dll.validate_prefix_dll_record({**record, 'phase': 'failed'})
 
