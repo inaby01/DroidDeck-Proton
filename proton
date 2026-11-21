@@ -3013,10 +3013,16 @@ class Session:
         try:
             rc = self.run_proc(adverb + argv + sys.argv[2:] + self.cmdlineappend)
             if observer is not None:
-                observer.launcher_returned()
+                try:
+                    observer.launcher_returned()
+                except Exception as exc:  # noqa: BLE001 -- diagnostics must not affect the game's status
+                    log("SoftDenchi observer could not record the launcher return: " + type(exc).__name__)
         finally:
             if observer is not None:
-                observer.stop(returncode=rc)
+                try:
+                    observer.stop(returncode=rc)
+                except Exception as exc:  # noqa: BLE001 -- diagnostics must not affect the game's status
+                    log("SoftDenchi observer could not stop: " + type(exc).__name__)
 
         if remote_debug_proc:
             remote_debug_proc.kill()

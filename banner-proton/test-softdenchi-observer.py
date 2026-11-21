@@ -413,14 +413,14 @@ class SnapshotTests(unittest.TestCase):
             root = Path(temp)
             entry = self.zombie_leader(root)
             self.add_thread(entry, 100002, environ=None)
-            real = Path.read_text
+            real = Path.read_bytes
             def read(path):
                 if path == entry / "stat" and read.count:
-                    return stat_text(100001, "Z", threads=1)
+                    return stat_text(100001, "Z", threads=1).encode()
                 read.count += path == entry / "stat"
                 return real(path)
             read.count = 0
-            with patch.object(Path, "read_text", read):
+            with patch.object(Path, "read_bytes", read):
                 self.assertEqual(self.lingering(root), [])
 
     def test_ordinary_zombie_is_skipped_without_reading_tasks(self):
@@ -440,7 +440,7 @@ class SnapshotTests(unittest.TestCase):
                     raise PermissionError
                 return real(path)
             with patch.object(Path, "read_bytes", read):
-                self.assertEqual(self.lingering(root), [("ambiguous", "permission")])
+                self.assertEqual(self.lingering(root), [("ambiguous", "thread_unreadable")])
 
     def test_unlisted_tasks_are_ambiguous(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -464,6 +464,111 @@ class SnapshotTests(unittest.TestCase):
                 return data
             with patch.object(Path, "read_bytes", read):
                 self.assertEqual(self.lingering(root), [("ambiguous", "identity_changed")])
+
+    def test_lingering_record_has_thread_count(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.add_thread(self.zombie_leader(root, threads=3), 100002, "/test/pfx")
+            found, _ = snapshot("/test/pfx", root)
+            self.assertEqual(found.lingering[0]["threads"], 3)
+
+    def test_empty_exiting_worker_does_not_hide_live_worker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root, threads=3)
+            self.add_thread(entry, 100002, environ=b"")  # exiting: address space already gone
+            self.add_thread(entry, 100003, "/test/pfx")
+            self.assertEqual(self.lingering(root), [("prefix", "task_environ")])
+
+    def test_leader_task_is_never_used_for_attribution(self):
+        # A leader still shown as running in task/ but without environ must not decide "other".
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.make_process(root, 100001, "/test/pfx", threads=2)
+            (entry / "environ").write_bytes(b"")
+            self.add_thread(entry, 100001, environ=b"HOME=/root\0")
+            self.add_thread(entry, 100002, "/test/pfx")
+            self.assertEqual(self.lingering(root), [("prefix", "task_environ")])
+
+    def test_ordinary_zombie_does_not_list_tasks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.zombie_leader(root, threads=1)
+            real = os.listdir
+            def listing(path):
+                if str(path).endswith("task"):
+                    raise AssertionError("tasks listed for an ordinary zombie")
+                return real(path)
+            with patch.object(os, "listdir", listing):
+                self.assertEqual(self.lingering(root), [])
+
+    def test_vanished_task_directory_with_remaining_threads_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.zombie_leader(root)
+            real = os.listdir
+            with patch.object(os, "listdir", lambda path: (_ for _ in ()).throw(FileNotFoundError)
+                              if str(path).endswith("task") else real(path)):
+                self.assertEqual(self.lingering(root), [("ambiguous", "task_unlisted")])
+
+    def test_only_exited_workers_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.add_thread(self.zombie_leader(root), 100002, "/test/pfx", state="Z")
+            self.assertEqual(self.lingering(root), [("ambiguous", "no_readable_thread")])
+
+    def test_unreadable_leader_while_attributing_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root)
+            self.add_thread(entry, 100002, "/test/pfx")
+            real = Path.read_bytes
+            def read(path):
+                if path == entry / "stat" and read.count:
+                    raise PermissionError
+                read.count += path == entry / "stat"
+                return real(path)
+            read.count = 0
+            with patch.object(Path, "read_bytes", read):
+                self.assertEqual(self.lingering(root), [("ambiguous", "leader_unreadable")])
+
+    def test_pid_reuse_after_empty_environ_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root, state="S")
+            self.add_thread(entry, 100002, "/test/pfx")
+            real = Path.read_bytes
+            def read(path):
+                data = real(path)
+                if path == entry / "environ":
+                    (entry / "stat").write_text(stat_text(100001, "S", threads=2, started=999))
+                return data
+            with patch.object(Path, "read_bytes", read):
+                self.assertEqual(self.lingering(root), [("ambiguous", "identity_changed")])
+
+    def test_pid_reuse_at_final_leader_check_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root)
+            self.add_thread(entry, 100002, "/test/pfx", state="Z")
+            real = Path.read_bytes
+            def read(path):
+                if path == entry / "stat" and read.count:
+                    return stat_text(100001, "S", threads=2, started=999).encode()
+                read.count += path == entry / "stat"
+                return real(path)
+            read.count = 0
+            with patch.object(Path, "read_bytes", read):
+                self.assertEqual(self.lingering(root), [("ambiguous", "identity_changed")])
+
+    def test_non_utf8_command_name_is_readable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.make_process(root, 100001, "/test/pfx")
+            fields = ["S", "1"] + ["0"] * 15 + ["1", "0", "123"]
+            # comm is cut to 15 bytes, possibly inside a multibyte character.
+            (entry / "stat").write_bytes(b"100001 (\xe3\x83\xb3\xe3\x83) " + " ".join(fields).encode())
+            self.assertEqual(set(snapshot("/test/pfx", root)[0]), {(100001, 123)})
 
     def test_snapshot_lingering_reaches_tracker_blocker(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -619,7 +724,8 @@ class TimingTests(unittest.TestCase):
         self.assertEqual((stop["wall"], stop["elapsed"]), (1003.5, 3.5))
         observation = stop["last_observation"]
         self.assertEqual((observation["kind"], observation["wall"], observation["elapsed"]), ("periodic", 1001.0, 1.0))
-        self.assertEqual(observation["processes"], [{"pid": 10, "started": 10, "image": game.image, "role": "game_image"}])
+        self.assertEqual(observation["processes"], [{"pid": 10, "started": 10, "image": game.image, "static_role": "game_image"}])
+        self.assertEqual(observation["lingering_groups"], 0)
         self.assertFalse(stop["observer_join_timed_out"])
 
     def test_stop_without_launcher_return_or_observation(self):
@@ -645,9 +751,40 @@ class TimingTests(unittest.TestCase):
         self.assertEqual((len(observation["processes"]), observation["omitted"]), (64, 6))
 
     def test_join_timeout_is_reported(self):
-        self.observer.thread = SimpleNamespace(ident=1, join=lambda timeout: None, is_alive=lambda: True)
+        waits = []
+        self.observer.thread = SimpleNamespace(ident=1, join=lambda timeout: waits.append(timeout), is_alive=lambda: True)
         self.observer.stop()
+        self.assertEqual(waits, [2])
         self.assertTrue(events_of(self.output)[-1]["observer_join_timed_out"])
+
+    def test_pre_send_read_after_periodic_is_reported_by_stop(self):
+        observer = Observer({"WINEPREFIX": "/test/pfx", "PROTON_SOFTDENCHI_CLEANUP": "1"}, "/games/launch.exe", self.output)
+        with patch("softdenchi_observer.snapshot", return_value=({}, 0)):
+            observer.poll()
+            self.advance(1)
+            observer.cleaner.reader("/test/pfx")
+        self.advance(1)
+        observer.stop()
+        observation = events_of(self.output)[-1]["last_observation"]
+        self.assertEqual((observation["kind"], observation["wall"], observation["elapsed"]), ("pre_send", 1001.0, 1.0))
+
+    def test_wall_time_does_not_repeat_unchanged_process_events(self):
+        game = process(10, r"Z:\games\launch.exe")
+        with patch("softdenchi_observer.snapshot", return_value=({game.identity: game}, 0)):
+            self.observer.poll()
+            self.advance(1)
+            self.observer.poll()
+        self.assertEqual([event["event"] for event in events_of(self.output)].count("process"), 1)
+
+    def test_lingering_list_in_decision_is_capped(self):
+        found = with_lingering([], *[(pid, 1, "prefix") for pid in range(1, 71)])
+        self.observer.tracker.update(found, 0, 0)
+        self.assertEqual(len(self.observer.tracker.last_decision["lingering_processes"]), 64)
+
+    def test_summary_failure_still_writes_stop(self):
+        with patch.object(Observer, "observation_summary", side_effect=RuntimeError):
+            self.observer.stop()
+        self.assertEqual(events_of(self.output)[-1]["last_observation"], {"error_type": "RuntimeError"})
 
 
 class CleanupTests(unittest.TestCase):
@@ -999,6 +1136,7 @@ class LauncherTests(unittest.TestCase):
         session = SimpleNamespace(env={"PROTON_SOFTDENCHI_OBSERVE": enabled, "WINEPREFIX": "/test/pfx",
                                        "PROTON_SOFTDENCHI_CLEANUP": cleanup},
                                   remote_debug_cmd=None, log_file=io.StringIO(), cmdlineappend=[], run_proc=run_proc)
+        self.log = session.log_file
         with patch.dict(os.environ, {}, clear=True), \
                 patch.object(sys, "argv", ["proton", "run", "/games/launch.exe"]), \
                 patch.object(sys, "stderr", session.log_file):
@@ -1025,6 +1163,17 @@ class LauncherTests(unittest.TestCase):
     def test_thread_start_failure_preserves_game_launch_and_status(self):
         with patch("softdenchi_observer.snapshot", return_value=({}, 0)), \
                 patch("threading.Thread.start", side_effect=RuntimeError):
+            self.assertEqual(self.run_launcher("1", lambda _: 7), 7)
+        stop = [event for event in events_of(self.log) if event.get("event") == "stop"]
+        self.assertEqual(len(stop), 1)
+        self.assertIsNone(stop[0]["launcher_returned_wall"])
+        self.assertIsNone(stop[0]["launcher_returncode"])
+
+    def test_observer_failures_after_launch_keep_the_status(self):
+        observer = unittest.mock.MagicMock()
+        observer.launcher_returned.side_effect = RuntimeError
+        observer.stop.side_effect = RuntimeError
+        with patch("softdenchi_observer.Observer", return_value=observer):
             self.assertEqual(self.run_launcher("1", lambda _: 7), 7)
 
     def test_observer_stops_on_game_launch_exception(self):

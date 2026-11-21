@@ -69,6 +69,11 @@ def read_stat(text):
     return fields[0], int(fields[1]), int(fields[19])
 
 
+def stat_of(path):
+    """Read /proc stat as bytes: comm is a truncated executable name and may not be valid UTF-8."""
+    return path.read_bytes().decode("utf-8", "replace")
+
+
 def read_threads(text):
     """num_threads (field 20): the thread group size, which keeps counting a zombie leader
     while other threads of the group still run."""
@@ -114,12 +119,13 @@ def lingering_group(entry, started, expected):
     except OSError:
         return "ambiguous", "task_unlisted"
     unreadable = False
+    empty = False
     for tid in tids or ():
         if tid == pid:
             continue
         task = entry / "task" / tid
         try:
-            if read_stat((task / "stat").read_text())[0] in {"Z", "X"}:
+            if read_stat(stat_of(task / "stat"))[0] in {"Z", "X"}:
                 continue
             data = (task / "environ").read_bytes()
         except (FileNotFoundError, ProcessLookupError):
@@ -128,7 +134,7 @@ def lingering_group(entry, started, expected):
             unreadable = True
             continue
         try:
-            leader = read_stat((entry / "stat").read_text())
+            leader = read_stat(stat_of(entry / "stat"))
         except (FileNotFoundError, ProcessLookupError):
             return None, "group_ended"
         except (OSError, ValueError, IndexError):
@@ -136,9 +142,13 @@ def lingering_group(entry, started, expected):
         if leader[2] != started:
             return "ambiguous", "identity_changed"
         found = environment_prefix(data, expected)
-        return ("other", "empty_environment") if found is None else (found, "task_environ")
+        if found is None:
+            # An exiting thread's environ also reads empty: try the other threads first.
+            empty = True
+            continue
+        return found, "task_environ"
     try:
-        text = (entry / "stat").read_text()
+        text = stat_of(entry / "stat")
         leader = read_stat(text)
         threads = read_threads(text)
     except (FileNotFoundError, ProcessLookupError):
@@ -146,12 +156,15 @@ def lingering_group(entry, started, expected):
     except (OSError, ValueError, IndexError):
         return "ambiguous", "leader_unreadable"
     if leader[2] != started:
-        return None, "group_ended"
+        return "ambiguous", "identity_changed"
     if threads <= 1:
         return None, "group_ended"
     if tids is None:
         return "ambiguous", reason
-    return "ambiguous", "permission" if unreadable else "no_readable_thread"
+    if unreadable:
+        return "ambiguous", "thread_unreadable"
+    # Every readable thread had an empty environment: the process has none (Wine always sets WINEPREFIX).
+    return ("other", "empty_environment") if empty else ("ambiguous", "no_readable_thread")
 
 
 def executable_identity(entry, references):
@@ -210,11 +223,11 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
         try:
             if entry.stat().st_uid != os.getuid():
                 continue
-            text = (entry / "stat").read_text()
+            text = stat_of(entry / "stat")
             before = read_stat(text)
             if before[0] in {"Z", "X"}:
                 if read_threads(text) >= 2:
-                    linger(found, entry, before[2], expected)
+                    linger(found, entry, before[2], expected, read_threads(text))
                 continue
             try:
                 raw_env = (entry / "environ").read_bytes()
@@ -224,11 +237,16 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
                 # The leader may be exiting: its address space (and so environ) goes before
                 # it becomes a zombie. Other threads can still run the process.
                 try:
-                    text = (entry / "stat").read_text()
+                    text = stat_of(entry / "stat")
                 except (FileNotFoundError, ProcessLookupError):
                     continue
-                if read_stat(text)[2] == before[2] and read_threads(text) >= 2:
-                    linger(found, entry, before[2], expected)
+                if read_threads(text) < 2:
+                    continue
+                if read_stat(text)[2] != before[2]:
+                    found.lingering.append({"pid": int(entry.name), "started": before[2], "threads": read_threads(text),
+                                            "attribution": "ambiguous", "reason": "identity_changed"})
+                else:
+                    linger(found, entry, before[2], expected, read_threads(text))
                 continue
             env = {}
             for item in raw_env.split(b"\0"):
@@ -239,7 +257,7 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
                 continue
             raw = (entry / "cmdline").read_bytes().split(b"\0", 1)[0]
             executable, native_program, executable_error, executable_id = executable_identity(entry, references)
-            after = read_stat((entry / "stat").read_text())
+            after = read_stat(stat_of(entry / "stat"))
             if after[2] != before[2] or after[0] in {"Z", "X"} or not raw:
                 unreadable += 1
                 continue
@@ -255,10 +273,10 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
     return found, unreadable
 
 
-def linger(found, entry, started, expected):
+def linger(found, entry, started, expected, threads):
     attribution, reason = lingering_group(entry, started, expected)
     if attribution is not None:
-        found.lingering.append({"pid": int(entry.name), "started": started,
+        found.lingering.append({"pid": int(entry.name), "started": started, "threads": threads,
                                 "attribution": attribution, "reason": reason})
 
 
@@ -820,10 +838,12 @@ class Observer:
             return None
         processes, unreadable, wall, monotonic, kind = observation
         listed = sorted(processes.values(), key=lambda p: p.pid)
+        # static_role is the image-only classification, not the lineage-aware role of decisions.
         return {"kind": kind, "wall": round(wall, 3), "elapsed": round(monotonic - self.started, 3),
                 "unreadable_processes": unreadable, "omitted": max(0, len(listed) - LINGERING_LIMIT),
+                "lingering_groups": len(getattr(processes, "lingering", ())),
                 "processes": [{"pid": p.pid, "started": p.started, "image": p.image,
-                               "role": self.tracker.role(p)} for p in listed[:LINGERING_LIMIT]]}
+                               "static_role": self.tracker.role(p)} for p in listed[:LINGERING_LIMIT]]}
 
     def stop(self, returncode=None):
         returned = self.launcher_returned_at
