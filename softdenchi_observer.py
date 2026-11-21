@@ -74,6 +74,16 @@ def stat_of(path):
     return path.read_bytes().decode("utf-8", "replace")
 
 
+def has_memory(path):
+    """Whether a task still has its address space (``VmSize`` in status). An exiting task loses it
+    before it becomes a zombie, and its environ then reads empty; a live process whose environment
+    is really empty keeps it."""
+    try:
+        return b"\nVmSize:" in path.read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
 def read_threads(text):
     """num_threads (field 20): the thread group size, which keeps counting a zombie leader
     while other threads of the group still run."""
@@ -81,6 +91,8 @@ def read_threads(text):
 
 
 LINGERING_LIMIT = 64
+IMAGE_LIMIT = 260
+SUMMARY_BYTES = 16384
 
 
 class Found(dict):
@@ -143,7 +155,16 @@ def lingering_group(entry, started, expected):
             return "ambiguous", "identity_changed"
         found = environment_prefix(data, expected)
         if found is None:
-            # An exiting thread's environ also reads empty: try the other threads first.
+            try:
+                memory = has_memory(task / "status")
+            except OSError:
+                unreadable = True
+                continue
+            if memory:
+                # A thread with its address space and an empty environ: the process has none
+                # (Wine always sets WINEPREFIX).
+                return "other", "empty_environment"
+            # An exiting thread: try the other threads.
             empty = True
             continue
         return found, "task_environ"
@@ -163,8 +184,9 @@ def lingering_group(entry, started, expected):
         return "ambiguous", reason
     if unreadable:
         return "ambiguous", "thread_unreadable"
-    # Every readable thread had an empty environment: the process has none (Wine always sets WINEPREFIX).
-    return ("other", "empty_environment") if empty else ("ambiguous", "no_readable_thread")
+    # Threads remain but none could tell: exiting threads read empty, and threads started after
+    # the listing are not in it.
+    return "ambiguous", "exiting_threads" if empty else "no_readable_thread"
 
 
 def executable_identity(entry, references):
@@ -236,16 +258,17 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
             if not raw_env:
                 # The leader may be exiting: its address space (and so environ) goes before
                 # it becomes a zombie. Other threads can still run the process.
+                if raw_env is not None and has_memory(entry / "status"):
+                    continue  # a live process whose environment is really empty
                 try:
                     text = stat_of(entry / "stat")
                 except (FileNotFoundError, ProcessLookupError):
                     continue
-                if read_threads(text) < 2:
-                    continue
                 if read_stat(text)[2] != before[2]:
+                    # Another process now has this PID: it is unread in this pass.
                     found.lingering.append({"pid": int(entry.name), "started": before[2], "threads": read_threads(text),
                                             "attribution": "ambiguous", "reason": "identity_changed"})
-                else:
+                elif read_threads(text) >= 2:
                     linger(found, entry, before[2], expected, read_threads(text))
                 continue
             env = {}
@@ -257,8 +280,14 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
                 continue
             raw = (entry / "cmdline").read_bytes().split(b"\0", 1)[0]
             executable, native_program, executable_error, executable_id = executable_identity(entry, references)
-            after = read_stat(stat_of(entry / "stat"))
-            if after[2] != before[2] or after[0] in {"Z", "X"} or not raw:
+            text = stat_of(entry / "stat")
+            after = read_stat(text)
+            if after[2] == before[2] and (after[0] in {"Z", "X"} or not raw):
+                # A prefix process that began exiting while it was read.
+                found.lingering.append({"pid": int(entry.name), "started": before[2], "threads": read_threads(text),
+                                        "attribution": "prefix", "reason": "exited_while_reading"})
+                continue
+            if after[2] != before[2]:
                 unreadable += 1
                 continue
             process = Process(int(entry.name), after[2], after[1], after[0],
@@ -417,16 +446,22 @@ class Tracker:
         if any(p.identity in self.baseline for p in proxies):
             blockers.append("preexisting_proxy")
         lingering = []
+        exiting = []
         for item in getattr(processes, "lingering", ()):
             identity = (item["pid"], item["started"])
-            if identity in self.signalled:
+            if identity in self.signalled or item["attribution"] == "other":
+                # Our own SIGTERM target finishing its exit, or a group positively read as foreign.
                 continue
-            if identity in self.known:
+            if item["reason"] == "exited_while_reading":
+                exiting.append(item)
+            elif identity in self.known:
                 lingering.append({**item, "attribution": "observed"})
-            elif item["attribution"] in {"prefix", "ambiguous"}:
+            else:
                 lingering.append(item)
         if lingering:
             blockers.append("zombie_leader_with_live_threads")
+        if exiting and "incomplete_proc_snapshot" not in blockers:
+            blockers.append("incomplete_proc_snapshot")
         self.known.update(processes)
         if game:
             self.seen_game = True
@@ -458,8 +493,8 @@ class Tracker:
                     "session_exit_verified": False,
                     "game_handoff_observed": self.seen_handoff,
                     "unreadable_processes": unreadable, "cleanup_requires_revalidation": True}
-        if lingering:
-            decision["lingering_processes"] = sorted(lingering, key=lambda item: item["pid"])[:LINGERING_LIMIT]
+        if lingering or exiting:
+            decision["lingering_processes"] = sorted(lingering + exiting, key=lambda item: item["pid"])[:LINGERING_LIMIT]
         if decision != self.last_decision:
             events.append({"event": "decision", **decision})
         self.last_decision = decision
@@ -839,11 +874,18 @@ class Observer:
         processes, unreadable, wall, monotonic, kind = observation
         listed = sorted(processes.values(), key=lambda p: p.pid)
         # static_role is the image-only classification, not the lineage-aware role of decisions.
+        # Bounded in count and bytes: this is written synchronously on the exit path.
+        entries, size = [], 0
+        for p in listed[:LINGERING_LIMIT]:
+            item = {"pid": p.pid, "started": p.started, "image": p.image[:IMAGE_LIMIT],
+                    "static_role": self.tracker.role(p)}
+            size += len(json.dumps(item, ensure_ascii=True))
+            if size > SUMMARY_BYTES:
+                break
+            entries.append(item)
         return {"kind": kind, "wall": round(wall, 3), "elapsed": round(monotonic - self.started, 3),
-                "unreadable_processes": unreadable, "omitted": max(0, len(listed) - LINGERING_LIMIT),
-                "lingering_groups": len(getattr(processes, "lingering", ())),
-                "processes": [{"pid": p.pid, "started": p.started, "image": p.image,
-                               "static_role": self.tracker.role(p)} for p in listed[:LINGERING_LIMIT]]}
+                "unreadable_processes": unreadable, "omitted": len(listed) - len(entries),
+                "lingering_groups": len(getattr(processes, "lingering", ())), "processes": entries}
 
     def stop(self, returncode=None):
         returned = self.launcher_returned_at

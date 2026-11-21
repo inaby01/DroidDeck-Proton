@@ -2996,6 +2996,15 @@ class Session:
                 argv = [g_proton.wine_bin, "c:\\windows\\system32\\steam.exe"]
 
         observer = None
+
+        def observer_note(message):
+            # log() handles OSError only; a closed stderr raises ValueError. Diagnostics must
+            # never replace the game's status or the original launch exception.
+            try:
+                log(message)
+            except Exception:  # noqa: BLE001, S110 -- see above
+                pass
+
         if (self.env.get("PROTON_SOFTDENCHI_OBSERVE") == "1"
                 or self.env.get("PROTON_SOFTDENCHI_CLEANUP") == "1"):
             try:
@@ -3005,9 +3014,12 @@ class Session:
                                     mirror=sys.stderr, wineserver_path=g_proton.wineserver_bin)
                 observer.start()
             except Exception as exc:
-                log("SoftDenchi observer could not start: " + type(exc).__name__)
+                observer_note("SoftDenchi observer could not start: " + type(exc).__name__)
                 if observer is not None:
-                    observer.stop()
+                    try:
+                        observer.stop()
+                    except Exception as stop_exc:  # noqa: BLE001 -- diagnostics must not block the launch
+                        observer_note("SoftDenchi observer could not stop: " + type(stop_exc).__name__)
                 observer = None
         rc = None
         try:
@@ -3016,13 +3028,13 @@ class Session:
                 try:
                     observer.launcher_returned()
                 except Exception as exc:  # noqa: BLE001 -- diagnostics must not affect the game's status
-                    log("SoftDenchi observer could not record the launcher return: " + type(exc).__name__)
+                    observer_note("SoftDenchi observer could not record the launcher return: " + type(exc).__name__)
         finally:
             if observer is not None:
                 try:
                     observer.stop(returncode=rc)
                 except Exception as exc:  # noqa: BLE001 -- diagnostics must not affect the game's status
-                    log("SoftDenchi observer could not stop: " + type(exc).__name__)
+                    observer_note("SoftDenchi observer could not stop: " + type(exc).__name__)
 
         if remote_debug_proc:
             remote_debug_proc.kill()
