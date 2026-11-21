@@ -15,7 +15,15 @@ from pathlib import Path
 
 from preparation_assets import digest_json
 from preparation_binding import _raw
-from preparation_common import SHA256, VERSION, app_id, fields, require, safe_path
+from preparation_common import (
+    SHA256,
+    VERSION,
+    app_id,
+    fields,
+    input_change,
+    require,
+    safe_path,
+)
 from preparation_customization import plan_customizations
 from preparation_execution import (
     _aliases,
@@ -428,6 +436,7 @@ def interactive_recheck(directory, renderer, config, *, input_stream=None, outpu
                   "reason": {"FEX AppConfig is not empty; configuration not permitted": "fex-appconfig-not-empty",
                              "FEX AppConfig must be owned empty 0700 directory": "fex-appconfig-ownership-or-mode",
                              "private 0700 tool parent required for FEX runtime contract": "tool-parent-not-private-0700"}.get(str(error), "input-rejected"),
+                  **input_change(error),
                   "prefix_reinitialized": False, "preparation_complete": False,
                   "writes": [] if not started else [{"scope": "partial-managed-recheck-preserve"}]}
         if hasattr(error, "tree_diagnostic"):

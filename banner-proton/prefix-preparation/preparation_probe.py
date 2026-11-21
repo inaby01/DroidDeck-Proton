@@ -25,6 +25,7 @@ from preparation_common import (
     app_id,
     checked,
     fields,
+    input_change,
     load_json,
     regular_open,
     require,
@@ -639,7 +640,7 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
         report = {"mode": "probe-material-stopped", "stage": stage, "check": getattr(error, "preparation_check", stage), "error_class": type(error).__name__,
                   "errno": getattr(error, "errno", None), "writes": [], "partial_files_may_exist": started,
-                  "prefix_created": False, "exe_executed": False, "preparation_complete": False}
+                  "prefix_created": False, "exe_executed": False, "preparation_complete": False, **input_change(error)}
         if plan is not None:
             report["destination"] = plan.record["destination"]
         print("処理停止: " + report["check"] + " / " + type(error).__name__ + " / errno=" + str(report["errno"]), file=output)

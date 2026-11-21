@@ -29,6 +29,7 @@ from preparation_common import (
     VERSION,
     checked,
     fields,
+    input_change,
     load_json,
     read_bytes,
     require,
@@ -521,7 +522,7 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
                              "registration source changed": "registration-changed",
                              "registration or executable changed": "target-changed",
                              "single-link regular file required": "input-link-metadata-rejected"}.get(str(error), "input-rejected"),
-                  "preparation_complete": False, "writes": []}
+                  "preparation_complete": False, "writes": [], **input_change(error)}
         if hasattr(error, "installed_tree_diagnostic"):
             report["installed_tree_diagnostic"] = error.installed_tree_diagnostic
         if hasattr(error, "probe_registration_diagnostic"):

@@ -213,7 +213,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         self.assertIn('まだ置かれていません（先に3）', output)
         entry = self.entry(report)
         self.assertEqual(entry['next'], {'next': 'undetermined', 'reason': 'slot-absent'})
-        self.assertEqual(entry['assignment']['kind'], 'none')
+        self.assertEqual((entry['assignment']['kind'], entry['assignment']['current_tool']), ('undetermined', None))
         archive = self.f.fixture.source.archive
         archive.rename(archive.with_suffix('.moved'))
         try:
@@ -223,6 +223,41 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         self.assertEqual(report['global']['payload'], 'unverified')
         self.assertIn('配布物を照合できません', output)
         self.assertEqual(self.entry(report)['next']['next'], 'undetermined')
+
+    def test_slot_mismatch_keeps_the_verified_payload_and_bound_games_stay_in_scope(self):
+        self.run_menu('1\n1\n1\n1\n')
+        import preparation_payload as payload
+        with patch.object(payload, 'verify_fex_runtime_tree',
+                          side_effect=status.require.__globals__['Invalid']('existing installation differs from approved generated trees')):
+            _, report, output = self.status()
+        self.assertEqual((report['global']['payload'], report['global']['slot']), ('verified', 'unverified'))
+        self.assertIsNotNone(report['global']['directory'])
+        self.assertIn('このバンドルの準備用Protonを照合できません（existing installation differs', output)
+        self.assertNotIn('配布物を照合できません', output)
+        entry = self.entry(report)
+        self.assertEqual(entry['assignment']['kind'], 'undetermined')
+        self.assertTrue(entry['assignment']['current_tool'])
+        self.assertEqual(entry['next'], {'next': 'undetermined', 'reason': 'slot-unverified'})
+        self.assertNotIn('対象外', output)
+        archive = self.f.fixture.source.archive
+        archive.rename(archive.with_suffix('.moved'))
+        try:
+            _, report, output = self.status()
+        finally:
+            archive.with_suffix('.moved').rename(archive)
+        entry = self.entry(report)
+        self.assertEqual((entry['assignment']['kind'], entry['next']['next']), ('undetermined', 'undetermined'))
+        self.assertIn('判定できません', output)
+        self.assertNotIn('対象外', output)
+
+    def test_input_changing_during_the_check_is_shown_as_not_checkable(self):
+        self.initialize()
+        with patch.object(status, 'evaluate_resume',
+                          side_effect=status.require.__globals__['Invalid']('input changed during read (mtime_ns,ctime_ns)')):
+            _, report, output = self.status()
+        entry = self.entry(report)
+        self.assertEqual(entry['next'], {'next': 'undetermined', 'reason': 'changing'})
+        self.assertIn('確認できません（動作中または変化中）', output)
 
     def test_record_problems_are_shown_and_the_next_game_follows(self):
         self.initialize()

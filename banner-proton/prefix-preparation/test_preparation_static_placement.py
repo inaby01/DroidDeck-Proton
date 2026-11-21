@@ -506,6 +506,15 @@ class ConfirmedPlanTests(ConfirmedFixture):
         self.assertEqual(dict(excluded), {'50': 'prefix is a symbolic link', str(2**32 - 5): 'two prefix aliases exist',
                                           '60': 'game folder contains tool folders', '61': 'game folder contains tool folders'})
 
+    def test_stop_by_a_changing_input_names_the_fields(self):
+        with patch.object(placement, 'plan_confirmed_placement', side_effect=Invalid('input changed during read (size,mtime_ns)')):
+            _, report, output = self.confirmed_menu('1\n')
+        self.assertEqual(report['error']['reason'], 'input-changed-during-read')
+        self.assertEqual(report['error']['changed_fields'], ['size', 'mtime_ns'])
+        self.assertIn('input-changed-during-read', output)
+        self.assertEqual(placement.input_change(Invalid('other')), {})
+        self.assertEqual(placement.input_change(OSError('input changed during read (size)')), {})
+
     def test_cancel_writes_nothing(self):
         before = self.f.fixture.snapshot()
         for answer in ('q\n', '', '1\nq\n', '1\n', '9\n'):

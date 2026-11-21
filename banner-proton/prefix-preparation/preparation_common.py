@@ -103,6 +103,17 @@ def unchanged(before, after, timestamps=True):
     require(not differing, "input changed during read (" + ",".join(differing) + ")")
 
 
+CHANGED_DURING_READ = "input changed during read ("
+
+
+def input_change(error):
+    """For a stop by ``unchanged``: the fixed reason and the names of the differing fields, else {}."""
+    text = str(error)
+    if type(error) is not Invalid or not text.startswith(CHANGED_DURING_READ) or not text.endswith(")"):
+        return {}
+    return {"reason": "input-changed-during-read", "changed_fields": text[len(CHANGED_DURING_READ):-1].split(",")}
+
+
 def read_bytes(path, limit=MAX_JSON):
     with regular_open(path, limit) as stream:
         before = os.fstat(stream.fileno())

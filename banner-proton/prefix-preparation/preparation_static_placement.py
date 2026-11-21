@@ -13,7 +13,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from preparation_assets import digest_json
-from preparation_common import VERSION, checked, fields, require, safe_path
+from preparation_common import (
+    VERSION,
+    checked,
+    fields,
+    input_change,
+    require,
+    safe_path,
+)
 from preparation_installation import InstallationPlan
 from preparation_payload import verify_tree
 from preparation_probe import verify_probe_registration
@@ -332,7 +339,8 @@ def interactive_static_placement(directory, renderer, config, *, input_stream=No
                        "new prefix required": "prefix-already-exists",
                        "insufficient estimated static placement space": "insufficient-static-capacity",
                        "runtime source/library/label changed since audit": "runtime-identity-changed",
-                       "archive missing or ambiguous": "archive-missing-or-ambiguous"}.get(str(error), "input-rejected")}
+                       "archive missing or ambiguous": "archive-missing-or-ambiguous"}.get(str(error), "input-rejected"),
+                   **input_change(error)}
         if report is None:
             report = {"mode": "static-placement-stopped", "published_tree_or_staging_may_exist": started,
                       "private_records_may_have_changed": started, "prefix_created": False, "binding_written": False,
@@ -473,7 +481,8 @@ def interactive_confirmed_placement(directory, renderer, config, *, input_stream
                        "existing installation differs from approved generated trees": "existing-preparation-tree-differs",
                        "insufficient estimated static placement space": "insufficient-static-capacity",
                        "runtime source/library/label changed since audit": "runtime-identity-changed",
-                       "archive missing or ambiguous": "archive-missing-or-ambiguous"}.get(str(error), "input-rejected")}
+                       "archive missing or ambiguous": "archive-missing-or-ambiguous"}.get(str(error), "input-rejected"),
+                   **input_change(error)}
         if report is None:
             report = {"mode": "confirmed-placement-stopped", "published_tree_or_staging_may_exist": started,
                       "private_records_may_have_changed": started, "prefix_created": False, "binding_written": False,

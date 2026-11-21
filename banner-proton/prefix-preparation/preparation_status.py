@@ -19,7 +19,7 @@ from preparation_binding import (
     plan_binding,
     registered_tool,
 )
-from preparation_common import MAX_JSON, VERSION, require, safe_path
+from preparation_common import MAX_JSON, VERSION, input_change, require, safe_path
 from preparation_dependency_install import describe_error
 from preparation_game_prefix import RECORDS, validate_game_config
 from preparation_one_pass import _game_records, action_text, evaluate_resume
@@ -103,15 +103,18 @@ def _assignment_text(found, text):
     return "別のProtonへの割り当てが3つのファイルで食い違っています（" + files + "。今の名前: " + text(str(found["current_tool"])) + "）"
 
 
-def _slot(config, directory, renderer, steam, environment, runtime_root):
-    """Global check, once: the payload in the asset folder, the runtime, and the placed slot (design 6.2)."""
+def _slot(result, config, directory, renderer, steam, environment, runtime_root):
+    """Global check, once: the payload in the asset folder, the runtime, and the placed slot (design 6.2).
+
+    ``result`` is filled as each part is verified, so a later failure (runtime, slot tree)
+    keeps the verified payload and the slot directory.
+    """
     from preparation_customization import plan_customizations
     from preparation_payload import verify_fex_runtime_tree
     from preparation_recheck import _require_live, read_payload_inventory
     from preparation_runtime_context import plan_runtime_environment
-    result = {"payload": "unverified", "slot": "unverified", "directory": None}
     inventory = read_payload_inventory(config, directory)
-    result["payload"] = "verified"
+    result.update(payload="verified", inventory=inventory)
     runtime = plan_runtime_environment(runtime_root, config["runtime_reference"], environment)
     _require_live(runtime)
     payload = config["payload"]
@@ -121,11 +124,10 @@ def _slot(config, directory, renderer, steam, environment, runtime_root):
     tool = safe_path(steam / "compatibilitytools.d" / custom.directory, steam)
     if not os.path.lexists(tool):
         result["slot"] = "absent"
-        return result, inventory
+        return
     verify_fex_runtime_tree(tool, inventory, custom.overlays)
     registered_tool(steam, custom.directory)
     result["slot"] = "verified"
-    return result, inventory
 
 
 def _describe_steps(steps):
@@ -181,9 +183,10 @@ def interactive_status(directory, renderer, config, *, input_stream=None, output
             stage = "status-payload-and-slot"
             print("配布物・runtime・準備用Protonを照合しています。", file=output, flush=True)
             try:
-                slot, inventory = _slot(config, directory, renderer, steam, environment, runtime_root)
+                _slot(slot, config, directory, renderer, steam, environment, runtime_root)
             except (OSError, ValueError, TypeError, KeyError) as error:
                 slot["error"] = describe_error(error, stage)
+            inventory = slot.pop("inventory", None)
             report["global"] = slot
             if slot["payload"] != "verified":
                 print("このバンドルのProtonの配布物を照合できません（" + text(str(slot["error"]["reason"] or slot["error"]["error_class"])) +
@@ -256,16 +259,21 @@ def _game(key, listed, title, context):
         entry["profile_id"] = profile["profile_id"]
         print("  作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）", file=output)
         stage = "status-assignment"
-        found = assignment(steam, settings, key, slot["directory"] if slot["slot"] == "verified" else None)
+        if slot["slot"] != "verified":
+            # Without a verified slot the comparison with it cannot be made: only the current names are shown.
+            found = {**assignment(steam, settings, key, None), "kind": "undetermined"}
+            entry["assignment"] = found
+            entry["next"] = {"next": "undetermined", "reason": "slot-" + slot["slot"]}
+            print("  割り当て: 今の名前 " + text(str(found["current_tool"] or "なし")) +
+                  "（このバンドルの準備用Protonかどうかは判定できません）", file=output)
+            print("  依存・次にすること: 判定できません（このバンドルの準備用Protonを照合できないため）。", file=output)
+            return entry
+        found = assignment(steam, settings, key, slot["directory"])
         entry["assignment"] = found
         print("  割り当て: " + _assignment_text(found, text), file=output)
         if found["kind"] == "other":
             entry["next"] = {"next": "out-of-scope"}
             print("  このバンドルの対象外です（別のProtonに割り当て済み）。依存と次にすることは表示しません。", file=output)
-            return entry
-        if slot["slot"] != "verified":
-            entry["next"] = {"next": "undetermined", "reason": "slot-" + slot["slot"]}
-            print("  依存・次にすること: 判定できません（このバンドルの準備用Protonを照合できないため）。", file=output)
             return entry
         stage = "status-evaluation"
         compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
@@ -297,7 +305,7 @@ def _game(key, listed, title, context):
                 print("  " + evaluation["next_step"], file=output)
     except (OSError, ValueError, TypeError, KeyError) as error:
         entry["error"] = describe_error(error, stage)
-        changing = str(error) == "input changed during read"
+        changing = bool(input_change(error))
         entry["next"] = {"next": "undetermined", "reason": "changing" if changing else "unreadable"}
         if changing:
             print("  確認できません（動作中または変化中）。ゲームとWineを終了してから、もう一度2を実行してください。", file=output)
@@ -305,4 +313,3 @@ def _game(key, listed, title, context):
             print("  照合できません: " + text(entry["error"]["check"]) + " / " +
                   text(str(entry["error"]["reason"] or entry["error"]["error_class"])), file=output)
     return entry
-
