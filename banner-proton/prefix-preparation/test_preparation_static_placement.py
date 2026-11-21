@@ -406,5 +406,153 @@ class PrivateModeNativeTests(StaticFixture):
         self.assertFalse(self.f.destination().exists())
 
 
+class ConfirmedFixture(StaticFixture):
+    """Operational entry 3: an ordinary registered game (42) stands in for the probe and is only read."""
+
+    def confirmed_plan(self, key='42', exe_root=None):
+        installation = self.f.fixture.plan(registration_id=key, exe_root=exe_root or self.f.exe_root, archive_from_folder=True)
+        return placement.plan_confirmed_placement(installation, self.review, self.f.store_root, self.f.settings)
+
+    def confirmed_apply(self, plan):
+        compatdata = self.f.steam / 'steamapps/compatdata/42'
+        with PrivateStore(self.f.store_root, create=True) as store, store.locked(hashlib.sha256(str(compatdata).encode()).hexdigest()):
+            return placement.apply_static_placement(plan, self.confirmed_plan, store, plan.digest)
+
+    def confirmed_menu(self, text):
+        output = io.StringIO()
+        status, name = placement.interactive_confirmed_placement(self.f.fixture.source.root, self.f.fixture.options['renderer'],
+            self.config, input_stream=io.StringIO(text), output_stream=output, environment=self.environment, steam=self.f.steam,
+            settings=self.f.settings, home=self.home, runtime_root=self.f.root)
+        report = json.loads((self.f.fixture.source.root / name).read_bytes()) if name else None
+        return status, report, output.getvalue()
+
+    def game_files(self):
+        paths = [self.f.exe, self.f.added, self.steam_config, self.games_config]
+        prefix = self.f.steam / 'steamapps/compatdata/42'
+        paths += sorted(prefix.rglob('*')) if prefix.exists() else []
+        return {str(p): (p.read_bytes() if p.is_file() else None, p.stat().st_mtime_ns, p.stat().st_ino) for p in paths}
+
+
+class ConfirmedPlanTests(ConfirmedFixture):
+    def test_ordinary_registration_plans_read_only_under_its_own_key(self):
+        before = self.f.fixture.snapshot()
+        with patch('subprocess.Popen', side_effect=AssertionError('no executable')):
+            plan = self.confirmed_plan()
+        self.assertEqual(before, self.f.fixture.snapshot())
+        summary = plan.summary()
+        self.assertNotIn('probe_registration', summary)
+        self.assertEqual(summary['confirmation_registration']['kind'], 'confirmation-registration')
+        self.assertEqual(summary['confirmation_registration']['app_id'], '42')
+        self.assertEqual(summary['writes'], [])
+        self.assertTrue(plan.installation.archive_from_folder)
+        for key in ('execution_authorized', 'prefix_initialization_authorized', 'binding_authorized'):
+            self.assertFalse(summary[key])
+
+    def test_existing_prefix_is_allowed_and_only_read(self):
+        prefix = self.f.steam / 'steamapps/compatdata/42/pfx'
+        prefix.mkdir(parents=True)
+        (prefix / 'user.reg').write_text('fixture')
+        before = self.f.fixture.snapshot()
+        self.assertEqual(self.confirmed_plan().summary()['confirmation_registration']['app_id'], '42')
+        self.assertEqual(before, self.f.fixture.snapshot())
+
+    def test_probe_registration_is_refused(self):
+        with self.assertRaisesRegex(Invalid, 'probe registrations use the detailed placement'):
+            self.confirmed_plan('43', self.exe.parent)
+
+    def test_two_registrations_of_one_executable_are_ambiguous(self):
+        games = json.loads(self.f.added.read_bytes())
+        games.append({'appid': 44, 'exe': str(self.f.exe), 'name': 'Duplicate'})
+        self.f.added.write_text(json.dumps(games))
+        with self.assertRaisesRegex(Invalid, 'ambiguous confirmation registration'):
+            self.confirmed_plan()
+
+    def test_witness_is_part_of_the_confirmation_digest(self):
+        plan = self.confirmed_plan()
+        installation = plan.installation
+        args = (installation, plan.review, plan.probe, plan.store_root, None, plan.settings)
+        self.assertEqual(plan.digest, placement._signature(*args, 'confirmation'))
+        self.assertNotEqual(plan.digest, placement._signature(*args, 'probe'))
+
+    def test_candidates_exclude_probes_and_unsafe_prefixes_with_reasons(self):
+        base = self.f.steam / 'steamapps/compatdata'
+        base.mkdir(parents=True)
+        other = self.f.root / 'other-games'
+        other.mkdir()
+        games = {
+            '42': {'exe': str(self.f.exe)},
+            '43': {'exe': str(self.exe)},
+            '50': {'exe': str(other / 'a.exe')},
+            str(2**32 - 5): {'exe': str(other / 'b.exe')},
+            '60': {'exe': str(self.f.steam / 'game.exe')},
+            '61': {'exe': str(self.f.root / 'c.exe')},
+        }
+        (base / '50').symlink_to(other)
+        (base / str(2**32 - 5)).mkdir()
+        (base / '-5').mkdir()
+        management = self.home / '.local/state/droiddeck-prefix-preparation/tool-store'
+        selectable, excluded = placement._confirmation_candidates(games, self.f.steam, self.f.settings, management)
+        self.assertEqual(selectable, ['42'])
+        self.assertEqual(dict(excluded), {'50': 'prefix is a symbolic link', str(2**32 - 5): 'two prefix aliases exist',
+                                          '60': 'game folder contains tool folders', '61': 'game folder contains tool folders'})
+
+    def test_cancel_writes_nothing(self):
+        before = self.f.fixture.snapshot()
+        for answer in ('q\n', '', '1\nq\n', '1\n', '9\n'):
+            status, report, output = self.confirmed_menu(answer)
+            if answer == '9\n':
+                self.assertEqual(status, 2)
+                self.assertEqual(report['error']['reason'], 'input-rejected')
+                self.assertEqual([w['scope'] for w in report['writes']], ['report-only'])
+                (self.f.fixture.source.root / report_name(output)).unlink()
+            else:
+                self.assertEqual((status, report), (0, None))
+        self.assertEqual(before, self.f.fixture.snapshot())
+
+    def test_selection_lists_the_ordinary_game_and_says_it_is_not_changed(self):
+        _, _, output = self.confirmed_menu('q\n')
+        self.assertIn('1. Example  [ID 42]', output)
+        self.assertNotIn('ID 43', output)
+        self.assertIn('確認に使うだけで、変更しません', output)
+
+
+def report_name(output):
+    return output.rsplit('結果を保存しました: ', 1)[1].strip()
+
+
+@unittest.skipUnless(sys.platform == 'linux', 'native static placement requires Linux renameat2')
+class ConfirmedNativeTests(ConfirmedFixture):
+    def test_menu_places_without_probe_and_leaves_the_game_untouched(self):
+        prefix = self.f.steam / 'steamapps/compatdata/42/pfx'
+        prefix.mkdir(parents=True)
+        (prefix / 'user.reg').write_text('fixture')
+        before, probe_before = self.game_files(), self.protected()
+        status, report, output = self.confirmed_menu('1\n1\n')
+        self.assertEqual(status, 2)
+        self.assertEqual(report['mode'], 'static-preparation-tool-installed', report)
+        self.assertEqual(report['confirmation_registration']['app_id'], '42')
+        self.assertNotIn('probe_registration', report)
+        self.assertNotIn('followup_plan', report)
+        self.assertEqual(before, self.game_files())
+        self.assertEqual(probe_before, self.protected())
+        self.assertIn('まだ起動しません', output)
+        self.assertTrue(self.f.destination().is_dir())
+        _, again, _ = self.confirmed_menu('1\n')
+        self.assertEqual(again['mode'], 'static-matching-tool-observed')
+
+    def test_change_of_the_confirmation_game_after_preview_publishes_nothing(self):
+        plan = self.confirmed_plan()
+        with self.f.exe.open('ab') as out:
+            out.write(b'changed')
+        with self.assertRaises(Invalid):
+            self.confirmed_apply(plan)
+        self.assertFalse(self.f.destination().exists())
+
+    def test_direct_apply_matches_the_menu_result(self):
+        result = self.confirmed_apply(self.confirmed_plan())
+        self.assertEqual(result['mode'], 'static-preparation-tool-installed')
+        self.assertEqual(result['confirmation_registration']['kind'], 'confirmation-registration')
+
+
 if __name__ == '__main__':
     unittest.main()
