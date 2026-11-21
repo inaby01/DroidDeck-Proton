@@ -770,6 +770,8 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), b'')
         _, report, _, _ = self.run_menu('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
+        self.assertIn('after planned', report['reason'])
+        self.assertEqual(len(self.dll_records()), 1)
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), b'')
 
     def test_failed_record_of_the_creation_keeps_the_file_and_the_created_phase(self):
