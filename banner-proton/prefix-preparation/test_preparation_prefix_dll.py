@@ -186,100 +186,60 @@ def facts(kind='none', identity=None, links=1, data=DATA):
             'measured': measured, 'wine_marker': False}
 
 
-def previous(phase, temporary_identity=None):
-    return {'record_id': dll.ID_PREFIX + '0' * 32, 'phase': phase, 'directory': {'device': 1, 'inode': 2},
-            'temporary': '.prefixdll-' + '0' * 32 + '.tmp', 'temporary_identity': temporary_identity}
-
-
 DIR = {'device': 1, 'inode': 2}
-TEMP = {'device': 1, 'inode': 7}
+
+
+def previous(phase):
+    return {'record_id': dll.ID_PREFIX + '0' * 32, 'phase': phase, 'directory': dict(DIR)}
 
 
 class ResumeTests(unittest.TestCase):
-
-    def action(self, latest, current, temporary=None, invalid=0, directory=None):
-        return dll.resume_action(latest, invalid, directory or DIR, current, asset(), temporary or {'kind': 'none'})
+    def action(self, latest, current, invalid=0, directory=None):
+        return dll.resume_action(latest, invalid, directory or DIR, current, asset())
 
     def test_resume_rows(self):
-        own1 = {'kind': 'own', 'identity': TEMP, 'links': 1}
-        own2 = {'kind': 'own', 'identity': TEMP, 'links': 2}
-        unknown = {'kind': 'unknown', 'identity': {'device': 1, 'inode': 8}, 'links': 1}
         cases = [
             ((None, facts()), 'install'),
-            ((None, facts('file')), 'skip'),
-            ((previous('present-verified', TEMP), facts('file')), 'skip'),
-            ((previous('failed'), facts()), 'install'),
-            ((previous('present-verified', TEMP), facts()), 'stop'),
-            ((previous('failed'), facts('file')), 'stop'),
             ((previous('planned'), facts()), 'install'),
-            ((previous('planned'), facts(), unknown), 'stop'),
-            ((previous('temp-created', TEMP), facts(), own1), 'remove-temporary-then-install'),
-            ((previous('temp-written', TEMP), facts(), own1), 'remove-temporary-then-install'),
-            ((previous('temp-written', TEMP), facts(), unknown), 'stop'),
-            ((previous('temp-created', TEMP), facts()), 'install'),
-            ((previous('temp-written', TEMP), facts('file', TEMP, 2), own2), 'remove-temporary-then-recheck'),
-            ((previous('temp-created', TEMP), facts('file', TEMP, 2), own2), 'stop'),
-            ((previous('temp-written', TEMP), facts('file', {'device': 1, 'inode': 5}, 2), own2), 'stop'),
-            ((previous('temp-written', TEMP), facts('file', TEMP, 2, DATA + b'x'), own2), 'stop'),
-            ((previous('temp-written', TEMP), facts('file')), 'skip'),
-            ((previous('linked', TEMP), facts('file')), 'skip'),
-            ((previous('linked', TEMP), facts()), 'stop'),
-            ((previous('temp-created', TEMP), facts('file')), 'stop'),
-            ((None, facts(), unknown), 'stop'),
+            ((previous('failed'), facts()), 'install'),
+            ((previous('linked'), facts()), 'stop'),
+            ((previous('present-verified'), facts()), 'stop'),
+            ((None, facts('file')), 'skip'),
+            ((previous('planned'), facts('file')), 'skip'),
+            ((previous('linked'), facts('file')), 'skip'),
+            ((previous('failed'), facts('file')), 'skip'),
+            ((previous('present-verified'), facts('file')), 'skip'),
             ((None, facts('file', links=2)), 'stop'),
-            ((previous('temp-written', TEMP), facts('file', TEMP, 1), own1), 'stop'),
-            ((previous('linked', TEMP), facts(), own1), 'stop'),
-            ((previous('failed', TEMP), facts(), own1), 'remove-temporary-then-install'),
-            ((previous('failed', TEMP), facts(), unknown), 'stop'),
-            ((previous('failed', TEMP), facts('file'), own1), 'stop'),
+            ((previous('planned'), facts('file', data=DATA + b'x')), 'stop'),
+            ((None, {'kind': 'symlink', 'name': 'mfc42.dll'}), 'stop'),
         ]
         for args, expected in cases:
             with self.subTest(args=args):
                 self.assertEqual(self.action(*args)[0], expected)
+        self.assertEqual(self.action(previous('planned'), facts('file')),
+                         ('skip', 'placed-before-the-record-was-completed'))
         self.assertEqual(self.action(None, facts(), invalid=1), ('stop', 'invalid-prefix-dll-record-present'))
         self.assertEqual(self.action(previous('failed'), facts(), directory={'device': 1, 'inode': 3}),
                          ('stop', 'syswow64-replaced-since-previous-record'))
 
 
-class TemporaryFactsTests(unittest.TestCase):
-    def test_only_the_recorded_identity_is_own(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            name = '.prefixdll-' + '0' * 32 + '.tmp'
-            (root / name).write_bytes(b'x')
-            info = (root / name).stat()
-            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                mine = previous('temp-written', {'device': info.st_dev, 'inode': info.st_ino})
-                self.assertEqual(dll._temporary_facts(fd, mine)['kind'], 'own')
-                self.assertEqual(dll._temporary_facts(fd, previous('temp-written', {'device': info.st_dev, 'inode': 1}))['kind'],
-                                 'unknown')
-                self.assertEqual(dll._temporary_facts(fd, previous('planned'))['kind'], 'unknown')
-                (root / name).unlink()
-                (root / name).symlink_to(root / 'elsewhere')
-                self.assertEqual(dll._temporary_facts(fd, mine)['kind'], 'unknown')
-                (root / name).unlink()
-                self.assertEqual(dll._temporary_facts(fd, mine), {'kind': 'none'})
-            finally:
-                os.close(fd)
-
-
 class RecordTests(unittest.TestCase):
     def test_record_shape(self):
-        token = 'a' * 32
-        record = {'schema_version': 1, 'tool_version': '0.29.0', 'scope': dll.SCOPE, 'record_id': dll.ID_PREFIX + token,
+        record = {'schema_version': 1, 'tool_version': '0.29.0', 'scope': dll.SCOPE, 'record_id': dll.ID_PREFIX + 'a' * 32,
                   'created_ns': 1, 'app_id': '42', 'trial_id': 'gprefix-x', 'dependency_id': 'mfc42-prefix',
                   'recipe_revision': 1, 'recipe_digest': 'b' * 64, 'asset_sha256': 'c' * 64, 'input_digest': 'd' * 64,
                   'destination': 'syswow64', 'name': 'mfc42.dll', 'directory': {'device': 1, 'inode': 2},
-                  'temporary': '.prefixdll-' + token + '.tmp', 'temporary_identity': None, 'phase': 'planned',
-                  'resumed_from': None, 'error': None, 'preparation_complete': False}
+                  'file_identity': None, 'phase': 'planned', 'resumed_from': None, 'error': None,
+                  'preparation_complete': False}
         dll.validate_prefix_dll_record(copy.deepcopy(record))
-        for change in ({'phase': 'temp-created'}, {'name': 'MFC42.dll'}, {'temporary': '.other.tmp'},
+        placed = {'device': 1, 'inode': 3}
+        for change in ({'phase': 'linked'}, {'phase': 'planned', 'file_identity': placed}, {'name': 'MFC42.dll'},
                        {'preparation_complete': True}, {'destination': 'system32'}, {'phase': 'unknown'},
-                       {'temporary_identity': {'device': 1}}):
+                       {'phase': 'failed', 'file_identity': placed}, {'phase': 'linked', 'file_identity': {'device': 1}}):
             with self.subTest(change=change), self.assertRaises((Invalid, TypeError, KeyError)):
                 dll.validate_prefix_dll_record({**copy.deepcopy(record), **change})
-        dll.validate_prefix_dll_record({**record, 'phase': 'temp-created', 'temporary_identity': {'device': 1, 'inode': 3}})
+        dll.validate_prefix_dll_record({**record, 'phase': 'linked', 'file_identity': placed})
+        dll.validate_prefix_dll_record({**record, 'phase': 'present-verified', 'file_identity': placed})
         dll.validate_prefix_dll_record({**record, 'phase': 'failed'})
 
 

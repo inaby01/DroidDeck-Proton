@@ -1070,26 +1070,24 @@ folder. `mfc-local` stays reserved and blocked.
   dependency check and in the readiness callback before each settings write.
 - Copy: under the private and DroidDeck locks, with the managed recheck guard and a clear
   process view. Every step works relative to one opened `syswow64` whose device and
-  inode are part of the plan. A temporary file named after the record is created with
-  `O_EXCL|O_NOFOLLOW`; its identity is recorded before anything is written; the copy is
-  read back and compared, the guard, process view, directory identity, the absence of
-  the destination (any case) and the temporary file identity are checked again, and the
-  file is placed with `linkat`, which never replaces an existing name. Then only the
-  temporary name is removed. A filesystem without hard links fails the copy; no other
-  placement is tried.
-- Records: `prefix-dlls` (phases `planned`, `temp-created`, `temp-written`, `linked`,
-  `present-verified`, `failed`); the temporary file is `.prefixdll-<hex>.tmp`. A copy that
-  never linked ends `failed` and removes its temporary file; after the link the
-  destination is never removed. The asset is limited to 64 MiB.
+  inode are part of the plan. The asset is written into an unnamed file created in that
+  directory (`O_TMPFILE`), read back and compared through the same descriptor; then the
+  guard, process view, directory identity and the absence of the destination (any case)
+  are checked again, and that very file is named with `linkat` through `/proc/self/fd`
+  (`AT_SYMLINK_FOLLOW`), which never replaces an existing name. No temporary name exists,
+  so nothing is ever removed by name and an interrupted copy leaves nothing behind. A
+  filesystem or sandbox without `O_TMPFILE` or this link fails the copy; no other
+  placement is tried. The asset is limited to 64 MiB.
+- Records: `prefix-dlls` (phases `planned`, `linked`, `present-verified`, `failed`; the
+  placed file's identity is recorded from the link on). A copy that never linked ends
+  `failed`; after the link the destination is never removed.
 - Resume: the latest record of the same initialization, dependency and destination
-  decides with the current state. An interrupted copy whose temporary name is still the
-  recorded file is removed and copied again (also after a failed copy that could not
-  remove it); the previous temporary file is removed before a new record is written. A
-  link interrupted before the temporary name was removed is completed by removing only
-  that name, without a new record (the result keeps it); a destination already verified
-  is skipped. A temporary name that is not the recorded file, a replaced `syswow64`, a
-  record for another recipe or asset, an unreadable record or any other combination
-  stops and nothing is repaired.
+  decides with the current state. A destination matching the declaration is accepted
+  whatever the phase (a stop between the link and its record leaves `planned`); an absent
+  destination is copied again after no record, `planned` or `failed`, and stops after
+  `linked` or `present-verified` (it disappeared). A replaced `syswow64`, a record for
+  another recipe or asset, an unreadable record, or an incompatible destination stops and
+  nothing is repaired.
 - Menu 12: the confirmation lists each DLL (name, asset hash, destination); the fixed
   values gain `dlls` (recipe digest and measured asset per DLL); a missing or different
   asset stops before anything is written, also when resuming a game whose DLL is already

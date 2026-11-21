@@ -6,11 +6,13 @@ no DLL overrides, no registration, no overwrite, replacement or removal of an ex
 file, no game folder change, no Wine. A name that the selected Proton ships as a builtin
 is refused (a native copy would hide the builtin).
 
-The copy goes through a temporary file created next to the destination, whose identity is
-recorded before anything is written, then ``linkat`` (which never replaces an existing
-name). Every step works relative to one opened ``syswow64`` directory whose identity is
-part of the plan. An interrupted copy is resumed from the private record, by identity
-only, never by name alone.
+The copy is written into an unnamed file (``O_TMPFILE``) in the opened ``syswow64``,
+compared through the same descriptor, and that very file is given its name with
+``linkat`` through ``/proc/self/fd`` (which never replaces an existing name). No temporary
+name exists, so nothing is ever removed by name, and an interrupted copy leaves nothing
+behind. Every step works relative to one opened ``syswow64`` whose identity is part of the
+plan. A filesystem or sandbox without ``O_TMPFILE`` or that link fails the copy; no other
+placement is tried.
 
 ``present-verified`` means a match with the declaration; whether a game loads the file is
 only observable at launch.
@@ -55,8 +57,7 @@ REFERENCE = "kernel32.dll"
 NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,59}\.(?i:dll)\Z", re.ASCII)
 LIMIT = 64 * 1024 * 1024
 RESERVE = 16 * 1024 * 1024
-PHASES = ("planned", "temp-created", "temp-written", "linked", "present-verified", "failed")
-INTERRUPTED = ("planned", "temp-created", "temp-written", "linked")
+PHASES = ("planned", "linked", "present-verified", "failed")
 BUILTIN_ROOTS = ("files/lib/wine/", "files/share/default_pfx")
 WINE_MARKERS = (b"Wine builtin DLL", b"Wine placeholder DLL")
 
@@ -230,8 +231,7 @@ def _identity_value(value):
 def validate_prefix_dll_record(record):
     fields(record, ("schema_version", "tool_version", "scope", "record_id", "created_ns", "app_id", "trial_id",
                     "dependency_id", "recipe_revision", "recipe_digest", "asset_sha256", "input_digest", "destination",
-                    "name", "directory", "temporary", "temporary_identity", "phase", "resumed_from", "error",
-                    "preparation_complete"))
+                    "name", "directory", "file_identity", "phase", "resumed_from", "error", "preparation_complete"))
     require(record["schema_version"] == 1 and type(record["tool_version"]) is str and record["scope"] == SCOPE,
             "invalid prefix DLL record")
     _record_id(record["record_id"])
@@ -245,12 +245,12 @@ def validate_prefix_dll_record(record):
     require(record["destination"] == DESTINATION and type(record["name"]) is str and NAME.fullmatch(record["name"]) and
             record["name"] == record["name"].lower(), "invalid record destination")
     _identity_value(record["directory"])
-    require(record["temporary"] == "." + ID_PREFIX + record["record_id"][len(ID_PREFIX):] + ".tmp", "invalid temporary name")
-    if record["temporary_identity"] is not None:
-        _identity_value(record["temporary_identity"])
     require(record["phase"] in PHASES, "invalid record phase")
-    require((record["temporary_identity"] is None) == (record["phase"] == "planned") or
-            record["phase"] == "failed", "temporary identity must follow creation")
+    # The placed file's identity is known exactly from the link on.
+    require((record["file_identity"] is not None) == (record["phase"] in ("linked", "present-verified")) or
+            record["phase"] == "failed" and record["file_identity"] is None, "file identity must follow the link")
+    if record["file_identity"] is not None:
+        _identity_value(record["file_identity"])
     if record["resumed_from"] is not None:
         _record_id(record["resumed_from"])
     if record["error"] is not None:
@@ -268,20 +268,14 @@ def history(store, key, trial_id, dependency_id, name):
     return sorted(items, key=lambda item: item["created_ns"]), invalid
 
 
-def _temporary_facts(fd, record):
-    """Whether the temporary name of a record exists and is still the file the record created."""
-    try:
-        info = os.stat(record["temporary"], dir_fd=fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return {"kind": "none"}
-    own = (record["temporary_identity"] is not None and stat.S_ISREG(info.st_mode) and
-           _identity(info) == record["temporary_identity"])
-    return {"kind": "own" if own else "unknown", "identity": _identity(info), "links": info.st_nlink}
+def resume_action(latest, invalid, directory, facts, spec):
+    """Design 7: (action, reason), action install / skip / stop.
 
-
-def resume_action(latest, invalid, directory, facts, spec, temporary):
-    """Design 7: (action, reason). Actions: install, skip, remove-temporary-then-install,
-    remove-temporary-then-recheck, stop. ``temporary`` describes the latest record's temporary name."""
+    The copy has no temporary name, so an interrupted copy leaves either nothing or the
+    placed file: a destination matching the declaration is accepted whatever the phase
+    (``planned`` covers a stop between the link and its record); an absent destination is
+    copied again unless a past record placed it (it disappeared since).
+    """
     if invalid:
         return "stop", "invalid-prefix-dll-record-present"
     if latest is not None and latest["directory"] != directory:
@@ -289,33 +283,9 @@ def resume_action(latest, invalid, directory, facts, spec, temporary):
     found = state_of(facts, spec)
     current = found["state"] + (":" + found["reason"] if "reason" in found else "")
     phase = latest and latest["phase"]
-    if phase in INTERRUPTED:
-        if phase == "planned":
-            if temporary["kind"] != "none":
-                return "stop", "temporary-name-without-recorded-identity"
-            if current == "absent":
-                return "install", None
-        elif temporary["kind"] == "own" and phase in ("temp-created", "temp-written"):
-            pair = (facts["kind"] == "file" and facts["identity"] == latest["temporary_identity"] and
-                    temporary["links"] == 2 and facts["links"] == 2 and matches_asset(facts, spec))
-            if phase == "temp-written" and pair:
-                return "remove-temporary-then-recheck", "interrupted-between-link-and-unlink"
-            if current == "absent" and temporary["links"] == 1:
-                return "remove-temporary-then-install", "interrupted-before-link"
-        elif temporary["kind"] == "none":
-            if current == "absent" and phase in ("temp-created", "temp-written"):
-                return "install", None
-            if current == "present-verified" and phase in ("temp-written", "linked"):
-                return "skip", "interrupted-after-link"
-        return "stop", "previous-prefix-dll-" + phase + "-state-" + current
-    if phase == "failed" and temporary["kind"] == "own" and temporary["links"] == 1 and current == "absent":
-        # A failed copy whose temporary file could not be removed then: still the recorded file.
-        return "remove-temporary-then-install", "failed-copy-left-its-temporary-file"
-    if temporary["kind"] != "none":
-        return "stop", "temporary-name-present"
-    if current == "present-verified" and phase in (None, "present-verified"):
-        return "skip", None
-    if current == "absent" and phase in (None, "failed"):
+    if current == "present-verified":
+        return "skip", None if phase in (None, "present-verified") else "placed-before-the-record-was-completed"
+    if current == "absent" and phase in (None, "planned", "failed"):
         return "install", None
     return "stop", "prefix-dll-state-" + current + ("" if phase is None else " after " + phase)
 
@@ -378,7 +348,7 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
     else:
         state = {"state": "uninspected", "reason": "target-process-view-not-clear"}
     name = target_name(item)
-    latest, invalid, facts, temporary = None, 0, {"kind": "none"}, {"kind": "none"}
+    latest, invalid, facts = None, 0, {"kind": "none"}
     identity = state.get("directory")
     if identity is None or state["state"] == "uninspected":
         action, reason = "stop", "prefix-dll-state-" + state["state"] + ":" + str(state.get("reason"))
@@ -396,12 +366,10 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
             try:
                 require(_identity(os.fstat(fd)) == identity, "syswow64 changed during planning")
                 facts = examine(fd, name)
-                if latest is not None:
-                    temporary = _temporary_facts(fd, latest)
             finally:
                 os.close(fd)
             # The common conditions (design 7 step 1: view, layout, builtin names) were checked above.
-            action, reason = resume_action(latest, invalid, identity, facts, spec, temporary)
+            action, reason = resume_action(latest, invalid, identity, facts, spec)
         if action == "stop" and reason not in blockers:
             blockers.append(reason if reason.startswith("prefix-dll") else "prefix-dll-" + reason)
     capacity = {**_capacity(((base.compatdata, (spec["expected_size"] or 0) + RESERVE),)), "reserve_bytes": RESERVE}
@@ -409,30 +377,34 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
         blockers.append("insufficient-capacity")
     signature = {"version": VERSION, "scope": SCOPE, "recheck_plan": base.digest, "recipe": digest_json(item),
                  "measured": report["measured"], "state": digest_json(state), "directory": identity,
-                 "latest": latest and digest_json(latest), "facts": digest_json(facts), "temporary": digest_json(temporary),
+                 "latest": latest and digest_json(latest), "facts": digest_json(facts),
                  "action": action, "capacity_sufficient": capacity["sufficient"], "blockers": sorted(blockers)}
     return PrefixDllPlan(digest_json(signature), base, item, directory, report["measured"], state, identity, latest,
                          action, reason, capacity, tuple(sorted(blockers)))
 
 
+def _same(measured, spec):
+    return (measured["size"], measured["sha256"], measured["pe_machine"]) == (
+        spec["expected_size"], spec["expected_sha256"], spec["pe_machine"])
+
+
 class PrefixDllSession:
-    """One guarded copy (or interrupted-copy completion) under the caller's private and DroidDeck locks."""
+    """One guarded copy under the caller's private and DroidDeck locks."""
 
     def __init__(self, plan, store, refresh, confirmation, stop_check):
         from preparation_recheck import RecheckSession
         require(isinstance(plan, PrefixDllPlan), "trusted prefix DLL plan required")
         self.plan, self.store, self.refresh, self.confirmation, self.stop = plan, store, refresh, confirmation, stop_check
         self.base_guard = RecheckSession(plan.recheck, store, None, None, stop_check)
-        self.hash, self.linked, self.temporary_identity = None, False, None
+        self.hash, self.linked = None, False
         p = plan.recheck
-        token = secrets.token_hex(16)
-        self.record = {"schema_version": 1, "tool_version": VERSION, "scope": SCOPE, "record_id": ID_PREFIX + token,
-                       "created_ns": time.time_ns(), "app_id": p.record["app_id"], "trial_id": p.record["trial_id"],
+        self.record = {"schema_version": 1, "tool_version": VERSION, "scope": SCOPE,
+                       "record_id": ID_PREFIX + secrets.token_hex(16), "created_ns": time.time_ns(),
+                       "app_id": p.record["app_id"], "trial_id": p.record["trial_id"],
                        "dependency_id": plan.item["dependency_id"], "recipe_revision": plan.item["revision"],
                        "recipe_digest": digest_json(plan.item), "asset_sha256": plan.item["asset"]["expected_sha256"],
                        "input_digest": plan.digest, "destination": DESTINATION, "name": target_name(plan.item),
-                       "directory": dict(plan.directory), "temporary": "." + ID_PREFIX + token + ".tmp",
-                       "temporary_identity": None, "phase": "planned",
+                       "directory": dict(plan.directory), "file_identity": None, "phase": "planned",
                        "resumed_from": plan.latest and plan.latest["record_id"], "error": None,
                        "preparation_complete": False}
 
@@ -453,114 +425,56 @@ class PrefixDllSession:
         require(stat.S_ISDIR(current.st_mode) and _identity(current) == _identity(os.fstat(fd)) == self.plan.directory,
                 "syswow64 replaced")
 
-    def _remove_temporary(self, fd, name, identity):
-        """Only a temporary name that is still the recorded file; the destination name is never removed."""
-        try:
-            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return False
-        if not (stat.S_ISREG(info.st_mode) and _identity(info) == identity):
-            return False
-        os.unlink(name, dir_fd=fd)
-        return True
-
     def apply(self):
         p = self.plan
         require(self.hash is None and self.confirmation == p.digest, "exact unused confirmation required")
-        require(p.action in ("install", "remove-temporary-then-install", "remove-temporary-then-recheck"),
-                "prefix DLL plan writes nothing")
+        require(p.action == "install", "prefix DLL plan writes nothing")
         require(not p.blockers, "prefix DLL plan blocked")
         require(self.refresh().digest == p.digest, "prefix DLL plan changed")
         self._guard()
         fd = os.open(system_directory(p.recheck.compatdata), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             self._directory(fd)
-            if p.action == "remove-temporary-then-recheck":
-                return self._complete_link(fd)
-            if p.action == "remove-temporary-then-install":
-                # Before any new record: interrupted after this, the previous record still resumes by the table.
-                require(self._remove_temporary(fd, p.latest["temporary"], p.latest["temporary_identity"]),
-                        "previous temporary file changed")
-                os.fsync(fd)
             return self._install(fd)
         finally:
             os.close(fd)
 
-    def _complete_link(self, fd):
-        """A previous run linked the destination and stopped before removing its temporary name.
-
-        No new record is written (design 7): only the previous temporary name is removed and
-        the destination judged again; the result is kept in the menu result, the previous
-        record stays as it is. Interrupted after the removal, the previous record resumes as
-        "linked, temporary name gone".
-        """
-        latest, name = self.plan.latest, self.record["name"]
-        result = {"phase": "unchanged", "record_written": False, "resumed_from": latest["record_id"],
-                  "removed_temporary": None, "state": None, "error": None}
-        try:
-            self._guard()
-            self._directory(fd)
-            facts = examine(fd, name)
-            require(facts["kind"] == "file" and facts["identity"] == latest["temporary_identity"] and facts["links"] == 2 and
-                    matches_asset(facts, self.plan.item["asset"]), "previous link changed")
-            require(self._remove_temporary(fd, latest["temporary"], latest["temporary_identity"]), "previous temporary file changed")
-            os.fsync(fd)
-            result["removed_temporary"] = latest["temporary"]
-            self._guard()
-            self._directory(fd)
-            result["state"] = state_of(examine(fd, name), self.plan.item["asset"])
-            require(self.stop.check()["clear_in_view"], "target process view not clear")
-            if result["state"]["state"] == "present-verified":
-                result["phase"] = "present-verified"
-        except (OSError, ValueError, TypeError, KeyError) as error:
-            result["error"] = {"check": "complete-previous-link", "error_class": type(error).__name__,
-                               "errno": getattr(error, "errno", None)}
-        return result
-
     def _install(self, fd):
         spec, name = self.plan.item["asset"], self.record["name"]
-        self._save()  # planned: directory identity and temporary name, before anything is created
+        self._save()  # planned, before anything is created
+        unnamed = None
         try:
-            created = os.open(self.record["temporary"], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
-                              dir_fd=fd)
-            with os.fdopen(created, "wb") as out:
-                self.temporary_identity = _identity(os.fstat(out.fileno()))
-                self.record.update(temporary_identity=dict(self.temporary_identity), phase="temp-created")
-                self._save()  # identity first: an interrupted copy is attributable without trusting the name
+            # An unnamed file in syswow64: it disappears by itself unless it is linked below.
+            unnamed = os.open(".", os.O_TMPFILE | os.O_RDWR, 0o644, dir_fd=fd)
+            with os.fdopen(os.dup(unnamed), "r+b") as out:
                 with regular_open(source_path(self.plan.asset_root, spec), LIMIT) as source:
                     copied = measure_stream(source, LIMIT, "pe", out)
                 out.flush()
                 os.fsync(out.fileno())
-            require((copied["size"], copied["sha256"], copied["pe_machine"]) ==
-                    (spec["expected_size"], spec["expected_sha256"], spec["pe_machine"]), "asset changed while copying")
-            self.record["phase"] = "temp-written"
-            self._save()
-            check = os.open(self.record["temporary"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-            with os.fdopen(check, "rb") as stream:
-                info = os.fstat(stream.fileno())
-                require(_identity(info) == self.temporary_identity and info.st_nlink == 1, "temporary file replaced")
-                written = measure_stream(stream, LIMIT, "pe")
-            require((written["size"], written["sha256"], written["pe_machine"]) ==
-                    (spec["expected_size"], spec["expected_sha256"], spec["pe_machine"]), "temporary file differs from the asset")
-            # Right before link: guard, process view, directory, destination absent (any case), temporary identity.
+                require(_same(copied, spec), "asset changed while copying")
+                # Read back through the same descriptor: the content that will be linked.
+                require(_same(measure_stream(out, LIMIT, "pe"), spec), "copied file differs from the asset")
+            created = os.fstat(unnamed)
+            require(stat.S_ISREG(created.st_mode) and created.st_nlink == 0, "copied file is not unnamed")
+            # Right before link: guard, process view, directory, destination absent (any case).
             self._guard()
             self._directory(fd)
             require(not _matches(fd, name), "destination appeared")
-            current = os.stat(self.record["temporary"], dir_fd=fd, follow_symlinks=False)
-            require(_identity(current) == self.temporary_identity, "temporary file replaced")
-            os.link(self.record["temporary"], name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            # Links the verified file itself (its descriptor), never a name; an existing name is never replaced.
+            os.link("/proc/self/fd/" + str(unnamed), name, dst_dir_fd=fd, follow_symlinks=True)
             self.linked = True
             placed = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            current = os.stat(self.record["temporary"], dir_fd=fd, follow_symlinks=False)
-            require(_identity(placed) == _identity(current) == self.temporary_identity and placed.st_nlink == 2,
-                    "linked file differs from the temporary file")
-            os.unlink(self.record["temporary"], dir_fd=fd)
+            require(_identity(placed) == _identity(os.fstat(unnamed)) and placed.st_nlink == 1,
+                    "linked file differs from the copied file")
             os.fsync(fd)
-            self.record["phase"] = "linked"
+            self.record.update(phase="linked", file_identity=_identity(placed))
             self._save()
-            return self._post(fd)
         except (OSError, ValueError, TypeError, KeyError) as error:
-            return self._fail("copy", error, fd)
+            return self._fail("copy", error)
+        finally:
+            if unnamed is not None:
+                os.close(unnamed)
+        return self._post(fd)
 
     def _post(self, fd):
         try:
@@ -577,15 +491,8 @@ class PrefixDllSession:
         except (OSError, ValueError, TypeError, KeyError) as error:
             return self._fail("post-inspection", error)
 
-    def _fail(self, check, error, fd=None):
-        if fd is not None and self.temporary_identity is not None:
-            try:
-                self._directory(fd)
-                if self._remove_temporary(fd, self.record["temporary"], self.temporary_identity):
-                    os.fsync(fd)
-            except (OSError, Invalid):
-                pass  # kept: the record names it with its identity; the next run removes it only if it still matches
-        # After the link the destination stays; only a copy that never linked is a failure.
+    def _fail(self, check, error):
+        # Nothing to clean up: an unlinked copy has no name. After the link the destination stays.
         if not self.linked:
             self.record["phase"] = "failed"
         self.record["error"] = {"check": check, "error_class": type(error).__name__, "errno": getattr(error, "errno", None)}
