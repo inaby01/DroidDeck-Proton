@@ -1344,9 +1344,10 @@ class EndToEndTests(unittest.TestCase):
         return found
 
     def attempt(self, found, after_first=None):
+        # /proc order decides which proxy is signalled first: act on that one.
         def send(fd, signum, info, flags):
             if after_first is not None and send.count == 0:
-                after_first()
+                after_first(fd - 1000)
             send.count += 1
         send.count = 0
         with patch.object(os, "pidfd_open", create=True, side_effect=lambda pid, flags: pid + 1000), \
@@ -1359,29 +1360,32 @@ class EndToEndTests(unittest.TestCase):
     def test_two_proxies_receive_one_batch(self):
         self.assertEqual(self.attempt(self.armed()), 2)
 
-    def test_reused_pid_of_signalled_parent_stops_the_batch(self):
+    def test_reused_pid_of_signalled_proxy_stops_the_batch(self):
         found = self.armed()
-        entry = self.root / "20"
+        signalled = []
         real = Path.read_bytes
         def read(path):
             data = real(path)
-            if path == entry / "environ" and not data:
-                # While the old parent is read, a new process takes its PID.
+            if signalled and path == self.root / str(signalled[0]) / "environ" and not data:
+                # While the old proxy is read, a new process takes its PID.
                 fields = ["S", "70"] + ["0"] * 15 + ["1", "0", "99"]
-                (entry / "stat").write_text("20 (p) " + " ".join(fields))
+                (path.parent / "stat").write_text(f"{signalled[0]} (p) " + " ".join(fields))
             return data
+        def exited(pid):
+            # After the SIGTERM the proxy's address space is gone (empty environ).
+            signalled.append(pid)
+            (self.root / str(pid) / "environ").write_bytes(b"")
         with patch.object(Path, "read_bytes", read):
-            # After the SIGTERM the parent's address space is gone (empty environ).
-            self.assertEqual(self.attempt(found, lambda: (entry / "environ").write_bytes(b"")), 1)
+            self.assertEqual(self.attempt(found, exited), 1)
 
-    def test_signalled_parent_exiting_with_same_identity_still_reaches_child(self):
+    def test_signalled_proxy_exiting_with_same_identity_does_not_stop_batch(self):
         found = self.armed()
-        # After the SIGTERM the parent's address space is gone; same PID and start time.
-        self.assertEqual(self.attempt(found, lambda: (self.root / "20" / "environ").write_bytes(b"")), 2)
+        # After the SIGTERM the proxy's address space is gone; same PID and start time.
+        self.assertEqual(self.attempt(found, lambda pid: (self.root / str(pid) / "environ").write_bytes(b"")), 2)
 
-    def test_parent_gone_after_signal_still_reaches_child(self):
+    def test_signalled_proxy_gone_does_not_stop_batch(self):
         found = self.armed()
-        self.assertEqual(self.attempt(found, lambda: self.remove(20)), 2)
+        self.assertEqual(self.attempt(found, self.remove), 2)
 
     def test_process_in_execve_blocks_before_first_signal(self):
         found = self.armed()
