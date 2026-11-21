@@ -262,7 +262,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         check_fixed(current, ("installer_mode",))
         if plan.blockers:
             raise Stopped(stage, "dependency-plan-blocked:" + ",".join(plan.blockers))
-        print("画面なしの導入では、ソフト電池は入りませんでした（何も変更されていません）。", file=output)
+        print("画面なしの導入のあと、ソフト電池の検査対象は入っていませんでした。", file=output)
         print("画面ありで導入する場合は1、やめる場合はq（画面が出るかをwinverで確かめてから、インストーラーを起動します）: ",
               end="", file=output, flush=True)
         if stream.readline(32).strip() != "1":
@@ -564,4 +564,3 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         return 1, None
     print("結果を保存しました: " + text(str(saved)), file=output)
     return 2, str(saved)
-
