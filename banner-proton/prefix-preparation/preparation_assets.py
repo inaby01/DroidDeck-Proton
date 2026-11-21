@@ -2,6 +2,7 @@
 
 import datetime
 import hashlib
+import io
 import json
 import os
 import struct
@@ -53,21 +54,33 @@ def pe_machine(stream, size):
     return MACHINES[machine]
 
 
-def measure_stream(stream, limit, kind, destination=None):
+PE_HEAD = 64 * 1024
+
+
+def measure_stream(stream, limit, kind, destination=None, timestamps=True):
+    """Size, SHA-256 and PE machine of a regular file stream.
+
+    ``timestamps=False`` (operator asset-folder reads only) does not compare timestamps and takes
+    the PE machine from the same bytes that are hashed, never from a separate read.
+    """
     before = os.fstat(stream.fileno())
-    machine = pe_machine(stream, before.st_size) if kind == "pe" else None
+    machine = pe_machine(stream, before.st_size) if kind == "pe" and timestamps else None
     stream.seek(0)
     digest = hashlib.sha256()
-    length = 0
+    length, head = 0, bytearray()
     while chunk := stream.read(min(1024 * 1024, limit + 1 - length)):
         length += len(chunk)
         require(length <= before.st_size, "asset grew during read")
         require(length <= limit, "asset exceeds trusted input ceiling")
         digest.update(chunk)
+        if not timestamps and len(head) < PE_HEAD:
+            head += chunk[:PE_HEAD - len(head)]
         if destination is not None:
             destination.write(chunk)
-    unchanged(before, os.fstat(stream.fileno()))
+    unchanged(before, os.fstat(stream.fileno()), timestamps)
     require(length == before.st_size, "asset size changed during read")
+    if kind == "pe" and not timestamps:
+        machine = pe_machine(io.BytesIO(bytes(head)), length)
     return {"sha256": digest.hexdigest(), "size": length, "pe_machine": machine}
 
 
@@ -149,14 +162,19 @@ def asset_blockers(spec, measured):
     return blockers
 
 
-def inspect_assets(document, root):
+def inspect_assets_from_folder(document, root):
+    """The operator's asset folder (shared storage): timestamps are not compared; bytes are hashed."""
+    return inspect_assets(document, root, timestamps=False)
+
+
+def inspect_assets(document, root, timestamps=True):
     specs = validate_manifest(document)
     reports = []
     for key, spec in specs.items():
         path = source_path(root, spec)
         try:
             with regular_open(path, INPUT_LIMITS[spec["format"]]) as stream:
-                measured = measure_stream(stream, INPUT_LIMITS[spec["format"]], spec["format"])
+                measured = measure_stream(stream, INPUT_LIMITS[spec["format"]], spec["format"], timestamps=timestamps)
         except FileNotFoundError:
             measured = None
         reports.append({"asset_id": key, "revision": spec["revision"], "spec_digest": digest_json(spec),

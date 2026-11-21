@@ -15,6 +15,7 @@ from preparation_payload import (
     FEX_RUNTIME_CONTRACT,
     FEX_RUNTIME_DIRECTORY,
     inspect_archive,
+    inspect_archive_from_folder,
     runtime_writes,
     verify_fex_runtime_tree,
     verify_tree,
@@ -58,6 +59,8 @@ class InstallationPlan:
     runtime: object = field(repr=False)
     target: object = field(repr=False)
     archive: object = field(repr=False)
+    # True when the archive is read from the operator's asset folder (timestamps not compared).
+    archive_from_folder: bool = False
 
     def summary(self):
         # No renderer bytes, runtime values, label contents or raw settings.
@@ -92,11 +95,13 @@ def _tree_variants(directory, inventory, archive_name, mode, helper, renderer, l
 
 
 def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runtime_audit,
-                      registrations, registration_id, exe_root, steam, renderer, parent_environment=None, tool_slot="legacy"):
+                      registrations, registration_id, exe_root, steam, renderer, parent_environment=None, tool_slot="legacy",
+                      archive_from_folder=False):
     require(mode in ("off", "observe", "cleanup"), "unsupported installation mode")
     steam = safe_path(steam)
     target = checked("target-registration-exe", pin_registration, registrations, registration_id, exe_root, steam)
-    inventory = checked("payload-archive", inspect_archive, archive, sha512, archive_root, capture=CAPTURE)
+    read_archive = inspect_archive_from_folder if archive_from_folder else inspect_archive
+    inventory = checked("payload-archive", read_archive, archive, sha512, archive_root, capture=CAPTURE)
     require(inventory.external_links == 0, "external payload links require separate policy")
     runtime = checked("runtime-context", plan_runtime_environment, runtime_root, runtime_audit, parent_environment)
     helper = runtime.root / "usr/local/bin/steam-compatibility"
@@ -165,4 +170,4 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
                   {"path": str(destination), "action": "publish-new-tree-without-replacement"}],
               "binding": "deferred-until-dependencies-verified", "blockers": blockers,
               "preparation_complete": False, "writes": []}
-    return InstallationPlan(digest, report, inventory, customization, runtime, target, safe_path(archive))
+    return InstallationPlan(digest, report, inventory, customization, runtime, target, safe_path(archive), archive_from_folder)

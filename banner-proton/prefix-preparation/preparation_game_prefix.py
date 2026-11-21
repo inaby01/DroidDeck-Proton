@@ -244,7 +244,7 @@ def plan_game_prefix(*, config, directory, renderer, source, games, key, profile
     installation = plan_installation(archive=_archive(directory, payload), sha512=payload["sha512"], archive_root=payload["root"],
         mode=payload["mode"], runtime_root=runtime_root, runtime_audit=config["runtime_reference"], registrations=source,
         registration_id=key, exe_root=exe.parent, steam=steam, renderer=renderer, parent_environment=environment,
-        tool_slot="preparation")
+        tool_slot="preparation", archive_from_folder=True)
     trial._live_runtime(installation)
     report = installation.summary()
     require(report["action"] == "reuse-verified-tree", "verified installed preparation tool required")

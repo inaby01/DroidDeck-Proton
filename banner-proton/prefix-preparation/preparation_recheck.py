@@ -27,6 +27,7 @@ from preparation_installation import CAPTURE
 from preparation_payload import (
     FEX_RUNTIME_CONTRACT,
     inspect_archive,
+    inspect_archive_from_folder,
     runtime_writes,
     verify_fex_runtime_tree,
 )
@@ -170,7 +171,10 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
             (proof is None or proof["source_archive_sha512"] == payload["sha512"]), "recheck source identity differs")
     progress.append("recheck-payload-archive")
     from preparation_selection import _archive
-    inventory = inspect_archive(_archive(directory, payload), payload["sha512"], payload["root"], capture=CAPTURE)
+    # Registered-game prefixes read the archive from the operator's asset folder without comparing
+    # timestamps (every byte is hashed); probe trials keep the strict read.
+    read_archive = inspect_archive if records == "trials" else inspect_archive_from_folder
+    inventory = read_archive(_archive(directory, payload), payload["sha512"], payload["root"], capture=CAPTURE)
     require(proof is None or proof["source_inventory_digest"] == inventory.digest, "probe source inventory differs")
     progress.append("recheck-runtime-environment")
     runtime = plan_runtime_environment(runtime_root, config["runtime_reference"], environment)

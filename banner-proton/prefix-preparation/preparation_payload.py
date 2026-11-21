@@ -113,7 +113,12 @@ class PayloadInventory:
                 "blockers": blockers, "preparation_complete": False, "writes": []}
 
 
-def inspect_archive(path, expected_sha512, root, capture=()):
+def inspect_archive_from_folder(path, expected_sha512, root, capture=()):
+    """The operator's asset folder (shared storage): timestamps are not compared; every byte is hashed."""
+    return inspect_archive(path, expected_sha512, root, capture, timestamps=False)
+
+
+def inspect_archive(path, expected_sha512, root, capture=(), timestamps=True):
     require(type(expected_sha512) is str and len(expected_sha512) == 128 and
             all(c in "0123456789abcdef" for c in expected_sha512), "expected SHA-512 required")
     require(path is not None, "payload archive required")
@@ -179,7 +184,7 @@ def inspect_archive(path, expected_sha512, root, capture=()):
                     pass
             while compressed.read(CHUNK):
                 pass
-            unchanged(before, os.fstat(source.fileno()))
+            unchanged(before, os.fstat(source.fileno()), timestamps)
             require(compressed.count == before.st_size and digest.hexdigest() == expected_sha512,
                     "payload archive checksum mismatch")
     except (tarfile.TarError, EOFError, gzip.BadGzipFile, zlib.error) as error:

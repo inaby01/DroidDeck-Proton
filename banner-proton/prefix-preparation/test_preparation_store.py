@@ -173,8 +173,10 @@ class StorageTests(unittest.TestCase):
                     with test.source.open("ab") as stream:
                         stream.write(b"changed-during-copy")
 
-        def changed(stream, limit, kind, destination=None):
-            return original(stream, limit, kind, MutatingWriter(destination) if destination is not None else None)
+        def changed(stream, limit, kind, destination=None, timestamps=True):
+            # A size change is detected even though the asset-folder read does not compare timestamps.
+            return original(stream, limit, kind, MutatingWriter(destination) if destination is not None else None,
+                            timestamps=timestamps)
 
         with self.store() as store, store.locked(self.key), patch.object(storage, "measure_stream", side_effect=changed):
             with self.assertRaises(Invalid):

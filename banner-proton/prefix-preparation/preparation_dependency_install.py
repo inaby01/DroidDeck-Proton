@@ -23,7 +23,7 @@ from pathlib import Path
 from preparation_assets import (
     INPUT_LIMITS,
     digest_json,
-    inspect_assets,
+    inspect_assets_from_folder,
     measure_stream,
     validate_manifest,
 )
@@ -543,7 +543,7 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
     progress.append("asset-inspection")
     spec = dependency["asset"]
     directory = safe_path(directory)
-    report = inspect_assets({"schema_version": 1, "assets": [spec]}, directory)[0]
+    report = inspect_assets_from_folder({"schema_version": 1, "assets": [spec]}, directory)[0]
     blockers = ["asset:" + reason for reason in report["blockers"]]
     try:
         binding = bind_asset(recipe, spec, report["measured"])
@@ -1042,7 +1042,7 @@ def collect_diagnostics(*, record, config, directory, renderer, environment, ste
         if present:
             # Metadata above is kept even when the strict read below refuses the file.
             try:
-                report = inspect_assets({"schema_version": 1, "assets": [spec]}, directory)[0]
+                report = inspect_assets_from_folder({"schema_version": 1, "assets": [spec]}, directory)[0]
             except (OSError, ValueError) as error:
                 result["inspection"] = describe_error(error, "asset-inspection")
                 return result

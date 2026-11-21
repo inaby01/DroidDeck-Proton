@@ -15,7 +15,7 @@ import itertools
 import os
 from pathlib import Path
 
-from preparation_assets import digest_json, exe_identity, inspect_assets
+from preparation_assets import digest_json, exe_identity, inspect_assets_from_folder
 from preparation_common import VERSION, Invalid, require, safe_path
 from preparation_game_prefix import (
     NON_ASCII_NOTE,
@@ -85,7 +85,7 @@ def _dlls(profile, recipes, directory):
     for dep in profile["dependencies"]:
         item = recipes[dep]
         if item["handler"] == PREFIX_DLL:
-            report = inspect_assets({"schema_version": 1, "assets": [item["asset"]]}, directory)[0]
+            report = inspect_assets_from_folder({"schema_version": 1, "assets": [item["asset"]]}, directory)[0]
             values.append({"dependency_id": dep, "recipe": digest_json(item), "measured": report["measured"],
                            "blockers": report["blockers"]})
     return values
@@ -399,7 +399,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         spec = config["dependency_installation"]["asset"] if uses_softdenchi else None
         if uses_softdenchi and label == "新規":
             # A new prefix always needs the installer: check it before anything is written.
-            checked = inspect_assets({"schema_version": 1, "assets": [spec]}, directory)[0]
+            checked = inspect_assets_from_folder({"schema_version": 1, "assets": [spec]}, directory)[0]
             problems = ["asset:" + reason for reason in checked["blockers"]]
             try:
                 bind_asset(softdenchi, spec, checked["measured"])

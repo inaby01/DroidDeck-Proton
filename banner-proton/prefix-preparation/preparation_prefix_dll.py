@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from preparation_assets import (
     asset_blockers,
     digest_json,
-    inspect_assets,
+    inspect_assets_from_folder,
     measure_stream,
     pe_machine,
     source_path,
@@ -380,7 +380,7 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
                         runtime_root=runtime_root, records=GAME_RECORDS)
     spec = item["asset"]
     directory = safe_path(directory)
-    report = inspect_assets({"schema_version": 1, "assets": [spec]}, directory)[0]
+    report = inspect_assets_from_folder({"schema_version": 1, "assets": [spec]}, directory)[0]
     blockers = ["asset:" + reason for reason in report["blockers"]]
     require(isinstance(stop_check, ProcessStopCheck) and stop_check.compatdata == base.compatdata,
             "matching process observation required")

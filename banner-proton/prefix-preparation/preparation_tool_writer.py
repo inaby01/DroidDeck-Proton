@@ -76,7 +76,7 @@ class _PrivateXaliaModes:
                 "payload mode is outside reviewed private Xalia files")
 
 
-def _stream_tree(archive, inventory, root_fd, guard, private_xalia=None):
+def _stream_tree(archive, inventory, root_fd, guard, private_xalia=None, timestamps=True):
     """Materialize only pinned entries through directory FDs, never extractall."""
     entries = inventory.entries
     require(not inventory.root_mode & 0o022 and inventory.root_mode & 0o500 == 0o500,
@@ -147,7 +147,7 @@ def _stream_tree(archive, inventory, root_fd, guard, private_xalia=None):
                 pass
         while compressed.read(CHUNK):
             pass
-        unchanged(before, os.fstat(source.fileno()))
+        unchanged(before, os.fstat(source.fileno()), timestamps)
         require(root_seen and seen == entries.keys() and compressed.count == before.st_size and
                 digest.hexdigest() == inventory.archive_sha512, "archive changed during staging")
     # Defer all links until every regular member is present. Payload parents are
@@ -346,8 +346,9 @@ def _write_installation_tree(plan, refresh, store, settings, check_ready, privat
                 save()
                 # Refresh source archive path is caller-bound by the same inventory.
                 # The plan carries the exact original path privately.
-                directories = (_stream_tree(current.archive, current.inventory, tree_fd, guard) if private_xalia is None else
-                               _stream_tree(current.archive, current.inventory, tree_fd, guard, private_xalia))
+                # An archive read from the operator's asset folder: member bytes are hashed, timestamps are not compared.
+                timestamps = not getattr(current, "archive_from_folder", False)
+                directories = _stream_tree(current.archive, current.inventory, tree_fd, guard, private_xalia, timestamps)
                 _customize(tree_fd, current, directories)
                 stage = tools / record["staging_name"]
                 verify_tree(stage / "tree", current.inventory, current.customization.overlays)

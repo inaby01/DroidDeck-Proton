@@ -316,7 +316,10 @@ class PrivateStore:
                 os.fsync(parent)
                 with self.directory(("assets", name)) as fd:
                     with self._new(fd, "payload.bin") as destination:
-                        measured = measure_stream(source, INPUT_LIMITS[spec["format"]], spec["format"], destination)
+                        # The source is in the operator's asset folder: its timestamps are not compared; the
+                        # copy is hashed here and the private copy is measured again strictly below.
+                        measured = measure_stream(source, INPUT_LIMITS[spec["format"]], spec["format"], destination,
+                                                  timestamps=False)
                         destination.flush()
                         os.fsync(destination.fileno())
                     require(not asset_blockers(spec, measured), "copied bytes do not match expected asset")

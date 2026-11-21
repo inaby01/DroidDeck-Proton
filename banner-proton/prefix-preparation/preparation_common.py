@@ -94,9 +94,13 @@ def regular_open(path, limit):
     return stream
 
 
-def unchanged(before, after):
-    require((before.st_ino, before.st_dev, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
-            (after.st_ino, after.st_dev, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "input changed during read")
+def unchanged(before, after, timestamps=True):
+    """Same file before and after a read. ``timestamps=False`` is only for operator asset-folder reads
+    whose bytes are hashed against a declaration (Android shared storage changes timestamps while reading).
+    The names of the differing fields (never their values) are part of the error."""
+    names = ("st_ino", "st_dev", "st_size") + (("st_mtime_ns", "st_ctime_ns") if timestamps else ())
+    differing = [name[3:] for name in names if getattr(before, name) != getattr(after, name)]
+    require(not differing, "input changed during read (" + ",".join(differing) + ")")
 
 
 def read_bytes(path, limit=MAX_JSON):
