@@ -91,7 +91,7 @@ def read_threads(text):
 
 
 LINGERING_LIMIT = 64
-UNREAD_REASONS = {"identity_changed", "environment_changing"}
+UNREAD_REASONS = {"identity_changed"}
 IMAGE_LIMIT = 260
 SUMMARY_BYTES = 16384
 
@@ -267,19 +267,13 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
                     # Another process now has this PID: it is unread in this pass.
                     unread(found, entry, before[2], read_threads(text), "identity_changed")
                     continue
-                if raw_env is not None and has_memory(entry / "status"):
-                    # Possibly a live process whose environment is really empty. An execve in
-                    # progress also has memory and an empty environ for a moment: read again.
-                    try:
-                        again = (entry / "environ").read_bytes()
-                        text = stat_of(entry / "stat")
-                    except (FileNotFoundError, ProcessLookupError):
-                        continue
-                    if again or read_stat(text)[2] != before[2]:
-                        unread(found, entry, before[2], read_threads(text), "environment_changing")
-                    continue
                 if read_threads(text) >= 2:
                     linger(found, entry, before[2], expected, read_threads(text))
+                elif raw_env is None or has_memory(entry / "status"):
+                    # One thread with memory and no environment: a process whose environment is
+                    # really empty, or one inside execve (new memory, environment not yet built),
+                    # or a read that raced its exit. Tracker decides over consecutive passes.
+                    unread(found, entry, before[2], 1, "empty_environment")
                 continue
             env = {}
             for item in raw_env.split(b"\0"):
@@ -342,6 +336,8 @@ class Tracker:
         self.last_proxy_state = None
         self.known = set()
         self.observation_incomplete = False
+        # Single-thread processes seen with memory and no environment in the previous pass.
+        self.empty_seen = set()
         # Identities this launch sent SIGTERM to: their own exit is expected, not a live game.
         self.signalled = set()
 
@@ -464,6 +460,7 @@ class Tracker:
             blockers.append("preexisting_proxy")
         lingering = []
         incomplete = []
+        empty = set()
         for item in getattr(processes, "lingering", ()):
             identity = (item["pid"], item["started"])
             if item["reason"] in UNREAD_REASONS:
@@ -472,6 +469,11 @@ class Tracker:
             elif identity in self.signalled or item["attribution"] == "other":
                 # Our own SIGTERM target finishing its exit, or a group positively read as foreign.
                 continue
+            elif item["reason"] == "empty_environment":
+                empty.add(identity)
+                if identity not in self.empty_seen:
+                    # First sighting: possibly inside execve, which lasts far less than a pass.
+                    incomplete.append(item)
             elif item["reason"] == "exited_while_reading":
                 incomplete.append(item)
             elif identity in self.known:
@@ -484,6 +486,7 @@ class Tracker:
             blockers.append("incomplete_proc_snapshot")
         # Read by ProxyCleanup.observe_origins: no new ancestry proof from an incomplete view.
         self.observation_incomplete = bool(unreadable or incomplete or lingering)
+        self.empty_seen = empty
         self.known.update(processes)
         if game:
             self.seen_game = True

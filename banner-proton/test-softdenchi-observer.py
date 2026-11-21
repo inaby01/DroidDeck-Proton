@@ -292,7 +292,7 @@ class LingeringTrackerTests(unittest.TestCase):
         self.assertEqual(self.update(found, 3)["blockers"], [])
 
     def test_changed_identity_blocks_even_for_signalled_pid(self):
-        for reason in ("identity_changed", "environment_changing"):
+        for reason in ("identity_changed",):
             with self.subTest(reason=reason):
                 self.setUp()
                 self.tracker.signalled.add((20, 10))
@@ -301,6 +301,23 @@ class LingeringTrackerTests(unittest.TestCase):
                                     "reason": reason}]
                 self.assertIn("incomplete_proc_snapshot", self.update(found, 2)["blockers"])
                 self.assertTrue(self.tracker.observation_incomplete)
+
+    def test_empty_environment_blocks_only_on_first_sighting(self):
+        found = with_lingering([self.service, self.proxy])
+        found.lingering = [{"pid": 40, "started": 12, "threads": 1, "attribution": "ambiguous",
+                            "reason": "empty_environment"}]
+        self.assertIn("incomplete_proc_snapshot", self.update(found, 2)["blockers"])
+        self.assertEqual(self.update(found, 3)["blockers"], [])
+        # A pass without it resets: the next sighting is a first sighting again.
+        self.update(with_lingering([self.service, self.proxy]), 4)
+        self.assertIn("incomplete_proc_snapshot", self.update(found, 5)["blockers"])
+
+    def test_empty_environment_of_signalled_proxy_is_exempt(self):
+        self.tracker.signalled.add((20, 10))
+        found = with_lingering([self.service])
+        found.lingering = [{"pid": 20, "started": 10, "threads": 1, "attribution": "ambiguous",
+                            "reason": "empty_environment"}]
+        self.assertEqual(self.update(found, 2)["blockers"], [])
 
     def test_reused_pid_is_not_the_observed_identity(self):
         result = self.update(with_lingering([self.service, self.proxy], (11, 77, "other")), 2)
@@ -434,18 +451,31 @@ class SnapshotTests(unittest.TestCase):
             self.add_thread(self.zombie_leader(root), 100002, environ=b"")
             self.assertEqual(self.lingering(root), [("ambiguous", "exiting_threads")])
 
-    def test_live_leader_with_really_empty_environment_is_skipped(self):
+    def test_live_leader_with_really_empty_environment_is_reported_once_per_pass(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            entry = self.zombie_leader(root, state="S")
+            entry = self.zombie_leader(root, state="S", threads=1)
             (entry / "status").write_bytes(b"Name:\tdaemon\nVmSize:\t2048 kB\n")
             real = os.listdir
             with patch.object(os, "listdir", lambda path: (_ for _ in ()).throw(AssertionError("tasks listed"))
                               if str(path).endswith("task") else real(path)):
-                self.assertEqual(self.lingering(root), [])
+                self.assertEqual(self.lingering(root), [("ambiguous", "empty_environment")])
 
-    def test_memory_but_changing_environment_is_unread(self):
-        # An execve in progress: memory present, environ empty, then filled on the second read.
+    def test_single_thread_environ_lookup_error_is_reported(self):
+        # The read raced the process: never silently treated as gone while it still runs.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = self.zombie_leader(root, state="S", threads=1, environ=None)
+            real = Path.read_bytes
+            def read(path):
+                if path == entry / "environ":
+                    raise ProcessLookupError
+                return real(path)
+            with patch.object(Path, "read_bytes", read):
+                self.assertEqual(self.lingering(root), [("ambiguous", "empty_environment")])
+
+    def test_memory_without_environment_is_reported(self):
+        # An execve in progress: memory present, environ empty (filled only later).
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             entry = self.zombie_leader(root, state="S", threads=1)
@@ -457,7 +487,7 @@ class SnapshotTests(unittest.TestCase):
                     (entry / "environ").write_bytes(b"WINEPREFIX=/test/pfx\0")
                 return data
             with patch.object(Path, "read_bytes", read):
-                self.assertEqual(self.lingering(root), [("ambiguous", "environment_changing")])
+                self.assertEqual(self.lingering(root), [("ambiguous", "empty_environment")])
 
     def test_pid_reuse_with_memory_after_empty_environ_is_unread(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1386,6 +1416,11 @@ class EndToEndTests(unittest.TestCase):
     def test_signalled_proxy_gone_does_not_stop_batch(self):
         found = self.armed()
         self.assertEqual(self.attempt(found, self.remove), 2)
+
+    def test_long_lived_process_without_environment_does_not_block(self):
+        entry = self.add(40, 1, 12, "/usr/bin/daemon", environ=b"")
+        (entry / "status").write_bytes(b"Name:\tdaemon\nVmSize:\t10 kB\n")
+        self.assertEqual(self.attempt(self.armed()), 2)
 
     def test_process_in_execve_blocks_before_first_signal(self):
         found = self.armed()
