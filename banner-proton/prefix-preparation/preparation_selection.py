@@ -43,6 +43,25 @@ from preparation_installation import plan_installation
 from preparation_target import pin_registration, registrations
 
 
+def operational_layout(config):
+    """Whether the bundle shows the operational entry first (design: operational entry 3).
+
+    The same conditions as menu 12; a bundle missing one keeps the earlier screen.
+    """
+    return (type(config) is dict and bool(config.get("probe_material", False)) and config.get("initialization_trial") is True
+            and all(name in config for name in ("placement_review", "game_preparation", "dependency_installation")))
+
+
+def menu_ref(config, number):
+    """How guidance names a menu of the earlier screen: inside the detailed menu when the operational entry is shown."""
+    return ("詳細メニューの" if operational_layout(config) else "メニュー") + str(number)
+
+
+def one_pass_ref(config):
+    """The number that runs the one-pass preparation (operational entry 1, earlier screen 12)."""
+    return "1" if operational_layout(config) else "12"
+
+
 def _text(value):
     return "".join(f"\\u{ord(c):04x}" if unicodedata.category(c).startswith("C") or c in "\u2028\u2029" else c
                    for c in str(value)[:240])
@@ -554,7 +573,7 @@ def selection_script(config=None):
              "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
              "preparation_tool_writer", "preparation_store", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_trial", "preparation_trial_audit", "preparation_recheck", "preparation_softdenchi_recipe",
              "preparation_dependency_state", "preparation_dependency_install", "preparation_prefix_dll", "preparation_game_prefix",
-             "preparation_one_pass", "preparation_selection")
+             "preparation_one_pass", "preparation_status", "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}
     installer = parent.parent / "install-softdenchi.py"
     if not installer.exists():

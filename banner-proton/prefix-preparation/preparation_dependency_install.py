@@ -522,7 +522,8 @@ def plan_dependency_install(**kwargs):
 
 
 def _plan_dependency_install(progress, *, record, record_sha256, config, directory, renderer, source, games, steam, settings,
-                             home, environment, runtime_root, recipe=None, installer_mode="interactive", silent_launch=None):
+                             home, environment, runtime_root, recipe=None, installer_mode="interactive", silent_launch=None,
+                             inventory=None):
     recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
     require(installer_mode in INSTALLER_MODES, "invalid installer mode")
     arguments = tuple(silent_arguments(recipe, silent_launch)) if installer_mode == "silent" else ()
@@ -532,7 +533,7 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
     records = _records_of(record)
     base = plan_recheck(record=record, record_sha256=record_sha256, config=config, directory=directory, renderer=renderer,
                         source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
-                        runtime_root=runtime_root, records=records)
+                        runtime_root=runtime_root, records=records, inventory=inventory)
     progress.append("recheck-evidence")
     if records == "trials":
         recheck_id, recheck_sha256 = _recheck_evidence(base.store_root, record, base.prefix_version)
@@ -1178,7 +1179,8 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                                   f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
                             _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
                             if session.record["installer"]["status"] == "exited-processes-remain":
-                                _offer_session_proxy_stop(session, stream, output, selection._text)
+                                _offer_session_proxy_stop(session, stream, output, selection._text,
+                                                          next_step=restart_then_menu9(config))
                         else:
                             session.decline_installer()
             report.update(installation=dict(session.record), writes=[
@@ -1222,7 +1224,9 @@ def _print_lingering(summary, output, text):
         print("  " + text(item["role"] + " / " + item["name"] + " [" + item["place"] + "] pid " + str(item["pid"])), file=output)
 
 
-RESTART_THEN_MENU9 = "DroidDeckを完全に終了して起動し直してから、メニュー9でこのprefixの導入状態を確認してください。"
+def restart_then_menu9(config):
+    from preparation_selection import menu_ref
+    return "DroidDeckを完全に終了して起動し直してから、" + menu_ref(config, 9) + "でこのprefixの導入状態を確認してください。"
 
 ORIGIN_TEXT = {"ucmansvc": "UCManSvcから起動されたもの", "installer-run": "今回のインストーラーの実行中にその子孫と確認したもの"}
 
@@ -1236,7 +1240,7 @@ def _confirm_proxy_stop(count, stream, output, origins=None):
     return stream.readline(32).strip() == "1"
 
 
-def _offer_session_proxy_stop(session, stream, output, text, preapproved=False, next_step=RESTART_THEN_MENU9):
+def _offer_session_proxy_stop(session, stream, output, text, preapproved=False, next_step=None):
     summary, targets, reason = session.preview_proxy_stop()
     _print_lingering(summary, output, text)
     if targets is None:
@@ -1362,7 +1366,7 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
             inspection = inspect_managed_dependency(base, store, stop, recipe)
             history = [item for item in store.inventory()["dependency_installs"] if item.get("app_id") == record["app_id"]]
         if inspection.get("state") == "uninspected":
-            print(RESTART_THEN_MENU9, file=output)
+            print(restart_then_menu9(config), file=output)
         report = {"mode": "managed-dependency-reinspection-result", "scope": SCOPE, "tool_version": VERSION,
                   "app_id": record["app_id"], "lingering": lingering,
                   "inspection": inspection, "installation_history": history, "wine_started": False,

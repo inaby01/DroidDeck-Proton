@@ -193,20 +193,20 @@ class GamePrefixTests(DEP['InstallTests']):
 
     def test_menu_initializes_the_new_game_prefix_and_lists_it(self):
         with patch('subprocess.Popen', side_effect=AssertionError('cancel never executes')):
-            status, report, _ = self.menu('10\nq\n')
+            status, report, _ = self.detail_menu('10\nq\n')
         self.assertEqual((status, report), (0, None))
         # An unknown profile name is refused before anything is written.
         with patch('subprocess.Popen', side_effect=AssertionError('refused input never executes')):
-            status, report, _ = self.menu('10\n1\nunknown-game\n')
+            status, report, _ = self.detail_menu('10\n1\nunknown-game\n')
         self.assertEqual(report['reason'], 'invalid profile selection')
         self.assertEqual(report['writes'], [{'scope': 'report-only', 'filename': report['writes'][0]['filename']}])
         with patch('subprocess.Popen', side_effect=AssertionError('cancel never executes')):
-            status, report, output = self.menu('10\n1\n1\nq\n')
+            status, report, output = self.detail_menu('10\n1\n1\nq\n')
         self.assertEqual((status, report), (0, None))
         self.assertIn('作品プロファイル: ', output)
         # The profile may be given by its number or, as operators type it from the list, by its name.
         with patch.object(trial, 'plan_launch', side_effect=self.launch_fixture):
-            status, report, output = self.menu('10\n1\nexample-game\n1\n')
+            status, report, output = self.detail_menu('10\n1\nexample-game\n1\n')
         self.assertEqual(status, 2, output)
         self.assertEqual(report['initialization']['status'], 'initialized-unverified')
         self.assertEqual(report['initialization']['scope'], game.SCOPE)
@@ -217,7 +217,7 @@ class GamePrefixTests(DEP['InstallTests']):
             listed = store.inventory()['game_prefixes']
         self.assertEqual([(item['app_id'], item['profile_id']) for item in listed], [('42', 'example-game')])
         # The initialized registration is no longer offered: existing prefixes stay read-only.
-        status, report, _ = self.menu('10\n')
+        status, report, _ = self.detail_menu('10\n')
         self.assertEqual(report['reason'], 'no registered game without a prefix')
 
     def test_dependency_installation_accepts_the_initialized_game_prefix(self):
@@ -274,7 +274,7 @@ class GamePrefixTests(DEP['InstallTests']):
         self.initialize()
         before = self.protected()
         with patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe):
-            status, report, output = self.menu('11\n1\n')
+            status, report, output = self.detail_menu('11\n1\n')
         self.assertEqual(status, 2, output)
         self.assertFalse(report['binding_written'])
         self.assertIn('dependency-blocked:mfc42-candidate', report['plan']['blockers'])
@@ -439,7 +439,7 @@ class GamePrefixTests(DEP['InstallTests']):
         self.assertEqual((change['initialized_revision'], change['current_revision']), (1, 2))
         self.assertEqual(change['initialized_digest'], record['profile']['profile_digest'])
         with patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe):
-            status, report, output = self.menu('11\n1\nq\n')
+            status, report, output = self.detail_menu('11\n1\nq\n')
         self.assertEqual((status, report), (0, None))
         self.assertIn('初期化時の改訂1から改訂2へ', output)
         self.assertIn('現在のプロファイル: Synthetic game profile / unconfirmed edition / 依存 softdenchi-runtime, mfc42-game-folder', output)
@@ -600,7 +600,7 @@ class GamePrefixTests(DEP['InstallTests']):
         self.initialize()
         with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe), \
                 patch('subprocess.Popen', side_effect=AssertionError('listing only')):
-            status, report, output = self.menu('9\nq\n')
+            status, report, output = self.detail_menu('9\nq\n')
         self.assertEqual((status, report), (0, None))
         self.assertIn('実ゲーム example-game / ID 42', output)
         self.assertIn('検証用 / ID 43', output)

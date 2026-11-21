@@ -526,6 +526,27 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
     if config is None or not config.get("probe_material", False):
         return selection.interactive_selection(directory, renderer, config, **options)
     selection.validate_selection_config(config)
+    if selection.operational_layout(config):
+        # Operational entry (design: operational entry 3); 4 shows the earlier screen with the same numbers.
+        print("1. 新しいゲームを準備（初期化→DLL→ソフト電池→割り当て。途中からの再開も可）", file=output)
+        print("2. ゲームの状態を確認（何も変更しません）", file=output)
+        print("3. 新しいProtonを準備用slotに置く（起動しない）", file=output)
+        print("4. 詳細メニュー（検証用・手動の操作）", file=output)
+        print("q. 取消", file=output)
+        answer = stream.readline(32).strip()
+        if answer == "1":
+            from preparation_one_pass import interactive_one_pass
+            return interactive_one_pass(directory, renderer, config, **options)
+        if answer == "2":
+            from preparation_status import interactive_status
+            return interactive_status(directory, renderer, config, **options)
+        if answer == "3":
+            from preparation_static_placement import interactive_confirmed_placement
+            return interactive_confirmed_placement(directory, renderer, config, **options)
+        if answer != "4":
+            print("取り消しました。", file=output)
+            return 0, None
+        print("詳細メニュー（番号は従来どおり）", file=output)
     print("1. 登録済み対象の読み取り検査・計画\n2. 新規登録用の検証ファイルを用意\n3. 未完了の検証用記録を全照合して復帰", file=output)
     if "placement_review" in config:
         print("4. 準備用Protonを別の新規フォルダーへ配置（起動しない）", file=output)
@@ -614,7 +635,7 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
                     archive, payload["sha512"], payload["root"], source, steam, directory, probe_id=plan.record["probe_id"]), store)
         print("検証ファイルを作成しました。DroidDeckのEXE追加で、prepare.shを置いたフォルダーを開いてください。", file=output)
         print("選ぶファイル: " + selection._text(report["selection_hint"]["relative_exe"]), file=output)
-        print("追加後も起動せず、このprepare.shの「1」で新しい登録を検査してください。", file=output)
+        print("追加後も起動せず、このprepare.shの" + selection.menu_ref(config, 1) + "で新しい登録を検査してください。", file=output)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
         report = {"mode": "probe-material-stopped", "stage": stage, "check": getattr(error, "preparation_check", stage), "error_class": type(error).__name__,
                   "errno": getattr(error, "errno", None), "writes": [], "partial_files_may_exist": started,

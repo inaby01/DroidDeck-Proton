@@ -26,6 +26,7 @@ from preparation_execution import (
 from preparation_installation import CAPTURE
 from preparation_payload import (
     FEX_RUNTIME_CONTRACT,
+    PayloadInventory,
     inspect_archive,
     inspect_archive_from_folder,
     runtime_writes,
@@ -111,6 +112,13 @@ class RecheckPlan:
                 "device_namespace_verified": False, "preparation_complete": False, "writes": []}
 
 
+def read_payload_inventory(config, directory):
+    """The verified payload inventory from the asset folder, read once for several registered-game plans."""
+    from preparation_selection import _archive
+    payload = config["payload"]
+    return inspect_archive_from_folder(_archive(safe_path(directory), payload), payload["sha512"], payload["root"], capture=CAPTURE)
+
+
 def plan_recheck(**kwargs):
     """Read-only managed recheck plan; a failure carries the name of the check that stopped it."""
     progress = ["recheck-trial-record"]
@@ -123,8 +131,9 @@ def plan_recheck(**kwargs):
 
 
 def _plan_recheck(progress, *, record, record_sha256, config, directory, renderer, source, games, steam, settings, home,
-                  environment, runtime_root, records="trials"):
+                  environment, runtime_root, records="trials", inventory=None):
     require(records in ("trials", "game-prefixes"), "unknown managed prefix journal")
+    require(inventory is None or records == "game-prefixes", "probe trials read their archive themselves")
     if records == "trials":
         validate_trial_record(record)
     else:
@@ -173,8 +182,13 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
     from preparation_selection import _archive
     # Registered-game prefixes read the archive from the operator's asset folder without comparing
     # timestamps (every byte is hashed); probe trials keep the strict read.
-    read_archive = inspect_archive if records == "trials" else inspect_archive_from_folder
-    inventory = read_archive(_archive(directory, payload), payload["sha512"], payload["root"], capture=CAPTURE)
+    if inventory is None:
+        read_archive = inspect_archive if records == "trials" else inspect_archive_from_folder
+        inventory = read_archive(_archive(directory, payload), payload["sha512"], payload["root"], capture=CAPTURE)
+    else:
+        # The status check reads the archive once with read_payload_inventory (operational entry 6.2).
+        require(isinstance(inventory, PayloadInventory) and inventory.archive_sha512 == payload["sha512"] and
+                inventory.root == payload["root"], "payload inventory differs")
     require(proof is None or proof["source_inventory_digest"] == inventory.digest, "probe source inventory differs")
     progress.append("recheck-runtime-environment")
     runtime = plan_runtime_environment(runtime_root, config["runtime_reference"], environment)

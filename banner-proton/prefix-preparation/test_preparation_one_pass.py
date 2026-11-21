@@ -125,11 +125,20 @@ class ActionTableTests(unittest.TestCase):
         self.assertEqual(asked.calls, [{}])
 
     def test_next_step_after_an_unfinished_installation(self):
-        self.assertIn('もう一度 12', one_pass.installation_next_step(None))
-        self.assertEqual(one_pass.installation_next_step({'status': 'failed', 'post_state': None}), one_pass.FAILED_THEN_MENU9)
-        self.assertEqual(one_pass.installation_next_step({'status': 'needs-user', 'post_state': 'uninspected'}),
-                         one_pass.RESTART_THEN_12)
-        self.assertIn('メニュー9', one_pass.installation_next_step({'status': 'partial', 'post_state': 'partial'}))
+        operational = {'probe_material': True, 'initialization_trial': True, 'placement_review': {}, 'game_preparation': {},
+                       'dependency_installation': {}}
+        earlier = {key: value for key, value in operational.items() if key != 'game_preparation'}
+        for config, again, menu9 in ((operational, 'もう一度 1 ', '詳細メニューの9'), (earlier, 'もう一度 12 ', 'メニュー9')):
+            with self.subTest(again=again):
+                self.assertIn(again, one_pass.installation_next_step(None, config))
+                self.assertEqual(one_pass.installation_next_step({'status': 'failed', 'post_state': None}, config),
+                                 one_pass.failed_then_menu9(config))
+                self.assertIn(menu9, one_pass.failed_then_menu9(config))
+                self.assertEqual(one_pass.installation_next_step({'status': 'needs-user', 'post_state': 'uninspected'}, config),
+                                 one_pass.restart_then_one_pass(config))
+                self.assertIn(again, one_pass.restart_then_one_pass(config))
+                self.assertIn(menu9, one_pass.installation_next_step({'status': 'partial', 'post_state': 'partial'}, config))
+        self.assertNotIn('詳細メニュー', one_pass.failed_then_menu9(earlier))
 
     def test_silent_arguments_are_pinned_to_the_recipe_bootstrap(self):
         real = recipe_module.softdenchi_recipe()
@@ -154,14 +163,18 @@ class OnePassTests(GAME['GamePrefixTests']):
     def pin_silent(self):
         self.silent = {'bootstrap_sha256': self.recipe['bootstrap']['sha256'], 'arguments': ['/s', '/v/qn', '/vREBOOT=ReallySuppress']}
 
-    def run_menu(self, text):
+    def run_menu(self, text, menu=None):
+        menu = self.menu if menu is None else menu
         with patch.object(trial, 'plan_launch', side_effect=self.launch_fixture), \
                 patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
                 patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe), \
                 patch.object(recipe_module, 'SILENT_LAUNCH', self.silent), \
                 patch.object(dep.subprocess, 'Popen', wraps=subprocess.Popen) as spawned:
-            status, report, output = self.menu(text)
+            status, report, output = menu(text)
         return status, report, output, [call.args[0][1:] for call in spawned.call_args_list]
+
+    def run_detail(self, text):
+        return self.run_menu(text, self.detail_menu)
 
     def installs(self):
         with PrivateStore(self.f.store_root) as store:
@@ -170,14 +183,23 @@ class OnePassTests(GAME['GamePrefixTests']):
 
     def test_menu_offers_one_pass_only_with_every_step_configured(self):
         _, _, output = self.menu('q\n')
-        self.assertIn('12. 新しいゲームを1回で準備', output)
-        del self.config['dependency_installation']
-        _, _, output = self.menu('q\n')
+        self.assertTrue(output.startswith('1. 新しいゲームを準備'), output)
         self.assertNotIn('12. ', output)
+        _, _, output = self.detail_menu('q\n')
+        self.assertIn('12. 新しいゲームを1回で準備', output)
+        for missing in ('dependency_installation', 'game_preparation'):
+            config = dict(self.config)
+            del self.config[missing]
+            # Without every step the earlier screen stays (validation bundles), with its own numbers.
+            _, _, output = self.menu('q\n')
+            self.assertTrue(output.startswith('1. 登録済み対象の読み取り検査・計画'), (missing, output))
+            self.assertNotIn('12. ', output)
+            self.assertNotIn('新しいゲームを準備（', output)
+            self.config = config
 
     def test_cancel_before_confirmation_writes_nothing(self):
         before = self.protected()
-        status, report, output, commands = self.run_menu('12\n1\n1\nq\n')
+        status, report, output, commands = self.run_detail('12\n1\n1\nq\n')
         self.assertEqual((status, report, commands), (0, None, []))
         self.assertIn('画面なし', output)
         self.assertIn('使用許諾', output)
@@ -186,7 +208,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertEqual(before, self.protected())
 
     def test_new_game_is_initialized_installed_silently_and_bound_in_one_run(self):
-        status, report, output, commands = self.run_menu('12\n1\n1\n1\n')
+        status, report, output, commands = self.run_detail('12\n1\n1\n1\n')
         self.assertEqual(status, 2, output)
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertTrue(report['binding_written'])
@@ -211,9 +233,9 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertFalse(report['preparation_complete'])
 
     def test_running_again_after_success_only_reports_the_binding(self):
-        self.run_menu('12\n1\n1\n1\n')
+        self.run_detail('12\n1\n1\n1\n')
         before = self.protected()
-        _, report, output, commands = self.run_menu('12\n1\n1\n')
+        _, report, output, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(commands, [])
         self.assertIn('[続きから]', output)
@@ -224,7 +246,7 @@ class OnePassTests(GAME['GamePrefixTests']):
 
     def test_initialized_prefix_resumes_with_installation_and_binding(self):
         self.initialize()
-        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        _, report, _, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual([step['step'] for step in report['steps']],
                          ['softdenchi-state', 'softdenchi-silent', 'binding-plan', 'binding'])
@@ -233,7 +255,7 @@ class OnePassTests(GAME['GamePrefixTests']):
     def test_silent_run_that_installs_nothing_offers_the_interactive_installer(self):
         self.use_installer(DEP['installer'](silent_noop=True))
         self.pin_silent()
-        _, report, output, commands = self.run_menu('12\n1\n1\n1\nq\n')
+        _, report, output, commands = self.run_detail('12\n1\n1\n1\nq\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['reason'], 'installation-declined')
         self.assertEqual(report['stage'], 'softdenchi-interactive')
@@ -241,7 +263,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertEqual([item['status'] for item in self.installs()], ['cancelled-absent'])
         self.assertIn('画面ありで導入する場合は1', output)
         # Running again resumes after the cancelled-absent record; this time the interactive installer is accepted.
-        _, report, output, commands = self.run_menu('12\n1\n1\n1\n1\n')
+        _, report, output, commands = self.run_detail('12\n1\n1\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual([c[0:1] + (Path(c[1]).name,) if len(c) > 1 else c for c in commands],
                          [('runinprefix', 'sdrt-fixture.exe'), ('runinprefix', 'winver.exe'),
@@ -268,7 +290,7 @@ class OnePassTests(GAME['GamePrefixTests']):
 
         before = self.protected()
         with patch.object(one_pass, '_profile', side_effect=drifting):
-            _, report, _, commands = self.run_menu('12\n1\n1\n1\n')
+            _, report, _, commands = self.run_detail('12\n1\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['reason'], 'fixed-values-changed:profile')
         self.assertEqual(report['stage'], 'initialize')
@@ -291,7 +313,7 @@ class OnePassTests(GAME['GamePrefixTests']):
             return {**value, 'profile': '0' * 64} if done else value
 
         with patch.object(one_pass, '_profile', side_effect=drifting):
-            _, report, output, commands = self.run_menu('12\n1\n1\n1\n1\n')
+            _, report, output, commands = self.run_detail('12\n1\n1\n1\n1\n')
         self.assertEqual(report['reason'], 'fixed-values-changed:profile', report)
         self.assertEqual(report['stage'], 'softdenchi-interactive')
         self.assertEqual(report['fixed_value_changes'], [{'stage': 'softdenchi-interactive', 'items': ['profile']}])
@@ -312,7 +334,7 @@ class OnePassTests(GAME['GamePrefixTests']):
 
     def test_binding_records_of_older_versions_do_not_stop_the_run(self):
         self.write_binding_record('77', '0.27.7')
-        _, report, _, _ = self.run_menu('12\n1\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertTrue(report['binding_written'])
 
@@ -320,7 +342,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         path = self.write_binding_record('77', '0.27.7')
         path.write_text('{"not": "a binding record"}')
         before = self.protected()
-        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        _, report, _, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual((report['status'], report['stage']), ('stopped', 'binding-history'), report)
         self.assertEqual(commands, [])
         self.assertFalse(self.game_compat.exists())
@@ -331,12 +353,12 @@ class OnePassTests(GAME['GamePrefixTests']):
         dll = self.f.exe.parent / 'mfc42.dll'
         dll.write_bytes(GAME['DLL'])
         # One pinned match: no profile question (menu, game, confirmation).
-        _, report, output, _ = self.run_menu('12\n1\n1\n')
+        _, report, output, _ = self.run_detail('12\n1\n1\n')
         self.assertIn('EXEハッシュ一致で自動選択', output)
         self.assertEqual(report['status'], 'ready-to-launch', report)
         dll.unlink()
         before = self.protected()
-        _, report, output, commands = self.run_menu('12\n1\n1\n')
+        _, report, output, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['reason'], 'binding-blocked:dependency-not-verified:mfc42-game-folder')
         self.assertNotIn('準備が終わりました', output)
@@ -346,11 +368,11 @@ class OnePassTests(GAME['GamePrefixTests']):
     def test_blocked_dependency_or_missing_installer_stops_before_anything_is_written(self):
         before = self.protected()
         self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime', 'mfc42-candidate']
-        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        _, report, _, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual((report['stage'], report['reason']), ('one-pass-precheck', 'dependency-blocked:mfc42-candidate'))
         self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime']
         (self.f.fixture.source.root / 'sdrt-fixture.exe').unlink()
-        _, report, output, commands = self.run_menu('12\n1\n1\n')
+        _, report, output, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['stage'], 'one-pass-precheck', report)
         self.assertIn('asset:', report['reason'])
         self.assertIn('sdrt-fixture.exe', output)
@@ -364,7 +386,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         junk = directory / ('gprefix-' + '0' * 32 + '.json')
         junk.write_text('{"not": "a record"}')
         junk.chmod(0o600)
-        _, report, output, _ = self.run_menu('12\n1\n1\n1\n')
+        _, report, output, _ = self.run_detail('12\n1\n1\n1\n')
         self.assertIn('読めない初期化記録が1件', output)
         self.assertEqual(report['unreadable_game_prefix_records'], 1)
         self.assertEqual(report['status'], 'ready-to-launch', report)
@@ -373,7 +395,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.use_folder_dependency()
         twin = dict(self.config['game_preparation']['profiles'][0], profile_id='example-twin')
         self.config['game_preparation']['profiles'].append(twin)
-        status, report, output, commands = self.run_menu('12\n1\nq\n')
+        status, report, output, commands = self.run_detail('12\n1\nq\n')
         self.assertEqual((status, report, commands), (0, None, []))
         self.assertIn('作品プロファイルの番号', output)
         self.assertNotIn('自動選択', output)
@@ -388,7 +410,7 @@ class OnePassTests(GAME['GamePrefixTests']):
             return real(**kwargs)
 
         with patch.object(one_pass, 'plan_game_binding', side_effect=touched):
-            _, report, _, _ = self.run_menu('12\n1\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n1\n')
         self.assertEqual(report['reason'], 'fixed-values-changed:binding', report)
         self.assertEqual(report['stage'], 'binding')
         self.assertFalse(report['binding_written'])
@@ -396,7 +418,7 @@ class OnePassTests(GAME['GamePrefixTests']):
 
     def test_an_exception_inside_a_step_keeps_that_step_record_in_the_result(self):
         with patch.object(dep.DependencyInstallSession, '_spawn', side_effect=OSError('spawn refused')):
-            _, report, _, _ = self.run_menu('12\n1\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n1\n')
         self.assertEqual((report['status'], report['stage']), ('stopped', 'softdenchi-silent'), report)
         step = report['steps'][-1]
         self.assertEqual(step['step'], 'softdenchi-silent')
@@ -416,7 +438,7 @@ class OnePassTests(GAME['GamePrefixTests']):
             dep.DependencyInstallSession(plan, store, lambda: self.install_plan_for(record_, digest), plan.digest,
                                          GAME['ProcessStopCheck'](self.game_compat, self.f.proc)).start_silent_installer()
         self.assertEqual([(i['status'], i['phase']) for i in self.installs()], [('failed', 'installer-spawned')])
-        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        _, report, _, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['reason'], 'previous-installation-failed-review-required', report)
         self.assertEqual(commands, [])
 
@@ -493,7 +515,7 @@ class PrefixDllOnePassTests(OnePassTests):
         return sorted(p.name for p in self.wow64().iterdir() if p.name not in ('cmd.exe', 'mfc42.dll', 'MFC42.DLL'))
 
     def test_new_game_gets_the_dll_before_softdenchi_and_is_bound(self):
-        _, report, output, commands = self.run_menu('12\n1\n1\n1\n')
+        _, report, output, commands = self.run_detail('12\n1\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual([step['step'] for step in report['steps']],
                          ['initialize', 'prefix-dll', 'softdenchi-state', 'softdenchi-silent', 'binding-plan', 'binding'])
@@ -523,15 +545,15 @@ class PrefixDllOnePassTests(OnePassTests):
                  'reason': 'synthetic recipe', 'asset': spec, 'destination': 'syswow64'})
             profile['dependencies'].append(f'runtime-{number}')
             (self.f.fixture.source.root / name).write_bytes(data)
-        status, report, output, commands = self.run_menu('12\n1\n1\nq\n')
+        status, report, output, commands = self.run_detail('12\n1\n1\nq\n')
         self.assertEqual((status, report, commands), (0, None, []))
         self.assertIn('  13) 依存がすべて検証済みなら', output)
 
     def test_running_again_skips_the_placed_dll(self):
-        self.run_menu('12\n1\n1\n1\n')
+        self.run_detail('12\n1\n1\n1\n')
         placed = self.wow64() / 'mfc42.dll'
         before = (placed.stat().st_ino, placed.stat().st_mtime_ns)
-        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        _, report, _, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(report['steps'][0]['step'], 'prefix-dll')
         self.assertEqual(report['steps'][0]['plan']['action'], 'skip')
@@ -543,7 +565,7 @@ class PrefixDllOnePassTests(OnePassTests):
         self.initialize()
         foreign = GAME['synthetic_pe'](extra=b'someone else placed this')
         (self.wow64() / 'MFC42.DLL').write_bytes(foreign)
-        _, report, _, commands = self.run_menu('12\n1\n1\n')
+        _, report, _, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['stage'], 'prefix-dll')
         self.assertIn('size, hash or architecture differs', report['reason'])
@@ -554,7 +576,7 @@ class PrefixDllOnePassTests(OnePassTests):
     def test_a_name_the_proton_ships_as_builtin_is_refused(self):
         self.initialize()
         with patch.object(prefix_dll, 'builtin_names', return_value={'mfc42.dll'}):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('builtin', report['reason'])
         self.assertFalse((self.wow64() / 'mfc42.dll').exists())
@@ -562,7 +584,7 @@ class PrefixDllOnePassTests(OnePassTests):
     def test_unconfirmed_x86_layout_is_refused(self):
         self.initialize()
         (self.wow64() / 'cmd.exe').unlink()
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('x86 system directory not confirmed', report['reason'])
         self.assertFalse((self.wow64() / 'mfc42.dll').exists())
@@ -570,7 +592,7 @@ class PrefixDllOnePassTests(OnePassTests):
     def test_missing_or_different_asset_stops_before_anything_is_written(self):
         (self.f.fixture.source.root / 'mfc42.dll').write_bytes(DLL_DATA + b'tampered')
         before = self.protected()
-        _, report, output, commands = self.run_menu('12\n1\n1\n')
+        _, report, output, commands = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['stage'], 'one-pass-precheck')
         self.assertIn('dll-asset:mfc42-prefix:hash-mismatch', report['reason'])
@@ -590,7 +612,7 @@ class PrefixDllOnePassTests(OnePassTests):
 
         self.initialize()
         with patch.object(one_pass, '_dlls', side_effect=drifting):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['reason'], 'fixed-values-changed:dlls')
         self.assertIn('prefixに入れるDLL', report['next_step'])
@@ -614,7 +636,7 @@ class PrefixDllOnePassTests(OnePassTests):
             raise OSError(1, 'Operation not permitted')
 
         with self.exclusive_create(refused):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['reason'], 'prefix-dll-failed')
         self.assertIn('段階: create', report['next_step'])
@@ -622,7 +644,7 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual((failed['phase'], failed['error']['check'], failed['error']['errno'], failed['file_identity']),
                          ('failed', 'create', 1, None))
         self.assertEqual((self.leftovers(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual([item['phase'] for item in self.dll_records()], ['failed', 'present-verified'])
         self.assertEqual(self.dll_records()[1]['resumed_from'], failed['record_id'])
@@ -636,7 +658,7 @@ class PrefixDllOnePassTests(OnePassTests):
             return real_open(*args, **kwargs)
 
         with self.exclusive_create(racing):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), intruder)
         self.assertEqual(self.leftovers(), [])
@@ -654,7 +676,7 @@ class PrefixDllOnePassTests(OnePassTests):
             return real_directory(session, fd)
 
         with patch.object(prefix_dll.PrefixDllSession, '_directory', directory):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(self.dll_records()[0]['phase'], 'failed')
         self.assertEqual(sorted(p.name for p in self.wow64().iterdir() if p.name.lower() == 'mfc42.dll'), ['MFC42.DLL'])
@@ -664,7 +686,7 @@ class PrefixDllOnePassTests(OnePassTests):
         self.initialize()
         self.config['game_preparation']['profiles'][0]['title'] = 'Edited after initialization'
         before = self.protected()
-        _, report, _, commands = self.run_menu('12\n1\n')
+        _, report, _, commands = self.run_detail('12\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual((report['stage'], report['reason']), ('profile-selection', 'game profile changed since initialization'))
         self.assertFalse((self.wow64() / 'mfc42.dll').exists())
@@ -674,7 +696,7 @@ class PrefixDllOnePassTests(OnePassTests):
     def test_unclear_process_view_stops_before_the_dll_is_written(self):
         self.initialize()
         with patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(report['stage'], 'prefix-dll')
         self.assertIn('uninspected:target-process-view-not-clear', report['reason'])
@@ -683,7 +705,7 @@ class PrefixDllOnePassTests(OnePassTests):
     def test_reason_never_carries_the_os_error_text(self):
         self.initialize()
         with patch.object(prefix_dll, '_pe_of', side_effect=PermissionError(13, 'denied', '/private/secret/path')):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('x86 system directory not confirmed: PermissionError', report['reason'])
         self.assertNotIn('/private/secret/path', json.dumps(report))
@@ -691,11 +713,11 @@ class PrefixDllOnePassTests(OnePassTests):
     def test_killed_before_creation_leaves_nothing_and_copies_again(self):
         self.initialize()
         with patch.object(prefix_dll, 'load_asset', side_effect=Killed()), self.assertRaises(Killed):
-            self.run_menu('12\n1\n1\n')
+            self.run_detail('12\n1\n1\n')
         (interrupted,) = self.dll_records()
         self.assertEqual(interrupted['phase'], 'planned')
         self.assertEqual((self.leftovers(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(report['steps'][0]['plan']['action'], 'install')
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), DLL_DATA)
@@ -711,7 +733,7 @@ class PrefixDllOnePassTests(OnePassTests):
             return real_open(*args, **kwargs)
 
         with self.exclusive_create(observe):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(len(seen), 1)
         self.assertTrue({signal.SIGINT, signal.SIGTERM} <= seen[0])
@@ -732,13 +754,13 @@ class PrefixDllOnePassTests(OnePassTests):
     def test_killed_between_creation_and_its_record_leaves_an_empty_file_that_stops(self):
         self.initialize()
         with self.saves_failing_at(2, Killed()), self.assertRaises(Killed):
-            self.run_menu('12\n1\n1\n')
+            self.run_detail('12\n1\n1\n')
         placed = self.wow64() / 'mfc42.dll'
         self.assertEqual(placed.read_bytes(), b'')
         (saved,) = self.dll_records()
         self.assertEqual((saved['phase'], saved['file_identity']), ('planned', None))
         before = placed.stat()
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         after = placed.stat()
         self.assertEqual((placed.read_bytes(), after.st_ino, after.st_mtime_ns), (b'', before.st_ino, before.st_mtime_ns))
@@ -761,14 +783,14 @@ class PrefixDllOnePassTests(OnePassTests):
             return real_fstat(fd, *args, **kwargs)
 
         with self.exclusive_create(opened), patch.object(prefix_dll.os, 'fstat', side_effect=fstat):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('空のファイルが残っている可能性', report['next_step'])
         (saved,) = self.dll_records()
         self.assertEqual((saved['phase'], saved['file_identity'], saved['error']['check'], saved['error']['errno']),
                          ('planned', None, 'record-created', 5))
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), b'')
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('after planned', report['reason'])
         self.assertEqual(len(self.dll_records()), 1)
@@ -777,27 +799,27 @@ class PrefixDllOnePassTests(OnePassTests):
     def test_failed_record_of_the_creation_keeps_the_file_and_the_created_phase(self):
         self.initialize()
         with self.saves_failing_at(2, OSError(28, 'No space left on device')):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         (saved,) = self.dll_records()
         self.assertEqual((saved['phase'], saved['error']['check'], saved['error']['errno']), ('created', 'record-created', 28))
         placed = self.wow64() / 'mfc42.dll'
         self.assertTrue(placed.exists())
         self.assertEqual(saved['file_identity']['inode'], placed.stat().st_ino)
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('partial-file-of-the-previous-run-operator-recovery', report['reason'])
 
     def test_killed_after_writing_is_accepted_without_copying_again(self):
         self.initialize()
         with patch.object(prefix_dll.PrefixDllSession, '_post', side_effect=Killed()), self.assertRaises(Killed):
-            self.run_menu('12\n1\n1\n')
+            self.run_detail('12\n1\n1\n')
         placed = self.wow64() / 'mfc42.dll'
         self.assertEqual((placed.read_bytes(), placed.stat().st_nlink), (DLL_DATA, 1))
         (saved,) = self.dll_records()
         self.assertEqual((saved['phase'], saved['file_identity']['inode']), ('created', placed.stat().st_ino))
         inode = placed.stat().st_ino
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual((report['steps'][0]['plan']['action'], report['steps'][0]['plan']['reason']),
                          ('skip', 'placed-before-the-record-was-completed'))
@@ -812,13 +834,13 @@ class PrefixDllOnePassTests(OnePassTests):
             raise Killed()
 
         with patch.object(prefix_dll, '_write_all', side_effect=half_then_killed), self.assertRaises(Killed):
-            self.run_menu('12\n1\n1\n')
+            self.run_detail('12\n1\n1\n')
         placed = self.wow64() / 'mfc42.dll'
         partial = placed.read_bytes()
         self.assertEqual(partial, DLL_DATA[:len(DLL_DATA) // 2])
         self.assertEqual(self.dll_records()[0]['phase'], 'created')
         before = placed.stat()
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('partial-file-of-the-previous-run-operator-recovery', report['reason'])
         self.assertIn('回復の手順', report['next_step'])
@@ -827,7 +849,7 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertEqual(len(self.dll_records()), 1)
         # The operator removes the partial file; the next run creates it anew.
         placed.unlink()
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(placed.read_bytes(), DLL_DATA)
         self.assertEqual([item['phase'] for item in self.dll_records()], ['created', 'present-verified'])
@@ -840,13 +862,13 @@ class PrefixDllOnePassTests(OnePassTests):
             return b'x' + real_read(fd, size)[1:]
 
         with patch.object(prefix_dll, '_read_all', side_effect=differs):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         (saved,) = self.dll_records()
         self.assertEqual((saved['phase'], saved['error']['check']), ('created', 'read-back'))
         self.assertIn('段階: read-back', report['next_step'])
         self.assertEqual((self.wow64() / 'mfc42.dll').read_bytes(), DLL_DATA)
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(report['steps'][0]['plan']['action'], 'skip')
 
@@ -868,7 +890,7 @@ class PrefixDllOnePassTests(OnePassTests):
             return info
 
         with patch.object(prefix_dll.os, 'stat', side_effect=other_inode):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         (saved,) = self.dll_records()
         self.assertEqual((saved['phase'], saved['error']['check']), ('created', 'post-inspection'))
@@ -880,7 +902,7 @@ class PrefixDllOnePassTests(OnePassTests):
             raise OSError(95, 'Operation not supported')
 
         with self.exclusive_create(unsupported):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual((self.dll_records()[0]['phase'], self.dll_records()[0]['error']['errno']), ('failed', 95))
         self.assertEqual((self.leftovers(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
@@ -894,7 +916,7 @@ class PrefixDllOnePassTests(OnePassTests):
             return real_load(root, spec)
 
         with patch.object(prefix_dll, 'load_asset', side_effect=changed):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual((self.dll_records()[0]['phase'], self.dll_records()[0]['error']['check']), ('failed', 'read-asset'))
         self.assertFalse((self.wow64() / 'mfc42.dll').exists())
@@ -922,7 +944,7 @@ class PrefixDllOnePassTests(OnePassTests):
     def test_failed_record_of_0_29_0_resumes_with_a_new_creation(self):
         self.initialize()
         self.write_legacy_record('prefixdll-' + '1' * 32)
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(report['steps'][0]['plan']['action'], 'install')
         self.assertEqual(report['steps'][0]['plan']['previous_record']['error']['errno'], 95)
@@ -934,23 +956,23 @@ class PrefixDllOnePassTests(OnePassTests):
         inode = (self.wow64() / 'mfc42.dll').stat().st_ino
         self.write_legacy_record('prefixdll-' + '2' * 32, phase='linked', error=None,
                                  file_identity={'device': (self.wow64() / 'mfc42.dll').stat().st_dev, 'inode': inode})
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
         self.assertEqual(report['steps'][0]['plan']['action'], 'skip')
         (self.wow64() / 'mfc42.dll').unlink()
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('absent after linked', report['reason'])
 
     def test_write_failure_after_creation_keeps_the_file_and_stops_next_time(self):
         self.initialize()
         with patch.object(prefix_dll, '_write_all', side_effect=OSError(28, 'No space left on device')):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('書きかけの可能性', report['next_step'])
         (saved,) = self.dll_records()
         self.assertEqual((saved['phase'], saved['error']['check'], saved['error']['errno']), ('created', 'write', 28))
-        _, report, _, _ = self.run_menu('12\n1\n1\n')
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('operator-recovery:incompatible', report['reason'])
         self.assertEqual(report['steps'][0]['plan']['destination_file']['size'], 0)
@@ -968,7 +990,7 @@ class PrefixDllOnePassTests(OnePassTests):
             return real_guard(session)
 
         with patch.object(prefix_dll.PrefixDllSession, '_guard', guard):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertIn('ファイルは作っていません', report['next_step'])
         (saved,) = self.dll_records()
@@ -996,7 +1018,7 @@ class PrefixDllOnePassTests(OnePassTests):
             return real_directory(session, fd)
 
         with patch.object(prefix_dll.PrefixDllSession, '_directory', directory):
-            _, report, _, _ = self.run_menu('12\n1\n1\n')
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
         self.assertEqual(report['status'], 'stopped', report)
         self.assertEqual(self.dll_records()[0]['phase'], 'failed')
         self.assertEqual(list(self.wow64().iterdir()), [])

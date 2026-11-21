@@ -362,7 +362,7 @@ class PrefixDllPlan:
 
 
 def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer, source, games, steam, settings, home,
-                    environment, runtime_root, stop_check):
+                    environment, runtime_root, stop_check, inventory=None):
     """Read-only plan for one ``prefix-dll`` dependency of an initialized game prefix.
 
     The process view is observed before and after the inspection; an unclear view makes the
@@ -377,7 +377,7 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
     require(item["status"] == "ready", "prefix DLL recipe is blocked")
     base = plan_recheck(record=record, record_sha256=record_sha256, config=config, directory=directory, renderer=renderer,
                         source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
-                        runtime_root=runtime_root, records=GAME_RECORDS)
+                        runtime_root=runtime_root, records=GAME_RECORDS, inventory=inventory)
     spec = item["asset"]
     directory = safe_path(directory)
     report = inspect_assets_from_folder({"schema_version": 1, "assets": [spec]}, directory)[0]

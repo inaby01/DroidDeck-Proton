@@ -114,6 +114,14 @@ class StaticFixture(unittest.TestCase):
         report = json.loads((self.f.fixture.source.root / name).read_bytes()) if name else None
         return status, report, output.getvalue()
 
+    def detail_menu(self, text):
+        """The earlier screen inside the detailed menu (4) of the operational entry; the entry screen must come first."""
+        status, report, output = self.menu('4\n' + text)
+        self.assertTrue(output.startswith('1. 新しいゲームを準備'), output)
+        self.assertIn('4. 詳細メニュー', output.split('詳細メニュー（番号は従来どおり）', 1)[0])
+        self.assertIn('詳細メニュー（番号は従来どおり）\n1. 登録済み対象の読み取り検査・計画', output)
+        return status, report, output
+
 
 class StaticPlanTests(StaticFixture):
     def test_plan_is_read_only_and_does_not_claim_execution_readiness(self):

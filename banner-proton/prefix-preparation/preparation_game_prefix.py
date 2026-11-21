@@ -498,7 +498,7 @@ def _payload(base):
 
 
 def plan_game_binding(*, record, record_sha256, config, directory, renderer, source, games, steam, settings, home,
-                      environment, runtime_root, stop_check, recipe=None):
+                      environment, runtime_root, stop_check, recipe=None, inventory=None):
     """Read-only. Binding is allowed only when every profile dependency is live present-verified."""
     from preparation_binding import plan_binding
     from preparation_recheck import plan_recheck
@@ -506,7 +506,7 @@ def plan_game_binding(*, record, record_sha256, config, directory, renderer, sou
     recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
     base = plan_recheck(record=record, record_sha256=record_sha256, config=config, directory=directory, renderer=renderer,
                         source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
-                        runtime_root=runtime_root, records=RECORDS)
+                        runtime_root=runtime_root, records=RECORDS, inventory=inventory)
     profiles, recipes = validate_game_config(config.get("game_preparation"))
     profile = profiles.get(record["profile"]["profile_id"])
     require(profile is not None, "game profile changed since initialization")

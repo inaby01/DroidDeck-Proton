@@ -41,7 +41,11 @@ from preparation_store import PrivateStore
 MODE = "one-pass-game-preparation-result"
 SCOPE = "registered-game-one-pass-preparation"
 SOFTDENCHI = "softdenchi-interactive"
-RESTART_THEN_12 = "DroidDeckを完全に終了して起動し直してから、もう一度 12 で同じゲームを選んでください（続きから進めます）。"
+PREFIX_DLL_BLOCKED = ("DLL（{0}）を入れる前の確認で止まりました。理由は結果JSONにあります。上書き・修復・削除はしていません。"
+                      "置き先に書きかけの {0} が残っている場合は、結果JSONを戻してください（回復の手順をお知らせします）。")
+SOFTDENCHI_STATE_STOP = "ソフト電池の導入記録または状態に確認が要ります。修復はしていません。"
+BINDING_BLOCKED = "全依存が検証済みになるまで割り当てません。"
+BINDING_STOP = "割り当ての状態に確認が要ります。設定は変更していません。"
 # Records after which a new installation may follow (same rule as retry_blockers), except failures.
 RETRYABLE = ("cancelled-absent", "stopped-before-installer", "running", "needs-user")
 
@@ -115,19 +119,37 @@ def changed_items(confirmed, current, ignore=()):
     return [name for name in before if name not in ignore and before[name] != after[name]]
 
 
-FAILED_THEN_MENU9 = ("導入の記録が失敗として残りました。12をもう一度実行しても、この記録で止まります。"
-                     "メニュー9で導入状態を確認し、結果を戻してください。")
+def menu_ref(config, number):
+    # preparation_selection is defined after this module in the bundle, so it is imported here.
+    from preparation_selection import menu_ref as ref
+    return ref(config, number)
 
 
-def installation_next_step(result):
+def one_pass_ref(config):
+    from preparation_selection import one_pass_ref as ref
+    return ref(config)
+
+
+def restart_then_one_pass(config):
+    return ("DroidDeckを完全に終了して起動し直してから、もう一度 " + one_pass_ref(config) +
+            " で同じゲームを選んでください（続きから進めます）。")
+
+
+def failed_then_menu9(config):
+    return ("導入の記録が失敗として残りました。" + one_pass_ref(config) + "をもう一度実行しても、この記録で止まります。" +
+            menu_ref(config, 9) + "で導入状態を確認し、結果を戻してください。")
+
+
+def installation_next_step(result, config):
     """What the operator does after an installation that did not end present-verified."""
     if result is None:
-        return "ソフト電池は導入していません。導入する場合は、もう一度 12 を実行してください。"
+        return "ソフト電池は導入していません。導入する場合は、もう一度 " + one_pass_ref(config) + " を実行してください。"
     if result["status"] == "failed":
-        return FAILED_THEN_MENU9
+        return failed_then_menu9(config)
     if result.get("post_state") in (None, "uninspected"):
-        return RESTART_THEN_12
-    return "ソフト電池の導入は完了していません（" + result["status"] + "）。修復はしていません。メニュー9で状態を確認してください。"
+        return restart_then_one_pass(config)
+    return ("ソフト電池の導入は完了していません（" + result["status"] + "）。修復はしていません。" + menu_ref(config, 9) +
+            "で状態を確認してください。")
 
 
 def softdenchi_action(latest, invalid, current):
@@ -205,6 +227,138 @@ def binding_action(binding, history):
     return "apply", None
 
 
+def action_text(action, recipes):
+    if action.startswith("prefix-dll:"):
+        return "DLL（" + target_name(recipes[action.split(":", 1)[1]]) + "）を入れる"
+    return {"softdenchi-silent": "ソフト電池を画面なしで入れる", "binding": "準備用Protonに割り当てる"}[action]
+
+
+def pre_write_stops(*, profile, recipes, directory, record=None, softdenchi=None, installer=None):
+    """Stops that menu 1 (one-pass) makes before anything is written: (stage, reason, next step) or None.
+
+    ``installer`` is the SoftDenchi asset spec when a new prefix will need it. Shared by
+    menu 1 and the status check (design: operational entry 6.3); read-only, no locks.
+    """
+    from preparation_softdenchi_recipe import bind_asset
+    if record is not None:
+        try:
+            profile_revision_change(profile, record["profile"])
+        except Invalid as error:
+            return "profile-selection", str(error), "初期化したときの作品プロファイルから内容が変わっています。何も変更していません。"
+    stage = "one-pass-precheck"
+    blocked = [dep for dep in profile["dependencies"] if recipes[dep]["status"] != "ready"]
+    if blocked:
+        return stage, "dependency-blocked:" + ",".join(blocked), "この作品には未対応の依存があるため、割り当てまで進めません。何も変更していません。"
+    if installer is not None:
+        # A new prefix always needs the installer: check it before anything is written.
+        checked = inspect_assets_from_folder({"schema_version": 1, "assets": [installer]}, directory)[0]
+        problems = ["asset:" + reason for reason in checked["blockers"]]
+        try:
+            bind_asset(softdenchi, installer, checked["measured"])
+        except Invalid:
+            problems.append("asset-not-recipe-bootstrap")
+        if problems:
+            return stage, ",".join(sorted(problems)), ("インストーラー（" + installer["filename"] +
+                                                      "）がprepare.shと同じフォルダーにないか、内容が違います。何も変更していません。")
+    dll_items = [recipes[dep] for dep in profile["dependencies"] if recipes[dep]["handler"] == PREFIX_DLL]
+    problems = sorted({"dll-asset:" + item["dependency_id"] + ":" + reason
+                       for item, value in zip(dll_items, _dlls(profile, recipes, directory)) for reason in value["blockers"]})
+    if problems:
+        return stage, ",".join(problems), ("prefixに入れるDLL（" + "、".join(item["asset"]["filename"] for item in dll_items) +
+                                          "）がprepare.shと同じフォルダーにないか、内容が違います。何も変更していません。")
+    return None
+
+
+def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, source, games, common, stop_check,
+                    silent_launch=None, inventory=None):
+    """Read-only evaluation of what menu 1 does next for an initialized game (no locks, no writes).
+
+    Uses the plans and decision functions of menu 1's steps in the same order (pre-write stops,
+    binding records, prefix DLL plans, ``softdenchi_action`` with the installation plan, the
+    binding plan with ``binding_action``). Returns ``{"next": "stop", "stage", "reason",
+    "next_step"}`` with menu 1's stage and reason, ``{"next": "continue", "actions"}``, or
+    ``{"next": "ready"}`` (every dependency verified and the game bound). A stop that menu 1
+    would only reach after writing (a binding that cannot follow) is reported before any write.
+    Menu 1 still plans again under its locks before each write. ``inventory`` (the verified
+    payload inventory) lets the status check read the archive once for every game.
+    """
+    from preparation_dependency_install import _installations, plan_dependency_install
+    from preparation_dependency_state import inspect_dependency_state
+    from preparation_recheck import plan_recheck
+    key, actions, steps, stage = record["app_id"], [], [], ["one-pass-precheck"]
+    extra = {} if inventory is None else {"inventory": inventory}
+
+    def stopped(at, reason, next_step=None):
+        return {"next": "stop", "stage": at, "reason": reason, "next_step": next_step, "actions": actions, "steps": steps}
+
+    try:
+        uses_softdenchi = any(recipes[dep]["handler"] == SOFTDENCHI for dep in profile["dependencies"])
+        found = pre_write_stops(profile=profile, recipes=recipes, directory=common["directory"], record=record)
+        if found:
+            return stopped(*found)
+        stage.append("binding-history")
+        management = safe_path(common["home"]) / ".local/state/droiddeck-prefix-preparation/tool-store"
+        history = []
+        if os.path.lexists(management):
+            with PrivateStore(management) as store:
+                history = binding_history(store, key)
+        pending = set()
+        for item in [recipes[dep] for dep in profile["dependencies"] if recipes[dep]["handler"] == PREFIX_DLL]:
+            stage.append("prefix-dll")
+            plan = plan_prefix_dll(record=record, record_sha256=record_digest, item=item, source=source, games=games,
+                                   stop_check=stop_check, **common, **extra)
+            steps.append({"step": "prefix-dll", "evaluated": True, "plan": plan.summary()})
+            if plan.action == "skip":
+                continue
+            if plan.blockers:
+                return stopped("prefix-dll", "prefix-dll-blocked:" + ",".join(plan.blockers), PREFIX_DLL_BLOCKED.format(target_name(item)))
+            pending.add(item["dependency_id"])
+            actions.append("prefix-dll:" + item["dependency_id"])
+        if uses_softdenchi:
+            stage.append("softdenchi-state")
+            base = plan_recheck(record=record, record_sha256=record_digest, source=source, games=games, records=RECORDS,
+                                **common, **extra)
+            previous, invalid = _installations(base.store_root, key)
+            clear = stop_check.check()["clear_in_view"]
+            state = inspect_dependency_state(base.compatdata, softdenchi)["state"] if clear else "uninspected"
+            if clear and not stop_check.check()["clear_in_view"]:
+                state = "uninspected"
+            action, reason, _ = softdenchi_action(previous[-1] if previous else None, invalid, state)
+            steps.append({"step": "softdenchi-state", "evaluated": True, "latest_installation": previous and {
+                name: previous[-1].get(name) for name in ("install_id", "status", "phase")}, "current_state": state,
+                "action": action, "reason": reason})
+            if action == "stop":
+                return stopped("softdenchi-state", reason, SOFTDENCHI_STATE_STOP)
+            if action == "install":
+                stage.append("softdenchi-silent")
+                plan = plan_dependency_install(record=record, record_sha256=record_digest, source=source, games=games,
+                                               recipe=softdenchi, installer_mode="silent", silent_launch=silent_launch,
+                                               **common, **extra)
+                steps.append({"step": "softdenchi-silent", "evaluated": True, "plan": plan.summary()})
+                if plan.blockers:
+                    return stopped("softdenchi-silent", "dependency-plan-blocked:" + ",".join(plan.blockers))
+                pending.add(next(dep for dep in profile["dependencies"] if recipes[dep]["handler"] == SOFTDENCHI))
+                actions.append("softdenchi-silent")
+        stage.append("binding")
+        bplan = plan_game_binding(record=record, record_sha256=record_digest, source=source, games=games,
+                                  stop_check=stop_check, recipe=softdenchi, **common, **extra)
+        action, reason = binding_action(bplan.binding, history)
+        steps.append({"step": "binding-plan", "evaluated": True, "plan": bplan.summary(), "action": action, "reason": reason})
+        # The steps before binding make only the pending dependencies verified.
+        remaining = [blocker for blocker in bplan.blockers if blocker.split(":", 1)[1] not in pending]
+        if remaining:
+            return stopped("binding", "binding-blocked:" + ",".join(remaining), BINDING_BLOCKED)
+        if action == "stop":
+            return stopped("binding", reason, BINDING_STOP)
+        if action == "apply":
+            actions.append("binding")
+        return {"next": "continue" if actions else "ready", "actions": actions, "steps": steps}
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        if not hasattr(error, "preparation_check"):
+            error.preparation_check = stage[-1]
+        raise
+
+
 def interactive_one_pass(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
                          steam=None, settings=None, home=None, runtime_root=Path("/"), recipe=None, silent_launch=None):
     import sys
@@ -224,7 +378,6 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
     from preparation_probe import EXE
     from preparation_recheck import plan_recheck
     from preparation_softdenchi_recipe import (
-        bind_asset,
         softdenchi_recipe,
         validate_recipe,
     )
@@ -267,7 +420,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             report.setdefault("fixed_value_changes", []).append({"stage": where or stage, "items": changed})
             raise Stopped(where or stage, "fixed-values-changed:" + ",".join(changed),
                           "確認したときの内容（" + "・".join(ITEM_TEXT[name] for name in changed) + "）が変わりました。"
-                          "もう一度 12 を実行して、内容を確認し直してください。")
+                          "もう一度 " + one_pass_ref(config) + " を実行して、内容を確認し直してください。")
 
     def interactive_fallback(record, record_digest):
         """Silent run installed nothing: offer the interactive installer under its own confirmation."""
@@ -380,42 +533,18 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             profile_id = record["profile"]["profile_id"]
             require(profile_id in profiles, "game profile changed since initialization")
         profile = profiles[profile_id]
-        if record is not None:
-            # Same rule as the binding plan, before anything is written (DLL and SoftDenchi steps come first).
-            try:
-                profile_revision_change(profile, record["profile"])
-            except Invalid as error:
-                raise Stopped("profile-selection", str(error),
-                              "初期化したときの作品プロファイルから内容が変わっています。何も変更していません。") from error
         report["profile_id"] = profile_id
         uses_softdenchi = any(recipes[dep]["handler"] == SOFTDENCHI for dep in profile["dependencies"])
         asset = (_asset(config, softdenchi, "silent", silent_launch) if uses_softdenchi else
                  {"spec": None, "mode": "none", "arguments": []})
-        stage = "one-pass-precheck"
-        blocked = [dep for dep in profile["dependencies"] if recipes[dep]["status"] != "ready"]
-        if blocked:
-            raise Stopped(stage, "dependency-blocked:" + ",".join(blocked),
-                          "この作品には未対応の依存があるため、割り当てまで進めません。何も変更していません。")
         spec = config["dependency_installation"]["asset"] if uses_softdenchi else None
-        if uses_softdenchi and label == "新規":
-            # A new prefix always needs the installer: check it before anything is written.
-            checked = inspect_assets_from_folder({"schema_version": 1, "assets": [spec]}, directory)[0]
-            problems = ["asset:" + reason for reason in checked["blockers"]]
-            try:
-                bind_asset(softdenchi, spec, checked["measured"])
-            except Invalid:
-                problems.append("asset-not-recipe-bootstrap")
-            if problems:
-                raise Stopped(stage, ",".join(sorted(problems)),
-                              "インストーラー（" + spec["filename"] + "）がprepare.shと同じフォルダーにないか、内容が違います。"
-                              "何も変更していません。")
-
         dll_items = [recipes[dep] for dep in profile["dependencies"] if recipes[dep]["handler"] == PREFIX_DLL]
-        problems = sorted({"dll-asset:" + item["dependency_id"] + ":" + reason
-                           for item, value in zip(dll_items, _dlls(profile, recipes, directory)) for reason in value["blockers"]})
-        if problems:
-            raise Stopped(stage, ",".join(problems), "prefixに入れるDLL（" + "、".join(item["asset"]["filename"] for item in dll_items) +
-                          "）がprepare.shと同じフォルダーにないか、内容が違います。何も変更していません。")
+        stage = "one-pass-precheck"
+        # The same read-only checks as the status check (operational entry 6.3), before anything is written.
+        found = pre_write_stops(profile=profile, recipes=recipes, directory=directory, record=record, softdenchi=softdenchi,
+                                installer=spec if label == "新規" else None)
+        if found:
+            raise Stopped(*found)
 
         def refresh_init():
             return plan_game_prefix(source=source, games=catalog(), key=key, profile_id=profile_id, **common)
@@ -445,6 +574,18 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                              proton=proton, paths=paths, asset=asset, binding=binding.digest,
                              dlls=_dlls(profile, recipes, directory))
         report["confirmed_fixed_values"] = {"digest": digest_json(fixed), "items": item_digests(fixed)}
+        evaluation = None
+        if label != "新規":
+            # The status check's evaluation: a stop that a later step would make is reported before any write.
+            stage = "one-pass-evaluation"
+            evaluation = evaluate_resume(record=record, record_digest=record_digest, profile=profile, recipes=recipes,
+                                         softdenchi=softdenchi, source=source, games=catalog(), common=common,
+                                         stop_check=ProcessStopCheck(compatdata), silent_launch=silent_launch)
+            report["evaluation"] = {"next": evaluation["next"], "actions": evaluation["actions"]}
+            if evaluation["next"] == "stop":
+                report["steps"].extend(evaluation["steps"])
+                raise Stopped(evaluation["stage"], evaluation["reason"], evaluation["next_step"])
+            stage = "one-pass-plan"
         print("ゲーム: " + text(games[key]["title"]) + f" [ID {key}]", file=output)
         print("作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）/ 依存 " +
               text(", ".join(profile["dependencies"])), file=output)
@@ -466,12 +607,16 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             print(f"  {next(steps)}) ソフト電池が入っていなければ、インストーラー（" + text(spec["filename"]) + "、SHA-256 " +
                   spec["expected_sha256"][:16] + "…）を画面なしで実行（" + " ".join(asset["arguments"]) + "）", file=output)
             print("     インストーラーに同梱された使用許諾に同意したうえで導入します。この確認の1は、その同意を含みます。", file=output)
-            print("     使用許諾を画面で読んでから導入したい場合は、ここでqを選び、メニュー8を使ってください。", file=output)
-            print("     導入後にSdProxyが残った場合は、メニュー8と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。",
+            print("     使用許諾を画面で読んでから導入したい場合は、ここでqを選び、" + menu_ref(config, 8) + "を使ってください。",
                   file=output)
+            print("     導入後にSdProxyが残った場合は、" + menu_ref(config, 8) +
+                  "と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。", file=output)
         print(f"  {next(steps)}) ゲームフォルダーのファイルなど、ほかの依存は読み取りで照合（配置はしません）", file=output)
         print(f"  {next(steps)}) 依存がすべて検証済みなら、このゲームだけを準備用Protonへ割り当て（" +
               text(", ".join(binding.summary()["planned_files"]) or "変更なし") + "）", file=output)
+        if evaluation is not None:
+            print("今の状態から見込まれること: " + ("・".join(text(action_text(action, recipes)) for action in evaluation["actions"])
+                                             or "入れるもの・割り当ての変更はありません（照合だけ）"), file=output)
         print("書くもの: 新規prefix・専用work/HOME・prefix内（" + ("DLL・" if dll_items else "") + "ソフト電池）・このゲームの設定項目・私有記録/lock・結果JSON。"
               "既存の他prefix・ゲームフォルダー・認証・セーブは変更しません。", file=output)
         print("すべてのゲーム・Wineを終了してから続行してください。", file=output)
@@ -530,9 +675,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                     continue
                 if dll_plan.blockers:
                     raise Stopped(stage, "prefix-dll-blocked:" + ",".join(dll_plan.blockers),
-                                  "DLL（" + target_name(item) + "）を入れる前の確認で止まりました。理由は結果JSONにあります。"
-                                  "上書き・修復・削除はしていません。置き先に書きかけの " + target_name(item) +
-                                  " が残っている場合は、結果JSONを戻してください（回復の手順をお知らせします）。")
+                                  PREFIX_DLL_BLOCKED.format(target_name(item)))
                 print("prefixに " + text(target_name(item)) + " を入れています。", file=output, flush=True)
                 with droiddeck_lock(settings):
                     session = PrefixDllSession(dll_plan, store, refresh_dll, dll_plan.digest, stop)
@@ -543,7 +686,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 if result["phase"] != "present-verified":
                     step = text(str((result.get("error") or {}).get("check")))
                     if result["phase"] == "failed":
-                        hint = "DLLのファイルは作っていません。原因を取り除いてから、もう一度 12 を実行してください。"
+                        hint = "DLLのファイルは作っていません。原因を取り除いてから、もう一度 " + one_pass_ref(config) + " を実行してください。"
                     elif result["phase"] == "planned":
                         hint = ("DLLのファイルを作った直後に止まりました。空のファイルが残っている可能性があります（削除していません）。"
                                 "結果JSONを戻してください（回復の手順をお知らせします）。")
@@ -565,7 +708,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                     step["note"] = "current-state-confirmed-by-separate-read-only-inspection"
                 report["steps"].append(step)
                 if action == "stop":
-                    raise Stopped(stage, reason, "ソフト電池の導入記録または状態に確認が要ります。修復はしていません。")
+                    raise Stopped(stage, reason, SOFTDENCHI_STATE_STOP)
                 if action == "install":
                     stage = "softdenchi-silent"
 
@@ -594,7 +737,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                         result = interactive_fallback(record, record_digest)
                     if result is None or result["status"] != "present-verified":
                         raise Stopped(stage, "installation-" + ("declined" if result is None else result["status"]),
-                                      installation_next_step(result))
+                                      installation_next_step(result, config))
             stage = "binding"
             bplan = plan_game_binding(record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,
                                       recipe=softdenchi, **common)
@@ -606,11 +749,11 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             report["steps"].append({"step": "binding-plan", "plan": summary, "action": action, "reason": reason})
             # Dependencies first (design 5.1 step 4 before 5): an already bound game is not "ready" while one is unverified.
             if bplan.blockers:
-                raise Stopped(stage, "binding-blocked:" + ",".join(bplan.blockers), "全依存が検証済みになるまで割り当てません。")
+                raise Stopped(stage, "binding-blocked:" + ",".join(bplan.blockers), BINDING_BLOCKED)
             if action == "already-bound":
                 print("このゲームはすでに準備用Protonに割り当て済みです。設定は変更しません。", file=output)
             elif action == "stop":
-                raise Stopped(stage, reason, "割り当ての状態に確認が要ります。設定は変更していません。")
+                raise Stopped(stage, reason, BINDING_STOP)
             else:
                 result = apply_game_binding(bplan, store, lambda: plan_game_binding(
                     record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,

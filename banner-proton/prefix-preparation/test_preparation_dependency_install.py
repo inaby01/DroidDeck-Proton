@@ -692,7 +692,7 @@ class InstallTests(TRIAL['TrialTests']):
             output = io.StringIO()
             with patch.object(dep, 'inventory_processes', side_effect=inventory), \
                     patch.object(dep, 'signal_proxies', lambda *args: real_signal(*args[:3], sender, *args[4:])):
-                dep._offer_session_proxy_stop(session, io.StringIO('1\n'), output, str)
+                dep._offer_session_proxy_stop(session, io.StringIO('1\n'), output, str, next_step=dep.restart_then_menu9(self.config))
             result = dict(session.record)
         self.assertEqual(sent, targets)
         self.assertEqual([item['result'] for item in result['lingering']['stop']['signals']], ['sigterm-sent'] * 2)
@@ -719,7 +719,7 @@ class InstallTests(TRIAL['TrialTests']):
             output = io.StringIO()
             with patch.object(dep, 'inventory_processes', side_effect=inventory), \
                     patch.object(dep, 'signal_proxies', lambda *args: real_signal(*args[:3], sender, *args[4:])):
-                dep._offer_session_proxy_stop(session, io.StringIO('1\n'), output, str)
+                dep._offer_session_proxy_stop(session, io.StringIO('1\n'), output, str, next_step=dep.restart_then_menu9(self.config))
             result = dict(session.record)
         self.assertEqual(sent, [targets[0]])
         stop = result['lingering']['stop']
@@ -802,7 +802,7 @@ class InstallTests(TRIAL['TrialTests']):
             with self.subTest(post_state=post_state):
                 output = io.StringIO()
                 dep._offer_session_proxy_stop(Session({'status': status, 'post_state': post_state, 'lingering': sent}),
-                                              io.StringIO('1\n'), output, str)
+                                              io.StringIO('1\n'), output, str, next_step=dep.restart_then_menu9(self.config))
                 self.assertIn('停止後の状態: ' + status, output.getvalue())
                 self.assertEqual('導入後の検査は済んでいません' in output.getvalue(), missing)
 
