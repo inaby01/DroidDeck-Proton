@@ -1190,7 +1190,11 @@ same numbers, followed by two new ones.
   are grouped once (the tool never adopts an existing prefix). New registrations use the
   only profile without a pinned EXE hash; non-ASCII EXE paths are left to entry 1. When a
   SoftDenchi installation is listed, the installer name, hash, arguments and the licence
-  sentence are shown; "1" includes that consent, as in entry 1.
+  sentence are shown; "1" includes that consent and the SdProxy SIGTERM rule of menu 8.
+  To read the licence on screen, the list points to detailed menu 8 (after menu 10 for a
+  new game). Moves and alignments are planned read-only with the run's own move plan; a
+  move that plan would stop is listed under "not done" with its blockers, and the status
+  check shows the same dependencies and blockers.
 - Without the bundle slot only the placement is listed. It is done with an automatically
   chosen confirmation registration (registrations assigned to a preparation slot first,
   then by number); only a registration-specific failure tries the next one. The list is
@@ -1199,14 +1203,20 @@ same numbers, followed by two new ones.
   in `games.json`, `state.json` (`games_applied`, and its part of `auto`, `picked`,
   `native_choices`) and `config.vdf` must be the listed ones; menu 1 additionally compares
   its fixed values (except the whole-file binding digest) and stops when more actions are
-  needed than confirmed. A game stopped before writing is skipped; a stop after a game
-  started writing ends the run. Outcomes per game: done, not started, stopped before
-  writing, partially applied.
+  needed than confirmed; the listed entries are compared again under the lock. A game
+  stopped before writing is skipped; a stop after a game started writing ends the run.
+  Outcomes per game: done, not started, stopped before writing, partially applied. A
+  partial game names the stage it stopped at, and the binding backup only when it exists.
 - Progress (`batch-runs/`): before a step writes, the record ID it uses (`trial_id`,
   prefix DLL `record_id`, `install_id`, `binding_id`) is saved with the locked store of
-  that step. The next first screen reconciles an unfinished run from those IDs and the
-  private records, shows it, and marks it reviewed when a new run starts. The result JSON
-  is rewritten after every step (private copy and one shared copy, atomically).
+  that step. The next first screen reconciles an unfinished run from those IDs, the
+  private records and what was made under them before a record (an installer input
+  folder, binding backups; a binding note alone counts as nothing written). An unfinished
+  binding whose changed files all hold their new bytes (compared with the note's hashes) is
+  shown as "only the final check is missing". Runs are marked reviewed when a new run
+  starts. The result JSON keeps each game's menu 1 report and journaled IDs and is
+  rewritten whenever an ID is recorded and after every step (private copy and one shared
+  copy, atomically).
 - Moving (operation 5, and the batch run for slots listed in the bundle's `supersedes`):
   only games consistently assigned (all three files, compared by `valve`, `dir` and the
   tool ID) to another preparation slot this tool placed (an `installed-tree-verified`,

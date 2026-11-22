@@ -221,6 +221,15 @@ def apply_note(store, key, plan, before=None):
     return write
 
 
+def confirmed_targets(key, targets):
+    """``under_lock`` of the batch run's binding: the target's items must be the confirmed ones (Proton update 3.5)."""
+    from preparation_proton_update import target_items
+
+    def check(fresh):
+        require(target_items(fresh.before, key) == targets, "confirmed target items changed")
+    return check
+
+
 def previous_roots(common):
     """Other preparation slots this tool placed, for read-only judgements of moved games (Proton update 4.4)."""
     from preparation_proton_update import bundle_directory, placed_roots
@@ -434,7 +443,7 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
 
 def interactive_one_pass(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
                          steam=None, settings=None, home=None, runtime_root=Path("/"), recipe=None, silent_launch=None,
-                         select=None, mode="interactive", expected=None, journal=None):
+                         select=None, mode="interactive", expected=None, journal=None, targets=None):
     """Menu 1 (one-pass preparation). The batch run (design: Proton update 3.5, 6) uses the same code.
 
     ``select=(app_id, profile_id or None)`` skips the game and profile questions. ``mode="plan"``
@@ -445,9 +454,20 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
     needed than confirmed, and returns ``(status, report)`` without saving the result JSON.
     ``journal(store, step, ids)`` is called with the locked private store as soon as a step's
     record ID is chosen and before that step writes anything (design: Proton update 6).
+    ``targets`` (the batch run's confirmed items of this game in the three files) is compared
+    under the private lock, before every step writes and before the binding (design 3.5).
     """
 
+    def check_targets():
+        if targets is None:
+            return
+        from preparation_proton_update import current_files, target_items
+        if target_items(current_files(steam, settings), key) != targets:
+            raise Stopped("batch-confirmation", "confirmed-target-items-changed",
+                          "確認したときから、このゲームの割り当ての設定が変わりました。何も変更していません。")
+
     def noted(store, step, ids):
+        check_targets()
         if journal is not None:
             journal(store, step, ids)
     import sys
@@ -756,6 +776,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         lock = hashlib.sha256(str(compatdata).encode()).hexdigest()
         stop = ProcessStopCheck(compatdata)
         with PrivateStore(management, create=True) as store, store.locked(lock):
+            check_targets()
             # The private lock is held from here to the last step; the plans are compared again under it.
             if label == "新規":
                 stage = "initialize"
@@ -893,7 +914,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 result = apply_game_binding(bplan, store, lambda: plan_game_binding(
                     record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,
                     recipe=softdenchi, **common), bplan.digest, stop, softdenchi,
-                    on_binding_id=apply_note(store, key, bplan, lambda run_id: noted(store, "binding", {"binding_id": run_id})))
+                    on_binding_id=apply_note(store, key, bplan, lambda run_id: noted(store, "binding", {"binding_id": run_id})),
+                    under_lock=None if targets is None else confirmed_targets(key, targets))
                 report["steps"].append({"step": "binding", "result": result})
                 report["binding_written"] = result["status"] == "binding-verified"
                 if result["status"] != "binding-verified":

@@ -117,17 +117,63 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
     def test_a_stop_after_writing_ends_the_run(self):
         self.forget_manifest()
         calls = []
+        original = batch.build
+
+        def twice(ctx):
+            listing = original(ctx)
+            new = next(item for item in listing['items'] if item['kind'] == 'new')
+            listing['items'].append(dict(new))  # A following game (the same one) must not start.
+            return listing
 
         def partial(ctx, item, journal):
             calls.append(item['kind'])
-            return 'partial', {'report': {'status': 'stopped', 'reason': 'synthetic'}}
-        with unittest.mock.patch.object(batch, '_run_one_pass', side_effect=partial), \
+            return 'partial', {'report': {'status': 'stopped', 'reason': 'synthetic', 'stage': 'initialize'}}
+        with unittest.mock.patch.object(batch, 'build', side_effect=twice), \
+                unittest.mock.patch.object(batch, '_run_one_pass', side_effect=partial), \
                 unittest.mock.patch.object(batch, '_save_manifest', side_effect=batch._save_manifest) as saved:
-            _, _, output = self.first_screen('1\n')
+            _, report, output = self.first_screen('1\n')
         self.assertEqual(calls, ['new'])
         self.assertTrue(saved.called)
+        self.assertEqual([item['outcome'] for item in report['items']], ['done', 'partial', 'not-started'])
         self.assertIn('一部適用・要確認', output)
-        self.assertIn('再実行では飛ばされます', output)
+        self.assertIn('「prefixの初期化」の途中かその後で止まりました', output)
+        self.assertIn('再実行では続きから準備します', output)
+        self.assertIn('このあとのゲームは実行していません', output)
+        self.assertNotIn('backups/', output)
+
+    def test_partial_text_by_stage_names_the_backup_only_when_it_exists(self):
+        import types
+        ctx = types.SimpleNamespace(management=self.f.store_root)
+        binding = 'binding-' + 'a' * 32
+        entry = {'outcome': 'partial', 'ids': {'binding': {'binding_id': binding}}}
+        lines = '\n'.join(batch._partial_lines(ctx, {'kind': 'move'}, entry))
+        self.assertIn('バックアップは作られていません', lines)
+        self.assertIn('再実行では飛ばされます', lines)
+        (self.f.store_root / 'backups' / binding).mkdir(parents=True)
+        lines = '\n'.join(batch._partial_lines(ctx, {'kind': 'new'}, entry))
+        self.assertIn('「設定（3つのファイル）の書き換え」', lines)
+        self.assertIn(f'backups/{binding}', lines)
+        lines = '\n'.join(batch._partial_lines(ctx, {'kind': 'new'}, {'ids': {'binding': {'binding_id': '../x'}}}))
+        self.assertNotIn('backups/', lines)
+
+    def test_target_items_changed_after_the_check_stop_under_the_lock(self):
+        original = batch.build
+        confirmed = {}
+
+        def changed(ctx):
+            listing = original(ctx)
+            for item in listing['items']:
+                if item['kind'] == 'new':
+                    item['targets'] = dict(item['targets'], picked=not item['targets']['picked'])
+                    confirmed['targets'] = item['targets']
+            return listing
+        with unittest.mock.patch.object(batch, 'build', side_effect=changed), \
+                unittest.mock.patch.object(batch, '_targets_now', side_effect=lambda ctx, key: confirmed['targets']):
+            _, report, output = self.first_screen('1\n')
+        entry = next(item for item in report['items'] if item['kind'] == 'new')
+        self.assertEqual(entry['outcome'], 'skipped', output)
+        self.assertIn('confirmed-target-items-changed', json.dumps(entry['report']))
+        self.assertFalse(self.game_compat.exists())
 
     def write_run(self, ids):
         with PrivateStore(self.f.store_root, create=True) as store, store.locked('e' * 64):
@@ -157,6 +203,88 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         self.first_screen('1\n')  # A new run marks them reviewed.
         _, _, output = self.first_screen('q\n')
         self.assertNotIn('前回のまとめての実行が途中で終わっています', output)
+
+    def test_artifacts_without_records_count_and_a_note_alone_does_not(self):
+        install = 'depinstall-' + 'b' * 32
+        binding = 'binding-' + 'c' * 32
+        self.write_run({'softdenchi-silent': {'install_id': install}})
+        self.write_run({'binding': {'binding_id': binding}})
+        _, _, output = self.first_screen('q\n')
+        self.assertEqual(output.count('ID 42: 書き込み前に中止'), 2, output)
+        for name in list(self.f.store_root.joinpath(batch.RUNS).iterdir()):
+            name.unlink()
+        (self.home / '.local/share/droiddeck-preparation-work/42/inputs' / install).mkdir(parents=True)
+        (self.f.store_root / 'backups' / binding).mkdir(parents=True)
+        self.write_run({'softdenchi-silent': {'install_id': install}})
+        self.write_run({'binding': {'binding_id': binding}})
+        _, _, output = self.first_screen('q\n')
+        self.assertEqual(output.count('ID 42: 一部適用・要確認'), 2, output)
+
+    def test_unfinished_binding_with_every_file_written_is_final_check_only(self):
+        self.first_screen('1\n')
+        with PrivateStore(self.f.store_root) as store:
+            items, _ = update.history(store, '42')
+        binding = items[-1]['binding_id']
+        with PrivateStore(self.f.store_root) as store, store.locked('e' * 64):
+            record, digest = store.read_record('bindings', binding + '.json')
+            store.write_record('bindings', binding + '.json', dict(record, status='binding-running'), digest)
+        self.write_run({'binding': {'binding_id': binding}})
+        _, _, output = self.first_screen('q\n')
+        self.assertIn('ID 42: 一部適用・要確認（設定はすべて書き換え済みで、最後の確認だけが済んでいません', output)
+
+    def test_result_keeps_each_game_report_and_ids(self):
+        _, report, _ = self.first_screen('1\n')
+        entry = next(item for item in report['items'] if item['kind'] == 'new')
+        self.assertEqual(entry['report']['status'], 'ready-to-launch')
+        self.assertIn('binding_id', entry['ids']['binding'])
+        self.assertIn('groups', report)
+
+    def test_plan_mode_writes_nothing_and_a_run_with_other_fixed_values_stops(self):
+        ctx = batch.Context(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
+                            input_stream=None, output_stream=None, environment=self.environment, steam=self.f.steam,
+                            settings=self.f.settings, home=self.home, runtime_root=self.f.root)
+        profile = self.config['game_preparation']['profiles'][0]['profile_id']
+        before = self.protected()
+        _, plan, _, _ = self.run_menu('', lambda text: (0, ctx.one_pass(select=('42', profile), mode='plan')[1], ''))
+        self.assertIn('fixed', plan, plan)
+        self.assertEqual(before, self.protected())
+        self.assertFalse(self.game_compat.exists())
+        expected = dict(plan, fixed={**plan['fixed'], 'dlls': 'changed'})
+        _, report, _, _ = self.run_menu('', lambda text: (0, ctx.one_pass(select=('42', profile), mode='run',
+                                                                          expected=expected)[1], ''))
+        self.assertEqual((report['stage'], report['reason']), ('batch-confirmation', 'confirmed-values-changed:dlls'))
+        self.assertFalse(self.game_compat.exists())
+
+    def test_an_initialized_game_is_resumed_by_the_batch(self):
+        self.initialize()
+        _, _, output = self.first_screen('q\n')
+        self.assertIn('[ID 42]', output)
+        self.assertNotIn('[ID 42] を新しく準備する', output)
+        _, report, output = self.first_screen('1\n')
+        outcomes = {item['kind']: item['outcome'] for item in report['items']}
+        self.assertEqual(outcomes.get('resume'), 'done', output)
+
+    def test_the_journal_holds_each_id_before_its_record_is_written(self):
+        order = []
+        ids = batch.Journal.ids
+        write = PrivateStore.write_record
+
+        def noted(journal, store, app_id, step, values):
+            order.extend(('journal', value) for value in values.values())
+            return ids(journal, store, app_id, step, values)
+
+        def written(store, directory, name, *args, **kwargs):
+            if directory in batch.ID_RECORDS.values():
+                order.append(('record', name.removesuffix('.json')))
+            return write(store, directory, name, *args, **kwargs)
+        with unittest.mock.patch.object(batch.Journal, 'ids', autospec=True, side_effect=noted), \
+                unittest.mock.patch.object(PrivateStore, 'write_record', autospec=True, side_effect=written):
+            _, report, output = self.first_screen('1\n')
+        self.assertEqual({item['kind']: item['outcome'] for item in report['items']}.get('new'), 'done', output)
+        journaled = [value for kind, value in order if kind == 'journal']
+        self.assertGreaterEqual(len(journaled), 3, order)  # initialize, softdenchi-silent, binding
+        for value in journaled:
+            self.assertLess(order.index(('journal', value)), order.index(('record', value)), order)
 
     def test_changed_target_items_skip_the_game(self):
         original = batch.build
@@ -220,6 +348,35 @@ class MoveBatchTests(BatchFixture, UPDATE['MoveFixture'], ONE['OnePassTests']):
         _, report, output = self.first_screen('2\n')
         self.assertIn('置き換える版ではありません', output)
 
+    def test_a_move_the_run_would_stop_is_listed_under_not_done_and_in_the_status(self):
+        with unittest.mock.patch.object(update, 'proton_prefix_version', return_value='2.0-1'):
+            _, _, output = self.first_screen('q\n')
+            self.assertIn('移すと途中で止まる状態です（prefix-version-differs）', output)
+            self.assertNotIn('へ移す（今: ', output)
+            self.assertNotIn('1. すべて実行する', output)
+            _, report, output = self.first_screen('2\n')
+        entry = next(item for item in report['games'] if item['app_id'] == '42')
+        self.assertEqual((entry['next']['next'], entry['next']['blockers']), ('move-blocked', ['prefix-version-differs']))
+        self.assertIn('依存: ', output)
+        self.assertIn('移すと途中で止まる状態です', output)
+        self.assertEqual(self.selection()['kind'], 'move')
+
+    def test_status_shows_the_dependencies_of_a_move(self):
+        _, report, output = self.first_screen('2\n')
+        entry = next(item for item in report['games'] if item['app_id'] == '42')
+        self.assertTrue(entry['dependencies'], output)
+
+    def test_align_is_listed_and_run_keeping_the_screen_choice(self):
+        games = json.loads(self.games_config.read_text())
+        games['games']['42'] = {'valve': False, 'dir': self.bundle, 'name': update.tool_id_of(self.bundle)}
+        self.games_config.write_text(json.dumps(games, indent=2) + '\n')
+        before = self.games_config.read_bytes()
+        _, report, output = self.first_screen('1\n')
+        outcomes = {item['kind']: item['outcome'] for item in report['items']}
+        self.assertEqual(outcomes.get('align'), 'done', output)
+        self.assertEqual(before, self.games_config.read_bytes())
+        self.assertEqual(self.selection()['kind'], 'bound')
+
     def test_games_on_preparation_slots_are_preferred_for_confirmation(self):
         self.assertIn('42', batch._assigned_to_slots(batch.Context(
             self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config, input_stream=None,
@@ -251,6 +408,49 @@ class PlacementBatchTests(BatchFixture, ONE['OnePassTests']):
         self.assertIn('取り消しました（新しいProtonは置いたままです）', output)
         self.assertFalse(self.game_compat.exists())
 
+    def context(self):
+        return batch.Context(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
+                             input_stream=None, output_stream=None, environment=self.environment, steam=self.f.steam,
+                             settings=self.f.settings, home=self.home, runtime_root=self.f.root)
+
+    def test_a_candidate_that_cannot_confirm_is_skipped_and_the_next_one_used(self):
+        import preparation_selection as selection
+        import preparation_static_placement as placement
+        slot = self.f.steam / 'compatibilitytools.d' / update.bundle_directory(self.config)
+        shutil.rmtree(slot)
+        catalog = selection.registration_catalog
+
+        def with_extra(environment):
+            source, document, games = catalog(environment)
+            return source, document, {**games, '43': dict(games['42'], title='Missing')}
+        candidates = placement._confirmation_candidates
+
+        def plus(games, *args):
+            selectable, excluded = candidates({key: value for key, value in games.items() if key != '43'}, *args)
+            return ['43', *selectable], excluded
+        with unittest.mock.patch.object(selection, 'registration_catalog', side_effect=with_extra), \
+                unittest.mock.patch.object(placement, '_confirmation_candidates', side_effect=plus):
+            # Preferred, but absent from the source.
+            _, result, _, _ = self.run_menu('', lambda text: (0, batch.place_automatically(self.context(), ('43',)), ''))
+        self.assertEqual(result['confirmation'], '42', result)
+        self.assertEqual([item['app_id'] for item in result['skipped_candidates']], ['43'])
+        self.assertTrue(slot.is_dir())
+
+    def test_a_check_common_to_every_candidate_stops_once(self):
+        import preparation_static_placement as placement
+        slot = self.f.steam / 'compatibilitytools.d' / update.bundle_directory(self.config)
+        shutil.rmtree(slot)
+        calls = []
+
+        def broken(*args, **kwargs):
+            calls.append(1)
+            raise batch.Invalid('runtime differs')
+        with unittest.mock.patch.object(placement, 'plan_confirmed_placement', side_effect=broken), \
+                self.assertRaises(batch.Invalid):
+            self.run_menu('', lambda text: (0, batch.place_automatically(self.context()), ''))
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(slot.exists())
+
 
 # Only the fixtures of the one-pass tests are reused, not their tests.
 for _class in (NewGameBatchTests, MoveBatchTests, PlacementBatchTests):
@@ -258,6 +458,23 @@ for _class in (NewGameBatchTests, MoveBatchTests, PlacementBatchTests):
         if _name.startswith('test_') and _name not in _class.__dict__:
             setattr(_class, _name, None)
 del _class, _name
+
+
+class NewDeviceTests(unittest.TestCase):
+    def test_a_run_creates_the_private_folders(self):
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory(dir='/tmp') as root:
+            root = Path(root)
+            for name in ('home', 'steam', 'settings', 'dist'):
+                (root / name).mkdir(mode=0o700)
+            ctx = batch.Context(root / 'dist', None, {}, input_stream=io.StringIO(), output_stream=io.StringIO(),
+                                environment={}, steam=root / 'steam', settings=root / 'settings', home=root / 'home',
+                                runtime_root=None)
+            listing = {'bundle': 'b', 'items': [], 'skipped': [], 'groups': {}}
+            report = batch.run(ctx, listing, [ctx.steam, ctx.settings])
+            self.assertTrue((ctx.management / batch.RUNS / (report['run_id'] + '.json')).is_file())
+            self.assertTrue((root / 'home/.local/state/droiddeck-prefix-preparation/reports').is_dir())
 
 
 if __name__ == '__main__':

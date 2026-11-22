@@ -178,9 +178,10 @@ def _move_view(context, key, bundle):
     try:
         with PrivateStore(management) as store:
             items, _ = history(store, key)
-            _, placed = placed_roots(store, context["steam"], bundle)
-        return classify(current_files(context["steam"], context["settings"]), key, bundle, placed, context["steam"],
-                        tuple(context["config"].get("supersedes", ())), items)
+            roots, placed = placed_roots(store, context["steam"], bundle)
+        decision = classify(current_files(context["steam"], context["settings"]), key, bundle, placed, context["steam"],
+                            tuple(context["config"].get("supersedes", ())), items)
+        return {**decision, "roots": [str(root) for root in roots]}
     except (OSError, ValueError, TypeError, KeyError):
         return None
 
@@ -351,6 +352,28 @@ def _game(key, listed, title, context):
             if move is not None:
                 entry["move"] = move
                 text_ = MOVE_TEXT.get(move["kind"] if move["batch"] else move["reason"], None)
+                if text_ is not None and move["batch"]:
+                    # The run's own read-only plan: dependencies, and what would stop the move (4.4, 4.9).
+                    import types
+
+                    from preparation_batch import plan_move_for
+                    common = context["common"]
+                    ctx = types.SimpleNamespace(**common, management=context["management"])
+                    try:
+                        plan, _, blockers, _ = plan_move_for(ctx, key, record["trial_id"], move, move["roots"])
+                        dependencies = [{"dependency_id": value["dependency_id"], "state": value["state"]}
+                                        for value in plan.dependencies]
+                        entry["dependencies"] = dependencies
+                        print("  依存: " + "、".join(text(value["dependency_id"] + " / " + value["state"])
+                                                    for value in dependencies), file=output)
+                    except (OSError, ValueError, TypeError, KeyError) as error:
+                        blockers = ["unreadable:" + type(error).__name__]
+                    if blockers:
+                        entry["move"] = dict(move, blockers=blockers)
+                        entry["next"] = {"next": "move-blocked", "decision": move, "blockers": blockers}
+                        print("  次にすること: 移すと途中で止まる状態です（" + text(",".join(blockers)) + "）。"
+                              "表示された理由を解消してから、prepare.sh の1（すべて実行）を使ってください。", file=output)
+                        return entry
                 if text_ is not None:
                     entry["next"] = {"next": "move" if move["batch"] else "move-individually", "decision": move}
                     print("  次にすること: " + text_.format(source=text(str(move["source"]))), file=output)

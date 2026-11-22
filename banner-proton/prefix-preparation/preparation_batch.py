@@ -10,7 +10,9 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
+import stat
 import time
 from pathlib import Path
 
@@ -18,7 +20,15 @@ from preparation_common import VERSION, Invalid, require, safe_path
 
 MODE = "batch-result"
 RUNS = "batch-runs"
-OUTCOMES = {"done": "完了", "not-started": "未着手", "skipped": "書き込み前に中止", "partial": "一部適用・要確認"}
+OUTCOMES = {"done": "完了", "not-started": "未着手", "skipped": "書き込み前に中止", "partial": "一部適用・要確認",
+            "running": "実行中に中断・要確認"}
+STAGE_TEXT = {
+    "softdenchi-interactive": "ソフト電池の導入",
+    "softdenchi-silent": "ソフト電池の導入",
+    "initialize": "prefixの初期化",
+    "prefix-dll": "prefixのDLLの用意",
+    "binding": "設定（3つのファイル）の書き換え",
+}
 SKIP_TEXT = {
     "no-record-prefix-exists": "ツールの記録がなく、prefixがあります",
     "non-ascii-path": "EXEのパスに日本語などが含まれます（まとめての実行では準備しません。個別の操作の1で準備できます）",
@@ -194,13 +204,33 @@ def build(ctx):
         except (OSError, Invalid, ValueError):
             entry["also_matches"] = []
         new.append({**entry, "kind": "new", "plan": plan})
+    ready = []
     for item in moves:
         item.update(roots=[str(root) for root in roots])
-    result["items"].extend(moves + resumes + new)
+        # The same read-only plan as the run: a game it would stop is listed under "しないこと" (3.1, 4.4).
+        try:
+            plan, _, blockers, _ = plan_move_for(ctx, item["app_id"], item["trial_id"], item["decision"], item["roots"])
+            item["dependencies"] = [{"dependency_id": value["dependency_id"], "state": value["state"]}
+                                    for value in plan.dependencies]
+        except (OSError, Invalid, TypeError, KeyError, ValueError) as error:
+            blockers = ["unreadable:" + type(error).__name__]
+        if blockers:
+            result["skipped"].append({"app_id": item["app_id"], "title": item["title"],
+                                      "reason": "move-blocked:" + ",".join(blockers)})
+            continue
+        ready.append(item)
+    result["items"].extend(ready + resumes + new)
     installs = [item for item in resumes + new if "softdenchi-silent" in item["plan"]["actions"]]
     if installs:
         result["consent"] = {"games": [item["title"] for item in installs], "asset": installs[0]["plan"]["asset"]}
     return result
+
+
+def _skip_text(reason):
+    if reason.startswith("move-blocked:"):
+        return ("移すと途中で止まる状態です（" + reason.removeprefix("move-blocked:") + "）。"
+                "個別の操作の2（状態の確認）で確かめてください")
+    return SKIP_TEXT.get(reason, reason)
 
 
 def show(ctx, listing):
@@ -253,14 +283,16 @@ def show(ctx, listing):
         print("  インストーラー " + _text(spec["filename"]) + "（SHA-256 " + spec["expected_sha256"][:16] + "…）を画面なしで実行（" +
               " ".join(consent["asset"]["arguments"]) + "）", file=output)
         print("  インストーラーに同梱された使用許諾に同意したうえで導入します。下の1は、その同意を含みます。", file=output)
-        print("  使用許諾を画面で読んでから導入したい場合は、qを選んで、個別の操作の1を使ってください。", file=output)
+        print("  使用許諾を画面で読んでから導入したい場合は、qを選んで、個別の操作の4（詳細メニュー）の8を使ってください"
+              "（新しいゲームは、先に詳細メニューの10で初期化します）。", file=output)
+        print("  導入後にSdProxyが残った場合は、詳細メニューの8と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。",
+              file=output)
     skipped, groups = listing["skipped"], listing["groups"]
     if skipped or groups:
         print(file=output)
         print("しないこと", file=output)
         for item in skipped:
-            print("  - " + _text(item["title"]) + f" [ID {item['app_id']}]: " + _text(SKIP_TEXT.get(item["reason"], item["reason"])),
-                  file=output)
+            print("  - " + _text(item["title"]) + f" [ID {item['app_id']}]: " + _text(_skip_text(item["reason"])), file=output)
         others = groups.get("no-record-prefix-exists", [])
         if others:
             print(f"  - ツールの記録がなく、prefixがあるゲーム（{len(others)}本）: " +
@@ -284,6 +316,7 @@ class Journal:
         self.record = {"schema_version": 1, "kind": "batch-run", "tool_version": VERSION, "run_id": self.run_id,
                        "created_ns": time.time_ns(), "status": "running", "games": []}
         self.hash = None
+        self.on_change = None
 
     def save(self):
         from preparation_store import PrivateStore
@@ -297,6 +330,8 @@ class Journal:
         require(found is not None, "progress record of the game missing")
         found.setdefault("ids", {}).setdefault(step, {}).update(ids)
         self.hash = store.write_record(RUNS, self.run_id + ".json", self.record, self.hash)
+        if self.on_change is not None:
+            self.on_change(app_id, step, ids)
 
     def step(self, app_id, step, outcome=None, **extra):
         found = next((item for item in self.record["games"] if item["app_id"] == app_id and item["step"] == step), None)
@@ -324,32 +359,70 @@ def _record_or_none(store, directory, name):
         return {}
 
 
-def reconcile(store, record):
-    """Outcome of each game of an interrupted run, from its journaled IDs and the private records (design 6).
+def _exists(path):
+    try:
+        os.lstat(path)
+        return True
+    except OSError:
+        return False
 
-    "done" when the game's binding record is verified; "partial" when any record (or the
-    supplementary note of a binding) of a journaled ID exists; "skipped" when the game
-    started but nothing with its IDs was written; journaled outcomes are kept as they are.
+
+def _binding_files(note, files):
+    """``after`` when every file the binding changes already holds its new bytes, else ``mixed`` (design 6)."""
+    states = set()
+    for name, entry in note["files"].items():
+        if not entry["changed"]:
+            continue  # Files the binding does not change are not counted (4.6).
+        raw = files.get(name) if files else None
+        current = None if raw is None else hashlib.sha256(raw).hexdigest()
+        states.add("after" if current == entry["after_sha256"] else
+                   "before" if current == entry["before_sha256"] else "other")
+    return "after" if states == {"after"} else "mixed"
+
+
+def reconcile(store, record, *, home=None, files=None, details=None):
+    """Outcome of each game of an interrupted run, from its journaled IDs and what they made (design 6).
+
+    "done" when the game's binding record is verified; "partial" when a record of a journaled
+    ID exists, or something made under that ID before its record (an installer's input folder,
+    a binding's backups); "skipped" when the game started but nothing with its IDs was written
+    (a binding note alone: it is written before the binding record and changes no setting).
+    For a binding that did not finish, the three files (``files``) are compared with the note's
+    per-file hashes, never with ``completed_files``: ``details[app] = "final-check-only"``
+    when every changed file already holds its new bytes. Journaled outcomes are kept.
     """
-    from preparation_proton_update import NOTES
+    from preparation_proton_update import NOTES, validate_note
+    from preparation_store import COMPONENT
     result = {}
     for item in record.get("games", []):
-        if item.get("outcome") in OUTCOMES:
-            result[item["app_id"]] = item["outcome"]
+        app = item["app_id"]
+        if item.get("outcome") in ("done", "not-started", "skipped", "partial"):
+            result[app] = item["outcome"]
             continue
         evidence, done = False, False
         for ids in item.get("ids", {}).values():
             for name, value in ids.items():
                 directory = ID_RECORDS.get(name)
-                if directory is None or type(value) is not str:
+                if directory is None or type(value) is not str or not COMPONENT.fullmatch(value):
                     continue
                 found = _record_or_none(store, directory, value + ".json")
                 if found is not None:
                     evidence = True
                     done = done or (name == "binding_id" and found.get("status") == "binding-verified")
-                elif name == "binding_id" and _record_or_none(store, NOTES, value + ".json") is not None:
-                    evidence = True
-        result[item["app_id"]] = "done" if done else "partial" if evidence else "skipped"
+                    if name == "binding_id" and found.get("status") != "binding-verified" and details is not None:
+                        note = _record_or_none(store, NOTES, value + ".json")
+                        try:
+                            validate_note(note)
+                            if note["binding_id"] == value and _binding_files(note, files) == "after":
+                                details[app] = "final-check-only"
+                        except (Invalid, TypeError, KeyError, ValueError):
+                            pass
+                elif name == "binding_id":
+                    evidence = evidence or _exists(store.root / "backups" / value)
+                elif name == "install_id" and home is not None:
+                    evidence = evidence or _exists(
+                        Path(home) / ".local/share/droiddeck-preparation-work" / str(app) / "inputs" / value)
+        result[app] = "done" if done else "partial" if evidence else "skipped"
     return result
 
 
@@ -418,24 +491,32 @@ def _save_manifest(ctx, listing):
         return save(store, bundle, build_manifest(bundle, bundle.replace(" ", "-", 1), inventory, custom.overlays, version))
 
 
-def _run_move(ctx, item, listing, journal):
-    """Move or align one game (design 4.2-4.6) with the code of operation 5; returns (outcome, detail)."""
+def plan_move_for(ctx, key, trial_id, decision, roots):
+    """Read-only move plan of one game: (plan, refresh, blockers, stop); the list, the status and the run use it."""
     import preparation_selection as selection
     from preparation_game_prefix import RECORDS
     from preparation_processes import ProcessStopCheck
-    from preparation_proton_update import apply_move, plan_move
+    from preparation_proton_update import plan_move
+    from preparation_store import PrivateStore
+    with PrivateStore(ctx.management) as store:
+        record, digest = store.read_record(RECORDS, trial_id + ".json")
+    source, _, _ = selection.registration_catalog(ctx.environment)
+    stop = ProcessStopCheck(safe_path(ctx.steam / "steamapps/compatdata" / key, ctx.steam))
+    plan, refresh, blockers = plan_move(
+        record=record, digest=digest, decision=decision, roots=tuple(Path(root) for root in roots),
+        config=ctx.config, directory=ctx.directory, renderer=ctx.renderer, steam=ctx.steam, settings=ctx.settings,
+        home=ctx.home, environment=ctx.environment, runtime_root=ctx.runtime_root, source=source, stop=stop)
+    return plan, refresh, blockers, stop
+
+
+def _run_move(ctx, item, listing, journal):
+    """Move or align one game (design 4.2-4.6) with the code of operation 5; returns (outcome, detail)."""
+    from preparation_proton_update import apply_move
     from preparation_store import PrivateStore
     key, decision = item["app_id"], item["decision"]
     started = False
     try:
-        with PrivateStore(ctx.management) as store:
-            record, digest = store.read_record(RECORDS, item["trial_id"] + ".json")
-        source, _, _ = selection.registration_catalog(ctx.environment)
-        stop = ProcessStopCheck(safe_path(ctx.steam / "steamapps/compatdata" / key, ctx.steam))
-        plan, refresh, blockers = plan_move(
-            record=record, digest=digest, decision=decision, roots=tuple(Path(root) for root in item["roots"]),
-            config=ctx.config, directory=ctx.directory, renderer=ctx.renderer, steam=ctx.steam, settings=ctx.settings,
-            home=ctx.home, environment=ctx.environment, runtime_root=ctx.runtime_root, source=source, stop=stop)
+        plan, refresh, blockers, stop = plan_move_for(ctx, key, item["trial_id"], decision, item["roots"])
         if blockers:
             return "skipped", {"blockers": blockers}
         lock = hashlib.sha256(str(plan.base.compatdata).encode()).hexdigest()
@@ -456,7 +537,8 @@ def _run_one_pass(ctx, item, journal):
     def noted(store, step, ids):
         journal.ids(store, item["app_id"], step, ids)
     _, report = ctx.one_pass(select=(item["app_id"], item["plan"]["profile_id"] if item["kind"] == "new" else None),
-                             mode="run", expected=item["plan"], output=ctx.output, journal=noted)
+                             mode="run", expected=item["plan"], output=ctx.output, journal=noted,
+                             targets=item["targets"])
     if report.get("status") == "ready-to-launch":
         return "done", {"report": report}
     wrote = bool(report.get("writes_may_exist")) or any(step.get("record") or step.get("result") or step.get("step") == "initialize"
@@ -469,21 +551,38 @@ def _targets_now(ctx, key):
     return target_items(current_files(ctx.steam, ctx.settings), key)
 
 
-def run(ctx, listing, protected):
-    """Run the confirmed items in order (design 6). Returns the result report.
+def run(ctx, listing, protected, report=None):
+    """Run the confirmed items in order (design 6), updating ``report`` (returned too).
 
     Before a game starts, its items in the three files must be the confirmed ones (3.5);
     other games' entries may have changed (earlier steps write them). The result is written
     after every step: privately, and to the shared copy once it exists.
     """
+    import preparation_selection as selection
+    selection._private_report_directory(ctx.home, protected)  # Creates the private folders on a new device.
     journal = Journal(ctx)
-    report = {"mode": MODE, "tool_version": VERSION, "run_id": journal.run_id, "bundle": listing["bundle"],
-              "items": [{"kind": item["kind"], "app_id": item.get("app_id"), "outcome": "not-started"}
-                        for item in listing["items"]],
-              "skipped_before": listing["skipped"], "preparation_complete": False}
+    report = {} if report is None else report
+    report.update({"mode": MODE, "tool_version": VERSION, "run_id": journal.run_id, "bundle": listing["bundle"],
+                   "items": [{"kind": item["kind"], "app_id": item.get("app_id"), "outcome": "not-started"}
+                             for item in listing["items"]],
+                   "skipped_before": listing["skipped"], "groups": listing["groups"], "preparation_complete": False})
     name = journal.run_id + ".json"
     journal.save()
-    shared = None
+    state = {"shared": None}
+
+    def write_results():
+        _write_private(ctx, protected, name, report)
+        state["shared"] = _update_shared(ctx, protected, report, state["shared"])
+        report["shared_result"] = None if state["shared"] is None else str(state["shared"])
+
+    def changed(app_id, step, ids):
+        for entry in report["items"]:
+            if entry["app_id"] == app_id and entry["outcome"] in ("not-started", "running"):
+                entry.update(outcome="running")
+                entry.setdefault("ids", {}).setdefault(step, {}).update(ids)
+                break
+        write_results()
+    journal.on_change = changed
     stopped = False
     for index, item in enumerate(listing["items"]):
         entry = report["items"][index]
@@ -492,8 +591,8 @@ def run(ctx, listing, protected):
         app = item.get("app_id") or "-"
         journal.step(app, item["kind"], "running")
         if item["kind"] == "save-manifest":
-            state = _save_manifest(ctx, listing)
-            entry.update(outcome="done" if state in ("created", "same") else "skipped", state=state)
+            saved = _save_manifest(ctx, listing)
+            entry.update(outcome="done" if saved in ("created", "same") else "skipped", state=saved)
         else:
             try:
                 same = _targets_now(ctx, item["app_id"]) == item["targets"]
@@ -506,16 +605,15 @@ def run(ctx, listing, protected):
                 entry.update(outcome=outcome, **detail)
             else:
                 outcome, detail = _run_one_pass(ctx, item, journal)
-                entry.update(outcome=outcome, status=detail["report"].get("status"),
-                             reason=detail["report"].get("reason"), stage=detail["report"].get("stage"))
+                result = detail["report"]
+                entry.update(outcome=outcome, status=result.get("status"), reason=result.get("reason"),
+                             stage=result.get("stage"), report=result)
         journal.step(app, item["kind"], entry["outcome"])
-        _write_private(ctx, protected, name, report)
-        shared = _update_shared(ctx, protected, report, shared)
+        write_results()
         if entry["outcome"] == "partial":
             stopped = True  # A stop after writing ends the run (design 6).
     journal.record["status"] = "finished"
     journal.save()
-    report["shared_result"] = None if shared is None else str(shared)
     return report
 
 
@@ -549,9 +647,9 @@ def show_outcomes(ctx, report, listing):
         reason = entry.get("reason") or (entry.get("error") or {}).get("reason") or \
             ",".join(entry.get("blockers", []))
         print("  " + label + ": " + OUTCOMES[entry["outcome"]] + (f"（{_text(str(reason))}）" if reason else ""), file=output)
-        if entry["outcome"] == "partial":
-            print("    再実行では飛ばされます。設定のバックアップは私有記録（backups/binding-…）にあります。"
-                  "個別の操作の2（状態の確認）で確かめてください。", file=output)
+        if entry["outcome"] in ("partial", "running"):
+            for line in _partial_lines(ctx, item, entry):
+                print("    " + line, file=output)
     ready = [item for item, entry in zip(listing["items"], report["items"], strict=True)
              if entry["outcome"] == "done" and item["kind"] in ("move", "align", "new", "resume")]
     if ready:
@@ -560,6 +658,40 @@ def show_outcomes(ctx, report, listing):
             print("新しく準備したゲームは、起動したらソフト電池の認証をしてください。", file=output)
         if any(item["kind"] in ("move", "align") for item in ready):
             print("移したゲームは、切り替えたあとの最初の起動が長くなることがあります。", file=output)
+
+
+def _backup_exists(ctx, binding_id):
+    if not isinstance(binding_id, str) or not re.fullmatch(r"binding-[0-9a-f]{32}", binding_id):
+        return False
+    try:
+        return stat.S_ISDIR(os.lstat(Path(ctx.management) / "backups" / binding_id).st_mode)
+    except OSError:
+        return False
+
+
+def _partial_lines(ctx, item, entry):
+    """What a stop after writing left behind, by stage (design 6); the backup only when it exists."""
+    ids = entry.get("ids") or {}
+    if item["kind"] in ("move", "align"):
+        steps = ["binding"]
+    else:
+        steps = [step for step in STAGE_TEXT if step in ids]
+        stage = (entry.get("report") or {}).get("stage")
+        if stage in STAGE_TEXT and stage not in steps:
+            steps.append(stage)
+    stage = steps[-1] if steps else None
+    lines = [("「" + STAGE_TEXT[stage] + "」の途中かその後で止まりました。") if stage else "書き込みのあとで止まりました。"]
+    binding_id = (ids.get("binding") or {}).get("binding_id")
+    if _backup_exists(ctx, binding_id):
+        lines.append(f"書き換える前の設定のバックアップが私有記録（backups/{binding_id}）にあります。")
+    elif stage == "binding":
+        lines.append("設定のバックアップは作られていません（設定はまだ書き換えていない可能性があります）。")
+    if stage == "binding":
+        lines.append("再実行では飛ばされます（設定の書き換えが途中で止まった状態は、もう一度実行しても書き換える前に止まるため）。")
+    else:
+        lines.append("再実行では続きから準備します（続きから行えない状態なら、一覧の「しないこと」に理由が出ます）。")
+    lines.append("このあとのゲームは実行していません。個別の操作の2（状態の確認）で確かめてください。")
+    return lines
 
 
 def place_automatically(ctx, preferred=()):
@@ -576,6 +708,7 @@ def place_automatically(ctx, preferred=()):
     from preparation_target import pin_registration
     config = ctx.config
     source, _, games = selection.registration_catalog(ctx.environment)
+    selection._private_report_directory(ctx.home, [ctx.steam, ctx.settings])  # Creates the private folders.
     selectable, excluded = _confirmation_candidates(games, ctx.steam, ctx.settings, ctx.management)
     order = sorted(selectable, key=lambda key: (key not in preferred, int(key)))
     skipped = []
@@ -633,12 +766,22 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
         if earlier:
             from preparation_store import PrivateStore
             with PrivateStore(ctx.management) as store:
+                try:
+                    from preparation_proton_update import current_files
+                    files = current_files(ctx.steam, ctx.settings)
+                except (OSError, Invalid, ValueError):
+                    files = None
                 for record in earlier:
-                    outcomes = reconcile(store, record)
+                    details = {}
+                    outcomes = reconcile(store, record, home=ctx.home, files=files, details=details)
                     print("前回のまとめての実行が途中で終わっています（" + record["run_id"][:14] + "…）:", file=output)
                     for app, outcome in outcomes.items():
-                        print("  ID " + _text(str(app)) + ": " + OUTCOMES[outcome] +
-                              ("（個別の操作の2（状態の確認）で確かめてください）" if outcome == "partial" else ""), file=output)
+                        extra = ""
+                        if outcome == "partial":
+                            extra = ("（設定はすべて書き換え済みで、最後の確認だけが済んでいません。"
+                                     if details.get(app) == "final-check-only" else "（") + \
+                                "個別の操作の2（状態の確認）で確かめてください）"
+                        print("  ID " + _text(str(app)) + ": " + OUTCOMES[outcome] + extra, file=output)
         print("配布物・準備用Proton・登録済みのゲームを照合しています（何も変更しません）。", file=output, flush=True)
         listing = build(ctx)
         offered = show(ctx, listing)
@@ -675,7 +818,7 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
                 print("取り消しました（新しいProtonは置いたままです）。", file=output)
                 return _finish(ctx, protected, report)
         print("実行しています。操作が終わるまで、ゲームを起動しないでください。", file=output, flush=True)
-        report.update(run(ctx, listing, protected))
+        run(ctx, listing, protected, report)
         show_outcomes(ctx, report, listing)
     except (OSError, ValueError, TypeError, KeyError) as error:
         report.update(status="stopped", **describe_error(error, "batch-run"))
