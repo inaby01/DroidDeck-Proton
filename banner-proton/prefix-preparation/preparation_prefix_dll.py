@@ -395,11 +395,14 @@ def capacity_needs(base, spec):
 
 
 def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer, source, games, steam, settings, home,
-                    environment, runtime_root, stop_check, inventory=None):
+                    environment, runtime_root, stop_check, inventory=None, previous_slots=()):
     """Read-only plan for one ``prefix-dll`` dependency of an initialized game prefix.
 
     The process view is observed before and after the inspection; an unclear view makes the
-    state ``uninspected`` (design 5), which stops.
+    state ``uninspected`` (design 5), which stops. With ``previous_slots`` (another
+    preparation slot this tool placed) an existing DLL of a moved game is judged through a
+    layout still linked into that slot (Proton update 4.4); anything but "skip" then stops,
+    so nothing is written into such a prefix.
     """
     from preparation_dependency_install import _capacity, _tool_directory
     from preparation_game_prefix import RECORDS as GAME_RECORDS
@@ -418,7 +421,7 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
     require(isinstance(stop_check, ProcessStopCheck) and stop_check.compatdata == base.compatdata,
             "matching process observation required")
     if stop_check.check()["clear_in_view"]:
-        state = inspect_prefix_dll(base.compatdata, item, base.inventory, _tool_directory(base))
+        state = inspect_prefix_dll(base.compatdata, item, base.inventory, _tool_directory(base), previous_slots)
         if not stop_check.check()["clear_in_view"]:
             state = {"state": "uninspected", "reason": "concurrent-process-observed"}
     else:
@@ -446,6 +449,8 @@ def plan_prefix_dll(*, record, record_sha256, item, config, directory, renderer,
                 os.close(fd)
             # The common conditions (design 7 step 1: view, layout, builtin names) were checked above.
             action, reason = resume_action(latest, invalid, identity, facts, spec)
+        if state.get("layout") == "previous-slot-link" and action != "skip":
+            action, reason = "stop", "prefix-dll-layout-not-this-proton"
         if action == "stop" and reason not in blockers:
             blockers.append(reason if reason.startswith("prefix-dll") else "prefix-dll-" + reason)
     capacity = {**_capacity(capacity_needs(base, spec)), "reserve_bytes": RESERVE}

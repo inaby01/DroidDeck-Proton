@@ -77,6 +77,29 @@ def current_files(steam, settings):
             "state": _raw(safe_path(settings / "state.json", settings))}
 
 
+def bound_files(before, key, directory, tool):
+    """Which of the three files already assign ``directory`` (``valve``, ``dir`` and the tool ID; design 4.6).
+
+    A ``name`` the DroidDeck screen wrote counts when it is the tool ID; byte equality with
+    the binding plan is not required.
+    """
+    current = current_selection(before, key)
+    found = []
+    if points_to(current["games"], directory, tool):
+        found.append("games")
+    if current["config"] == tool:
+        found.append("config")
+    # state.json also holds what the binding writes besides games_applied: the target is picked,
+    # not in the automatic history and not a native choice (plan_binding).
+    state = _json(before["state"], {})
+    auto, picked, native = state.get("auto"), state.get("picked", []), state.get("native_choices", [])
+    key = app_id(key)
+    if points_to(current["applied"], directory, tool) and type(picked) is list and key in picked and \
+            not (type(auto) is dict and key in auto) and not (type(native) is list and key in native):
+        found.append("state")
+    return found
+
+
 def target_items(files, key):
     """The target's entries in the three files that a binding writes (design 3.5 pin).
 
@@ -305,6 +328,9 @@ def classify(before, key, bundle_directory, placed, steam, superseded, items):
         choice = copy.deepcopy(games)
         if notes_missing(items):
             return result("align", old_dir, "binding-note-missing", choice=choice)
+        if old_dir not in superseded:
+            # As for a move (4.2): only slots this bundle replaces are aligned by the batch run.
+            return result("align", old_dir, "not-superseded-by-this-bundle", choice=choice)
         return result("align", old_dir, None, batch=True, choice=choice)
     if points_to(applied, bundle_directory, bundle_tool) and config == bundle_tool and type(games) is dict:
         return result("screen-other", games.get("dir"), "screen-chose-another-proton")
@@ -678,6 +704,7 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
     management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
     protected, stage, started = [steam, settings], "revert-plan", False
     report = None
+    progress = {}  # The note of the running revert, so a later failure still reports the moved caches (4.7).
     try:
         selection.validate_selection_config(config)
         require("game_preparation" in config, "game preparation not enabled")
@@ -810,6 +837,7 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
                         entry = note(run_id, key, "revert", target_dir, bundle, plan,
                                      cache_move={"planned": caches, "moved": [], "destination": CACHES + "/" + run_id})
                         record_hash = write_note(store, entry)
+                        progress.update(entry=entry)
                         move_caches(store, target_root, caches, run_id, entry, record_hash)
                         strict = verify_fex_runtime_tree(target_root, inventory_of(saved), saved["overlays"])
                         require(strict.get("python_caches") is None, "caches remain in the revert target")
@@ -829,6 +857,12 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
                   "writes": [] if not started else [{"scope": "partial-revert-preserve"}]}
         print("検査停止: " + selection._text(report["check"]) + " / " + selection._text(report["reason"] or report["error_class"]),
               file=output)
+        if progress:
+            move = progress["entry"]["cache_move"]
+            report["cache_move"] = {"binding_id": progress["entry"]["binding_id"], "moved": len(move["moved"]),
+                                    "planned": len(move["planned"]), "destination": move["destination"]}
+            print(f"戻す先のPythonキャッシュを{len(move['moved'])}か所移しました（私有記録の " +
+                  selection._text(move["destination"]) + "）。次の起動で作り直されます。", file=output)
     try:
         saved_path, _ = selection.save_selection_result(directory, home, report, protected)
     except (OSError, ValueError):

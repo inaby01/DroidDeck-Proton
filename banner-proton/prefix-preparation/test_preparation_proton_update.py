@@ -50,6 +50,42 @@ class ProtonUpdateUnitTests(unittest.TestCase):
         self.assertFalse(update.prefix_version_matches(None, b'11.0-100\n'))
         self.assertFalse(update.prefix_version_matches(raw, None))
 
+    def test_slot_users_by_executable_working_directory_or_path_argument(self):
+        import tempfile
+
+        from preparation_processes import observe_slot_users
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            base = Path(folder)
+            slot = base / 'tools' / 'SoftDenchi-Prep-Proton x-beta1'
+            other = base / 'tools' / 'SoftDenchi-Prep-Proton x-beta10'
+            for path in (slot, other):
+                path.mkdir(parents=True)
+                (path / 'proton').write_text('#')
+            (base / 'link').symlink_to(slot)
+            proc = base / 'proc'
+            (proc / str(os.getpid())).mkdir(parents=True)
+
+            def process(pid, argv, cwd=base, exe='/usr/bin/python3', cmdline=True):
+                entry = proc / str(pid)
+                entry.mkdir()
+                (entry / 'stat').write_text(f'{pid} (python3) S ' + ' '.join(['1'] * 25))
+                if cmdline:
+                    (entry / 'cmdline').write_bytes(b'\0'.join(arg.encode() for arg in argv) + b'\0')
+                (entry / 'exe').symlink_to(exe)
+                (entry / 'cwd').symlink_to(cwd)
+
+            process(100, ['python3', str(other / 'proton'), 'run'])  # beta10 is not beta1.
+            self.assertEqual(observe_slot_users(slot, proc)['users'], 0)
+            process(101, ['python3', 'SoftDenchi-Prep-Proton x-beta1/proton'], cwd=base / 'tools')  # Relative.
+            process(102, ['python3', str(base / 'link' / 'proton')])  # Through a symbolic link.
+            process(103, ['python3'], cwd=slot)  # Working directory.
+            process(104, ['wine'], exe=str(slot / 'proton'))  # Executable.
+            found = observe_slot_users(slot, proc)
+            self.assertEqual((found['users'], found['unknown'], found['clear']), (4, 0, False))
+            process(105, [], cmdline=False)  # Unreadable process of the same owner.
+            self.assertEqual(observe_slot_users(other, proc)['unknown'], 1)
+            self.assertFalse(observe_slot_users(other, proc)['clear'])
+
     def test_history_state_rules(self):
         verified = {'status': 'binding-verified', 'completed_files': ['games']}
         empty_failure = {'status': 'binding-failed', 'completed_files': []}
@@ -108,6 +144,16 @@ class MoveFixture:
         link = self.game_compat / 'pfx/drive_c/windows/syswow64/cmd.exe'
         link.unlink()
         link.symlink_to(self.tools / name / 'files/lib/wine/i386-windows/cmd.exe')
+
+    def status_report(self):
+        from preparation_status import interactive_status
+        output = io.StringIO()
+        with unittest.mock.patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe):
+            _, name = interactive_status(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
+                                         output_stream=output, environment=self.environment, steam=self.f.steam,
+                                         settings=self.f.settings, home=self.home, runtime_root=self.f.root)
+        report = json.loads(Path(name if os.path.isabs(name) else self.f.fixture.source.root / name).read_bytes())
+        return next(item for item in report['games'] if item['app_id'] == '42'), output.getvalue()
 
     def move_menu(self, text):
         output = io.StringIO()
@@ -188,6 +234,48 @@ class MoveTests(MoveFixture, ONE['OnePassTests']):
                                   self.games_config.stat().st_ino))
         self.assertEqual(self.selection()['kind'], 'bound')
 
+    def test_aligned_choice_with_the_tool_id_counts_as_bound(self):
+        games = json.loads(self.games_config.read_text())
+        games['games']['42'] = {'valve': False, 'dir': self.bundle, 'name': update.tool_id_of(self.bundle)}
+        self.games_config.write_text(json.dumps(games, indent=2) + '\n')
+        _, report, output = self.move_menu('1\n1\n')
+        self.assertTrue(report['binding_written'], output)
+        entry, text = self.status_report()
+        self.assertEqual(entry['assignment']['kind'], 'this-slot', text)
+        _, again, _, _ = self.run_detail('12\n1\n1\n')
+        self.assertEqual(again['status'], 'ready-to-launch', again)
+
+    def test_alignment_of_a_slot_not_replaced_is_one_by_one(self):
+        self.config['supersedes'] = []
+        games = json.loads(self.games_config.read_text())
+        games['games']['42'] = {'valve': False, 'dir': self.bundle}
+        self.games_config.write_text(json.dumps(games, indent=2) + '\n')
+        decision = self.selection()
+        self.assertEqual((decision['kind'], decision['batch'], decision['reason']),
+                         ('align', False, 'not-superseded-by-this-bundle'))
+
+    def test_a_failed_binding_after_writing_is_never_aligned(self):
+        games = json.loads(self.games_config.read_text())
+        games['games']['42'] = {'valve': False, 'dir': self.bundle}
+        self.games_config.write_text(json.dumps(games, indent=2) + '\n')
+        with PrivateStore(self.f.store_root) as store, store.locked(self.lock()):
+            store.write_record('bindings', 'binding-' + 'a' * 32 + '.json',
+                               {'schema_version': 1, 'tool_version': update.VERSION, 'binding_id': 'binding-' + 'a' * 32,
+                                'app_id': '42', 'input_digest': 'c' * 64, 'status': 'binding-failed',
+                                'completed_files': ['games'], 'preparation_complete': False})
+        self.assertEqual((self.selection()['kind'], self.selection()['reason']), ('other', 'binding-failed-after-writing'))
+
+    def test_binding_records_keep_the_shape_earlier_tools_read(self):
+        self.move_menu('1\n1\n')
+        for path in (self.f.store_root / 'bindings').glob('binding-*.json'):
+            self.assertEqual(set(json.loads(path.read_text())), {
+                'schema_version', 'tool_version', 'binding_id', 'app_id', 'input_digest', 'status', 'completed_files',
+                'preparation_complete'})
+        with PrivateStore(self.f.store_root) as store:
+            self.assertEqual(set(store.inventory()), {
+                'assets', 'runs', 'bindings', 'launches', 'trials', 'rechecks', 'installations', 'dependency_installs',
+                'game_prefixes', 'prefix_dlls', 'backups', 'temporary_records'})
+
     def test_reverse_screen_choice_is_never_written(self):
         _, report, output = self.move_menu('1\n1\n')
         self.assertTrue(report['binding_written'], output)
@@ -265,6 +353,25 @@ class DllMoveTests(MoveFixture, ONE['PrefixDllOnePassTests']):
         self.assertIn('previous-slot-link', output)
         layouts = [item.get('layout') for item in report['plan']['dependencies']]
         self.assertIn('previous-slot-link', layouts)
+
+    def test_moved_game_is_ready_before_its_first_launch(self):
+        _, report, output = self.move_menu('1\n1\n')
+        self.assertTrue(report['binding_written'], output)
+        entry, text = self.status_report()
+        self.assertEqual(entry['next']['next'], 'ready', text)
+        layouts = [item.get('layout') for step in entry.get('evaluated_steps', []) if step['step'] == 'prefix-dll'
+                   for item in [step['plan']['state']]]
+        self.assertIn('previous-slot-link', layouts, text)
+        _, again, _, commands = self.run_detail('12\n1\n1\n')
+        self.assertEqual(again['status'], 'ready-to-launch', again)
+        self.assertEqual(commands, [])
+
+    def test_an_old_slot_builtin_that_is_not_x86_stops_the_move(self):
+        member = self.tools / self.old / 'files/lib/wine/i386-windows/cmd.exe'
+        member.chmod(0o644)
+        member.write_bytes(ONE['DEP']['X64'])
+        _, report, output = self.move_menu('1\n')
+        self.assertFalse(report.get('binding_written'), output)
 
     def test_a_link_into_an_unplaced_slot_stops_the_move(self):
         other = self.bundle + '-foreign'
@@ -461,15 +568,64 @@ class RevertTests(MoveFixture, ONE['OnePassTests']):
 
         def changed(root):
             calls.append(1)
-            result = original(root)
-            if len(calls) == 2:
+            if len(calls) == 2:  # The comparison under the lock sees a cache added after the confirmation.
                 (cache / 'extra.cpython-314.pyc').write_bytes(b'x')
-            return result
+            return original(root)
         before = self.games_config.read_bytes()
         with unittest.mock.patch.object(update, 'list_caches', side_effect=changed):
             _, report, output = self.revert_menu('1\n1\n1\n')
         self.assertFalse(report.get('binding_written'), output)
+        self.assertIn('revert target caches changed', json.dumps(report, ensure_ascii=False))
         self.assertEqual(before, self.games_config.read_bytes())
+
+    def test_failed_write_after_the_cache_move_reports_it(self):
+        self.add_cache(self.old)
+        import preparation_binding as binding
+        with unittest.mock.patch.object(binding, '_atomic', side_effect=OSError(5, 'write refused')):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        self.assertEqual(report['cache_move']['moved'], 1, report)
+        self.assertIn('Pythonキャッシュを1か所移しました', output)
+        self.assertIn('戻すときのキャッシュの退避が途中で止まりました（1か所', self.status_output())
+
+    def test_changed_saved_data_after_the_list_stops(self):
+        import preparation_slot_manifest as manifest
+        path = self.f.store_root / manifest.DIRECTORY / manifest.record_name(self.old)
+        original = update.list_caches
+
+        def tamper(root):
+            path.write_bytes(path.read_bytes().replace(b'"version_value":"', b'"version_value":"changed '))
+            return original(root)
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(update, 'list_caches', side_effect=tamper):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        self.assertIn('slot data changed', json.dumps(report, ensure_ascii=False))
+        self.assertEqual(before, self.games_config.read_bytes())
+
+    def test_a_process_appearing_after_the_confirmation_stops(self):
+        import preparation_processes as processes
+        original = processes.observe_slot_users
+        calls = []
+
+        def appears(root, proc_root=Path('/proc')):
+            calls.append(1)
+            found = original(root, proc_root)
+            return found if len(calls) == 1 else dict(found, users=1, clear=False)
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(processes, 'observe_slot_users', side_effect=appears):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        self.assertIn('revert target slot in use', json.dumps(report, ensure_ascii=False))
+        self.assertEqual(before, self.games_config.read_bytes())
+
+    def test_changed_game_executable_stops(self):
+        import preparation_selection as selection
+        exe = Path(selection.registration_catalog(self.environment)[2]['42']['exe'])
+        with exe.open('ab') as stream:
+            stream.write(b'changed')
+        _, report, output = self.revert_menu('1\n1\n')
+        self.assertIn('game executable changed', json.dumps(report, ensure_ascii=False), output)
 
 
 # Only the fixtures of the one-pass tests are reused, not their tests.

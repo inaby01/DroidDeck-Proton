@@ -72,7 +72,9 @@ def assignment(steam, settings, key, slot):
               "applied_dir": (current["state"] or {}).get("dir")}
     if slot is not None:
         plan = plan_binding(steam, settings, key, slot)
-        bound = [name for name in FILES if plan.before[name] == plan.after[name]]
+        from preparation_proton_update import bound_files
+        meaning = bound_files(plan.before, key, slot, plan.tool)
+        bound = [name for name in FILES if plan.before[name] == plan.after[name] or name in meaning]
         if len(bound) == len(FILES):
             return {**result, "kind": "this-slot"}
         if bound:
@@ -156,7 +158,10 @@ def _interrupted_revert(context, key):
     # A later completed binding (a revert run again, a move) supersedes the interrupted one.
     latest = max((item["note"]["created_ns"] for item in items
                   if item["note_state"] == "valid" and item["status"] == "binding-verified"), default=0)
-    for record in sorted(orphans, key=lambda value: value["created_ns"], reverse=True):
+    # Notes without a binding record, and notes whose binding did not complete (its first write failed).
+    unfinished = orphans + [item["note"] for item in items
+                            if item["note"] is not None and item["status"] in ("binding-failed", "binding-running")]
+    for record in sorted(unfinished, key=lambda value: value["created_ns"], reverse=True):
         move = record.get("cache_move")
         if record["note_kind"] == "revert" and move and record["created_ns"] > latest:
             return {"binding_id": record["binding_id"], "moved": len(move.get("moved", [])),

@@ -221,6 +221,19 @@ def apply_note(store, key, plan, before=None):
     return write
 
 
+def previous_roots(common):
+    """Other preparation slots this tool placed, for read-only judgements of moved games (Proton update 4.4)."""
+    from preparation_proton_update import bundle_directory, placed_roots
+    management = safe_path(common["home"]) / ".local/state/droiddeck-prefix-preparation/tool-store"
+    if not os.path.lexists(management):
+        return ()
+    try:
+        with PrivateStore(management) as store:
+            return placed_roots(store, common["steam"], bundle_directory(common["config"]))[0]
+    except (OSError, ValueError, TypeError, KeyError):
+        return ()
+
+
 def binding_action(binding, history):
     """Design 5.2: decided by the current three files, never by a past record alone.
 
@@ -229,7 +242,11 @@ def binding_action(binding, history):
     it failed after writing) and the files have changed since.
     """
     from preparation_binding import FILES
-    bound = [name for name in FILES if binding.before[name] == binding.after[name]]
+    from preparation_proton_update import bound_files
+    # Compared by meaning, not bytes: a DroidDeck screen choice with the tool ID as ``name`` is bound (Proton update 4.6).
+    meaning = (bound_files(binding.before, binding.registration_id, binding.directory, binding.tool)
+               if hasattr(binding, "registration_id") else [])
+    bound = [name for name in FILES if binding.before[name] == binding.after[name] or name in meaning]
     if len(bound) == len(FILES):
         return "already-bound", None
     if bound:
@@ -319,6 +336,7 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
     from preparation_prefix_dll import capacity_needs as dll_needs
     from preparation_recheck import plan_recheck
     key, actions, steps, stage = record["app_id"], [], [], ["one-pass-precheck"]
+    roots = previous_roots(common)
     extra = {} if inventory is None else {"inventory": inventory}
 
     def stopped(at, reason, next_step=None):
@@ -342,7 +360,7 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
         for item in [recipes[dep] for dep in profile["dependencies"] if recipes[dep]["handler"] == PREFIX_DLL]:
             stage.append("prefix-dll")
             plan = plan_prefix_dll(record=record, record_sha256=record_digest, item=item, source=source, games=games,
-                                   stop_check=stop_check, **common, **extra)
+                                   stop_check=stop_check, previous_slots=roots, **common, **extra)
             steps.append({"step": "prefix-dll", "evaluated": True, "plan": plan.summary()})
             if plan.action == "skip":
                 continue
@@ -394,6 +412,10 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
         bplan = plan_game_binding(record=record, record_sha256=record_digest, source=source, games=games,
                                   stop_check=stop_check, recipe=softdenchi, **common, **extra)
         action, reason = binding_action(bplan.binding, history)
+        if action == "already-bound" and roots:
+            # A moved game before its first launch: its layout may still link into the previous slot.
+            bplan = plan_game_binding(record=record, record_sha256=record_digest, source=source, games=games,
+                                      stop_check=stop_check, recipe=softdenchi, previous_slots=roots, **common, **extra)
         steps.append({"step": "binding-plan", "evaluated": True, "plan": bplan.summary(), "action": action, "reason": reason})
         # The steps before binding make only the pending dependencies verified.
         remaining = [blocker for blocker in bplan.blockers if blocker.split(":", 1)[1] not in pending]
@@ -773,7 +795,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
 
                 def refresh_dll(item=item):
                     return plan_prefix_dll(record=record, record_sha256=record_digest, item=item, source=source,
-                                           games=catalog(), stop_check=stop, **common)
+                                           games=catalog(), stop_check=stop, previous_slots=previous_roots(common), **common)
 
                 dll_plan = refresh_dll()
                 check_fixed(from_base(dll_plan.recheck, asset, plan_binding(steam, settings, key, proton["directory"]).digest))
@@ -850,6 +872,10 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             stage = "binding"
             bplan = plan_game_binding(record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,
                                       recipe=softdenchi, **common)
+            if binding_action(bplan.binding, binding_history(store, key))[0] == "already-bound" and previous_roots(common):
+                # Judgement only (nothing is written for an already bound game): a moved game before its first launch.
+                bplan = plan_game_binding(record=record, record_sha256=record_digest, source=source, games=catalog(),
+                                          stop_check=stop, recipe=softdenchi, previous_slots=previous_roots(common), **common)
             check_fixed(from_base(bplan.base, asset, bplan.binding.digest))
             summary = bplan.summary()
             for item in summary["dependencies"]:

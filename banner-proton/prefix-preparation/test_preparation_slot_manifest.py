@@ -161,6 +161,8 @@ class InstallationRecordTests(unittest.TestCase):
         self.write(installation_record(), installation_record(directory=other),
                    installation_record(directory=other, status="running", published=False, phase="staging"),
                    installation_record(directory=third, status="failed", published=False, phase="staging"),
+                   installation_record(directory=third),
+                   installation_record(directory=third, status="needs-inspection", published=False, phase="publish-intent"),
                    installation_record(directory="SoftDenchi-Proton x"),
                    installation_record(directory=SLOT, version=ENGINE["VERSION"], created_ns=5))
         placed, unreadable = self.placed()

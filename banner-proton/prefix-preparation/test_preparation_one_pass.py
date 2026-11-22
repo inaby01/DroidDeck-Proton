@@ -454,6 +454,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         outside.write_bytes(link.read_bytes())
         link.unlink()
         link.symlink_to(outside)
+        self.assertIn('prefix-layout-not-this-proton', self.install_plan_for(record_, digest).blockers)
         with patch.object(dep.DependencyInstallSession, '_spawn') as spawn, \
                 patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
                 PrivateStore(self.f.store_root) as store, \
