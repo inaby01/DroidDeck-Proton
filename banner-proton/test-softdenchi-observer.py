@@ -38,6 +38,14 @@ def process(pid, image, parent=1, started=10, game_id="test-game", native_progra
                    executable_id=("1:200" if native_program else "") if executable_id is None else executable_id)
 
 
+def isolate_own_pid(test):
+    """snapshot() skips its own PID. In a container the test's real PID can equal
+    a fixture PID, so use one above the kernel's PID limit."""
+    getpid = patch.object(os, "getpid", return_value=4194305)
+    getpid.start()
+    test.addCleanup(getpid.stop)
+
+
 def sample(tracker, processes, now, unreadable=0):
     tracker.update({p.identity: p for p in processes}, unreadable, now)
     return tracker.last_decision
@@ -242,6 +250,9 @@ def stat_text(pid, state="S", threads=1, started=123):
 
 
 class SnapshotTests(unittest.TestCase):
+    def setUp(self):
+        isolate_own_pid(self)
+
     def make_process(self, root, pid, prefix, state="S", argv0=SOFTDENCHI_PROXY, threads=1):
         directory = root / str(pid)
         directory.mkdir()
@@ -799,11 +810,7 @@ class EndToEndTests(unittest.TestCase):
         self.base = Path(temp.name)
         self.root = self.base / "proc"
         self.root.mkdir()
-        # snapshot() skips its own PID. In a container the test's real PID can equal
-        # a fixture PID, so use one above the kernel's PID limit.
-        getpid = patch.object(os, "getpid", return_value=4194305)
-        getpid.start()
-        self.addCleanup(getpid.stop)
+        isolate_own_pid(self)
         self.wine = self.base / "wine-preloader"
         self.wine.write_bytes(b"wine fixture")
         self.server = self.base / "wineserver"
