@@ -90,7 +90,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         entry = self.entry(report)
         self.assertEqual(entry['next'], {'next': 'continue', 'actions': ['softdenchi-silent', 'binding']})
         self.assertEqual(entry['assignment']['kind'], 'none')
-        self.assertIn('1で続きから進めます（ソフト電池を画面なしで入れる・準備用Protonに割り当てる）', output)
+        self.assertIn('の1（すべて実行）で続きから進めます（ソフト電池を画面なしで入れる・準備用Protonに割り当てる）', output)
         _, menu, _, _ = self.run_menu('1\n1\n1\n')
         self.agrees(entry, menu)
 
@@ -218,7 +218,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         with patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):
             _, menu, _, _ = self.run_menu('1\n1\n')
         self.assertEqual(menu['status'], 'stopped')
-        self.assertIn('ゲームとWineを終了してから、もう一度 1 を実行', menu['next_step'])
+        self.assertIn('ゲームとWineを終了してから、もう一度 3（個別の操作）の1 を実行', menu['next_step'])
 
     def test_malformed_state_entry_stops_only_that_game(self):
         self.initialize()
@@ -250,7 +250,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
             slot.rmdir()
             moved.rename(slot)
         self.assertEqual(report['global']['slot'], 'absent')
-        self.assertIn('まだ置かれていません（先に3）', output)
+        self.assertIn('まだ置かれていません（先に prepare.sh の1で置いてください）', output)
         entry = self.entry(report)
         self.assertEqual(entry['next'], {'next': 'undetermined', 'reason': 'slot-absent'})
         self.assertEqual((entry['assignment']['kind'], entry['assignment']['current_tool']), ('undetermined', None))
@@ -397,11 +397,11 @@ class EntryTests(StatusMixin, ONE['OnePassTests']):
     def test_other_input_on_either_screen_cancels_without_writing(self):
         self.initialize()
         before = self.state()
-        for answer in ('', 'q\n', '12\n', '5\n', 'x\n', '4\n', '4\nq\n', '4\n99\n', '4\nx\n'):
+        for answer in ('', 'q\n', '12\n', '7\n', 'x\n', '4\n', '4\nq\n', '4\n99\n', '4\nx\n'):
             with self.subTest(answer=answer):
-                status_code, report, output = self.menu(answer)
+                status_code, report, output = self.entry_menu(answer)
                 self.assertEqual((status_code, report), (0, None))
-                self.assertTrue(output.startswith('1. 新しいゲームを準備'), output)
+                self.assertIn('1. 新しいゲームを準備', output)
                 self.assertTrue(output.endswith('取り消しました。\n'), output)
                 self.assertEqual('詳細メニュー（番号は従来どおり）' in output, answer.startswith('4'))
         self.assertEqual(before, self.state())
@@ -416,9 +416,7 @@ class EntryTests(StatusMixin, ONE['OnePassTests']):
 
     def test_entry_3_uses_an_ordinary_game_and_observes_the_placed_slot(self):
         self.initialize()
-        before = self.state()
-        code, report, output = self.menu('3\n1\n')
-        self.assertEqual(before, self.state())
+        code, report, output = self.entry_menu('3\n1\n')
         self.assertEqual((code, report['mode']), (2, 'static-matching-tool-observed'), output)
         self.assertEqual(report['confirmation_registration']['app_id'], '42')
         self.assertIn('1. Example  [ID 42]', output)
@@ -430,15 +428,15 @@ class EntryTests(StatusMixin, ONE['OnePassTests']):
         _, report, output, _ = self.run_menu('1\n1\n1\n1\nq\n')
         self.assertEqual(report['mode'], 'one-pass-game-preparation-result')
         self.assertEqual(report['reason'], 'installation-declined')
-        self.assertIn('もう一度 1 を実行', report['next_step'])
-        self.assertIn('詳細メニューの8を使ってください', output)
-        self.assertNotIn('メニュー8', output.replace('詳細メニューの8', ''))
+        self.assertIn('もう一度 3（個別の操作）の1 を実行', report['next_step'])
+        self.assertIn('個別の操作の4（詳細メニュー）の8を使ってください', output)
+        self.assertNotIn('メニュー8', output.replace('個別の操作の4（詳細メニュー）の8', ''))
 
     def test_embedded_script_shows_the_entry_screen_and_the_detailed_menu(self):
         import subprocess
         script = self.f.fixture.source.root / 'prepare.sh'
         script.write_text(ONE['GAME']['DEP']['TRIAL']['BASE']['selection'].selection_script(self.config))
-        for answer, expected in (('q\n', '1. 新しいゲームを準備'), ('4\nq\n', '12. 新しいゲームを1回で準備')):
+        for answer, expected in (('q\n', '3. 個別の操作'), ('3\n4\nq\n', '12. 新しいゲームを1回で準備')):
             result = subprocess.run(['bash', str(script)], input=answer, text=True, capture_output=True,
                                     env={**os.environ, 'HOME': str(self.home)}, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)

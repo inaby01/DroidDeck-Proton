@@ -528,25 +528,25 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
         return selection.interactive_selection(directory, renderer, config, **options)
     selection.validate_selection_config(config)
     if selection.operational_layout(config):
-        # Operational entry (design: operational entry 3); 4 shows the earlier screen with the same numbers.
-        print("1. 新しいゲームを準備（初期化→DLL→ソフト電池→割り当て。途中からの再開も可）", file=output)
-        print("2. ゲームの状態を確認（何も変更しません）", file=output)
-        print("3. 新しいProtonを準備用slotに置く（起動しない）", file=output)
-        print("4. 詳細メニュー（検証用・手動の操作）", file=output)
-        print("q. 取消", file=output)
-        answer = stream.readline(32).strip()
-        if answer == "1":
-            from preparation_one_pass import interactive_one_pass
-            return interactive_one_pass(directory, renderer, config, **options)
-        if answer == "2":
-            from preparation_status import interactive_status
-            return interactive_status(directory, renderer, config, **options)
-        if answer == "3":
-            from preparation_static_placement import interactive_confirmed_placement
-            return interactive_confirmed_placement(directory, renderer, config, **options)
-        if answer != "4":
-            print("取り消しました。", file=output)
-            return 0, None
+        # The first screen of 0.31.0 (design: Proton update 3); 0.30.0's entries are under 3 with the same numbers.
+        from preparation_batch import interactive_batch
+        return interactive_batch(directory, renderer, config, **options)
+    return detailed_menu(directory, renderer, config, **options)
+
+
+def detailed_menu(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
+                  steam=None, settings=None, home=None, runtime_root=Path("/")):
+    """The earlier screen (menus 1-12, numbers unchanged); the detailed menu of the operational layout."""
+    import sys
+
+    import preparation_selection as selection
+
+    stream = sys.stdin if input_stream is None else input_stream
+    output = sys.stdout if output_stream is None else output_stream
+    environment = os.environ if environment is None else environment
+    options = {"input_stream": stream, "output_stream": output, "environment": environment,
+               "steam": steam, "settings": settings, "home": home, "runtime_root": runtime_root}
+    if selection.operational_layout(config):
         print("詳細メニュー（番号は従来どおり）", file=output)
     print("1. 登録済み対象の読み取り検査・計画\n2. 新規登録用の検証ファイルを用意\n3. 未完了の検証用記録を全照合して復帰", file=output)
     if "placement_review" in config:

@@ -128,7 +128,7 @@ class ActionTableTests(unittest.TestCase):
         operational = {'probe_material': True, 'initialization_trial': True, 'placement_review': {}, 'game_preparation': {},
                        'dependency_installation': {}}
         earlier = {key: value for key, value in operational.items() if key != 'game_preparation'}
-        for config, again, menu9 in ((operational, 'もう一度 1 ', '詳細メニューの9'), (earlier, 'もう一度 12 ', 'メニュー9')):
+        for config, again, menu9 in ((operational, 'もう一度 3（個別の操作）の1 ', '個別の操作の4（詳細メニュー）の9'), (earlier, 'もう一度 12 ', 'メニュー9')):
             with self.subTest(again=again):
                 self.assertIn(again, one_pass.installation_next_step(None, config))
                 self.assertEqual(one_pass.installation_next_step({'status': 'failed', 'post_state': None}, config),
@@ -164,7 +164,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.silent = {'bootstrap_sha256': self.recipe['bootstrap']['sha256'], 'arguments': ['/s', '/v/qn', '/vREBOOT=ReallySuppress']}
 
     def run_menu(self, text, menu=None):
-        menu = self.menu if menu is None else menu
+        menu = self.entry_menu if menu is None else menu
         with patch.object(trial, 'plan_launch', side_effect=self.launch_fixture), \
                 patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
                 patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe), \
@@ -182,8 +182,8 @@ class OnePassTests(GAME['GamePrefixTests']):
                     for item in store.inventory()['dependency_installs']]
 
     def test_menu_offers_one_pass_only_with_every_step_configured(self):
-        _, _, output = self.menu('q\n')
-        self.assertTrue(output.startswith('1. 新しいゲームを準備'), output)
+        _, _, output = self.entry_menu('q\n')
+        self.assertIn('1. 新しいゲームを準備', output)
         self.assertNotIn('12. ', output)
         _, _, output = self.detail_menu('q\n')
         self.assertIn('12. 新しいゲームを1回で準備', output)

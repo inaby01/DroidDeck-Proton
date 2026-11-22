@@ -11,6 +11,7 @@ example a refused SdProxy stop) is continued by running menu 12 again for the sa
 """
 
 import hashlib
+import io
 import itertools
 import os
 from pathlib import Path
@@ -406,7 +407,17 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
 
 
 def interactive_one_pass(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
-                         steam=None, settings=None, home=None, runtime_root=Path("/"), recipe=None, silent_launch=None):
+                         steam=None, settings=None, home=None, runtime_root=Path("/"), recipe=None, silent_launch=None,
+                         select=None, mode="interactive", expected=None):
+    """Menu 1 (one-pass preparation). The batch run (design: Proton update 3.5, 6) uses the same code.
+
+    ``select=(app_id, profile_id or None)`` skips the game and profile questions. ``mode="plan"``
+    returns ``(0, plan)`` right before the confirmation (read-only, nothing saved) or
+    ``(0, report)`` when it stops before that. ``mode="run"`` skips the confirmation (given on
+    the batch screen), stops before writing when the confirmed values (``expected``, a plan of
+    ``mode="plan"``) changed, except the whole-file binding digest, or when more actions are
+    needed than confirmed, and returns ``(status, report)`` without saving the result JSON.
+    """
     import sys
 
     import preparation_selection as selection
@@ -509,6 +520,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         live.clear()
         return result
 
+    require(mode in ("interactive", "plan", "run") and (mode == "interactive" or select is not None) and
+            (mode != "run" or expected is not None), "invalid one-pass mode")
     try:
         softdenchi = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
         selection.validate_selection_config(config)
@@ -536,22 +549,32 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                                                                os.path.lexists(base_dir / str(int(key_) - 2**32))):
                 candidates.append((key_, "新規"))
         require(candidates, "no registered game to prepare")
-        for number, (key_, label) in enumerate(candidates, 1):
-            print(f"{number}. [{label}] {text(games[key_]['title'])} [ID {key_}]", file=output)
-            print("   " + text(games[key_]["exe"]), file=output)
-            if label == "続きから":
-                print("   今の割り当て: " + text(current_tool(steam, settings, key_)), file=output)
-        print("準備するゲームの番号（qで取消）: ", end="", file=output, flush=True)
-        answer = stream.readline(32).strip()
-        if answer == "q":
-            return 0, None
-        require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(candidates), "invalid game selection")
-        key, label = candidates[int(answer) - 1]
+        if select is not None:
+            labels = dict(candidates)
+            if select[0] not in labels:
+                raise Stopped("registration-selection", "not-a-candidate",
+                              "このゲームは今は準備の対象ではありません。何も変更していません。")
+            key, label = select[0], labels[select[0]]
+        else:
+            for number, (key_, label) in enumerate(candidates, 1):
+                print(f"{number}. [{label}] {text(games[key_]['title'])} [ID {key_}]", file=output)
+                print("   " + text(games[key_]["exe"]), file=output)
+                if label == "続きから":
+                    print("   今の割り当て: " + text(current_tool(steam, settings, key_)), file=output)
+            print("準備するゲームの番号（qで取消）: ", end="", file=output, flush=True)
+            answer = stream.readline(32).strip()
+            if answer == "q":
+                return 0, None
+            require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(candidates), "invalid game selection")
+            key, label = candidates[int(answer) - 1]
         report["app_id"] = key
         exe = safe_path(games[key]["exe"])
         stage = "profile-selection"
         init_plan, record, record_digest = None, None, None
-        if label == "新規":
+        if label == "新規" and select is not None and select[1] is not None:
+            require(select[1] in profiles, "unknown game profile")
+            profile_id = select[1]
+        elif label == "新規":
             measured = exe_identity(exe)["sha256"]
             matches = sorted(pid for pid, item in profiles.items() if item["exe_sha256"] == measured)
             if len(matches) == 1:
@@ -639,6 +662,24 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                                  "すべてのゲームとWineを終了してから、もう一度 " + one_pass_ref(config) + " を実行してください。")
                 raise Stopped(evaluation["stage"], evaluation["reason"], next_step)
             stage = "one-pass-plan"
+        actions = (evaluation["actions"] if evaluation is not None else
+                   [*("prefix-dll:" + item["dependency_id"] for item in dll_items),
+                    *(["softdenchi-silent"] if uses_softdenchi else []), "binding"])
+        if mode == "plan":
+            return 0, {"app_id": key, "label": label, "profile_id": profile_id, "fixed": fixed, "actions": actions,
+                       "uses_softdenchi": uses_softdenchi, "asset": asset, "proton": proton["directory"],
+                       "exe_path_ascii": init_plan.exe_path_ascii if init_plan is not None else True}
+        real_output = output
+        if mode == "run":
+            stage = "batch-confirmation"
+            changed = changed_items(expected["fixed"], fixed, ("binding",))
+            more = sorted(set(actions) - set(expected["actions"]))
+            if changed or more:
+                report["fixed_value_changes"] = [{"stage": stage, "items": changed, "more_actions": more}]
+                raise Stopped(stage, "confirmed-values-changed:" + ",".join(changed + more),
+                              "確認したときの内容から変わりました。何も変更していません。もう一度 prepare.sh を実行してください。")
+            print("準備しています: " + text(games[key]["title"]) + f" [ID {key}]", file=output, flush=True)
+            output = io.StringIO()  # The batch screen showed and confirmed the details.
         print("ゲーム: " + text(games[key]["title"]) + f" [ID {key}]", file=output)
         print("作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）/ 依存 " +
               text(", ".join(profile["dependencies"])), file=output)
@@ -674,8 +715,9 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
               "既存の他prefix・ゲームフォルダー・認証・セーブは変更しません。", file=output)
         print("すべてのゲーム・Wineを終了してから続行してください。", file=output)
         print("この内容で準備する場合は1、取消はq: ", end="", file=output, flush=True)
-        if stream.readline(32).strip() != "1":
+        if mode == "interactive" and stream.readline(32).strip() != "1":
             return 0, None
+        output = real_output
         started = True
         selection._private_report_directory(home, protected)
         lock = hashlib.sha256(str(compatdata).encode()).hexdigest()
@@ -831,6 +873,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             live["step"].update(record=dict(live["session"].record), interrupted=True)
         print("検査停止: " + text(report["check"]) + " / " + text(report["reason"] or report["error_class"]), file=output)
         print("作成物・記録は削除していません。", file=output)
+    if mode != "interactive":
+        return (0 if mode == "plan" else 2), report
     try:
         saved, _ = selection.save_selection_result(directory, home, report, protected)
     except (OSError, ValueError):

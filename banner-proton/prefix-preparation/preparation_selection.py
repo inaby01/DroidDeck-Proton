@@ -54,13 +54,14 @@ def operational_layout(config):
 
 
 def menu_ref(config, number):
-    """How guidance names a menu of the earlier screen: inside the detailed menu when the operational entry is shown."""
-    return ("詳細メニューの" if operational_layout(config) else "メニュー") + str(number)
+    """How guidance names a menu of the earlier screen: inside the detailed menu (individual operation 4)
+    when the operational first screen is shown (design: Proton update 3.7)."""
+    return ("個別の操作の4（詳細メニュー）の" if operational_layout(config) else "メニュー") + str(number)
 
 
 def one_pass_ref(config):
-    """The number that runs the one-pass preparation (operational entry 1, earlier screen 12)."""
-    return "1" if operational_layout(config) else "12"
+    """How guidance names the one-pass preparation (individual operation 1, earlier screen 12)."""
+    return "3（個別の操作）の1" if operational_layout(config) else "12"
 
 
 def _text(value):
@@ -586,7 +587,8 @@ def selection_script(config=None):
              "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
              "preparation_tool_writer", "preparation_store", "preparation_slot_manifest", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_trial", "preparation_trial_audit", "preparation_recheck", "preparation_softdenchi_recipe",
              "preparation_dependency_state", "preparation_dependency_install", "preparation_prefix_dll", "preparation_game_prefix",
-             "preparation_one_pass", "preparation_proton_update", "preparation_status", "preparation_selection")
+             "preparation_one_pass", "preparation_proton_update", "preparation_status", "preparation_batch",
+             "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}
     installer = parent.parent / "install-softdenchi.py"
     if not installer.exists():

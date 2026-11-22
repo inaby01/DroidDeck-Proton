@@ -117,10 +117,24 @@ class StaticFixture(unittest.TestCase):
         report = json.loads((self.f.fixture.source.root / name).read_bytes()) if name else None
         return status, report, output.getvalue()
 
+    def entry_menu(self, text):
+        """0.30.0's operational entries, under 3 (individual operations) of the 0.31.0 first screen.
+
+        The first screen's list is replaced by an empty one here (it reads the whole payload and
+        plans every game); the list itself is tested in test_preparation_batch.py.
+        """
+        empty = {'global': {'payload': 'verified', 'slot': 'verified', 'directory': None}, 'manifest': 'same',
+                 'items': [], 'skipped': [], 'groups': {}, 'consent': None, 'bundle': 'SoftDenchi-Prep-Proton fixture'}
+        with patch('preparation_batch.build', return_value=empty):
+            status, report, output = self.menu('3\n' + text)
+        first, _, rest = output.partition('3. 個別の操作')
+        self.assertIn('することはありません', first)
+        self.assertIn('5. ゲームを移す', rest)
+        return status, report, output
+
     def detail_menu(self, text):
-        """The earlier screen inside the detailed menu (4) of the operational entry; the entry screen must come first."""
-        status, report, output = self.menu('4\n' + text)
-        self.assertTrue(output.startswith('1. 新しいゲームを準備'), output)
+        """The earlier screen inside the detailed menu (3, then 4) of the operational entry; the entry screen comes first."""
+        status, report, output = self.entry_menu('4\n' + text)
         self.assertIn('4. 詳細メニュー', output.split('詳細メニュー（番号は従来どおり）', 1)[0])
         self.assertIn('詳細メニュー（番号は従来どおり）\n1. 登録済み対象の読み取り検査・計画', output)
         return status, report, output

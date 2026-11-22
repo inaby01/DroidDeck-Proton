@@ -121,6 +121,7 @@ def _slot(result, config, directory, renderer, steam, environment, runtime_root)
     custom = plan_customizations(inventory, payload["archive"], payload["mode"], runtime_root / "usr/local/bin/steam-compatibility",
                                  renderer, label=runtime.label, umask=int(runtime.umask, 8), tool_slot="preparation")
     result["directory"] = custom.directory
+    result["customization"] = custom  # Popped by callers; the batch run saves the slot data with it (0.31.0).
     tool = safe_path(steam / "compatibilitytools.d" / custom.directory, steam)
     if not os.path.lexists(tool):
         result["slot"] = "absent"
@@ -128,6 +129,33 @@ def _slot(result, config, directory, renderer, steam, environment, runtime_root)
     verify_fex_runtime_tree(tool, inventory, custom.overlays)
     registered_tool(steam, custom.directory)
     result["slot"] = "verified"
+
+
+MOVE_TEXT = {
+    # Design: Proton update 4.9, the same wording as the first screen.
+    "move": "prepare.sh の1（すべて実行）で、{source} からこのバンドルの準備用Protonへ移します。",
+    "align": "prepare.sh の1（すべて実行）で、DroidDeckの画面で選んだ内容にほかの2つのファイルをそろえます（今: {source}）。",
+    "returned-from-this-slot": "別の準備用Proton（{source}）へ戻してあります。もう一度移すときは個別の操作の5を使ってください。",
+    "not-superseded-by-this-bundle": "このバンドルが置き換える版ではありません（今: {source}）。移すときは個別の操作の5を使ってください。",
+    "binding-note-missing": "割り当ての補足の記録が欠けています（今: {source}）。移すときは個別の操作の5を使ってください。",
+    "screen-chose-another-proton": "DroidDeckの画面で別のProton（{source}）を選択中です。ツールは書きません。",
+}
+
+
+def _move_view(context, key, bundle):
+    """How the move decision sees a game not assigned to this bundle slot (read-only), or None."""
+    from preparation_proton_update import classify, current_files, history, placed_roots
+    management = context["management"]
+    if not os.path.lexists(management):
+        return None
+    try:
+        with PrivateStore(management) as store:
+            items, _ = history(store, key)
+            _, placed = placed_roots(store, context["steam"], bundle)
+        return classify(current_files(context["steam"], context["settings"]), key, bundle, placed, context["steam"],
+                        tuple(context["config"].get("supersedes", ())), items)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
 
 
 def _describe_steps(steps):
@@ -190,12 +218,13 @@ def interactive_status(directory, renderer, config, *, input_stream=None, output
             except (OSError, ValueError, TypeError, KeyError) as error:
                 slot["error"] = describe_error(error, stage)
             inventory = slot.pop("inventory", None)
+            slot.pop("customization", None)
             report["global"] = slot
             if slot["payload"] != "verified":
                 print("このバンドルのProtonの配布物を照合できません（" + text(str(slot["error"]["reason"] or slot["error"]["error_class"])) +
                       "）。依存は判定できません。", file=output)
             elif slot["slot"] == "absent":
-                print("このバンドルの準備用Protonはまだ置かれていません（先に3）。依存は判定できません。", file=output)
+                print("このバンドルの準備用Protonはまだ置かれていません（先に prepare.sh の1で置いてください）。依存は判定できません。", file=output)
             elif slot["slot"] != "verified":
                 print("このバンドルの準備用Protonを照合できません（" + text(str(slot["error"]["reason"] or slot["error"]["error_class"])) +
                       "）。依存は判定できません。", file=output)
@@ -214,7 +243,8 @@ def interactive_status(directory, renderer, config, *, input_stream=None, output
             print("- " + (text(title) if title is not None else "（登録が見つかりません）") + f" [ID {key}]", file=output)
             context = {"games": games, "profiles": profiles, "recipes": recipes, "softdenchi": softdenchi, "source": source,
                        "common": common, "slot": slot, "inventory": inventory, "management": management,
-                       "silent_launch": silent_launch, "output": output, "text": text}
+                       "silent_launch": silent_launch, "output": output, "text": text, "steam": steam,
+                       "settings": settings, "config": config}
             entry.update(_game(key, by_key[key], title, context))
         report.setdefault("status", "reported")
     except (OSError, ValueError, TypeError, KeyError) as error:
@@ -284,6 +314,15 @@ def _game(key, listed, title, context):
         found = assignment(steam, settings, key, slot["directory"])
         entry["assignment"] = found
         print("  割り当て: " + _assignment_text(found, text), file=output)
+        if found["kind"] in ("other", "partial", "other-disagreeing"):
+            move = _move_view(context, key, slot["directory"])
+            if move is not None:
+                entry["move"] = move
+                text_ = MOVE_TEXT.get(move["kind"] if move["batch"] else move["reason"], None)
+                if text_ is not None:
+                    entry["next"] = {"next": "move" if move["batch"] else "move-individually", "decision": move}
+                    print("  次にすること: " + text_.format(source=text(str(move["source"]))), file=output)
+                    return entry
         if found["kind"] == "other":
             entry["next"] = {"next": "out-of-scope"}
             print("  このバンドルの対象外です（別のProtonに割り当て済み）。依存と次にすることは表示しません。", file=output)
@@ -293,7 +332,7 @@ def _game(key, listed, title, context):
         stop_check = ProcessStopCheck(compatdata)
         if not stop_check.check()["clear_in_view"]:
             entry["next"] = {"next": "undetermined", "reason": "game-running"}
-            print("  確認できません（動作中または変化中）。ゲームとWineを終了してから、もう一度2を実行してください。", file=output)
+            print("  確認できません（動作中または変化中）。ゲームとWineを終了してから、もう一度状態の確認を実行してください。", file=output)
             return entry
         evaluation = evaluate_resume(record=record, record_digest=record_digest, profile=profile, recipes=recipes,
                                      softdenchi=context["softdenchi"], source=context["source"], games=context["games"],
@@ -308,10 +347,10 @@ def _game(key, listed, title, context):
         if evaluation["next"] == "ready":
             print("  次にすること: 起動できます（依存はすべて検証済みで、準備用Protonに割り当て済み）。", file=output)
         elif evaluation["next"] == "continue":
-            print("  次にすること: 1で続きから進めます（" + "・".join(text(action_text(action, recipes))
+            print("  次にすること: prepare.sh の1（すべて実行）で続きから進めます（" + "・".join(text(action_text(action, recipes))
                                                        for action in evaluation["actions"]) + "）。", file=output)
         elif any(mark in evaluation["reason"] for mark in UNCLEAR):
-            print("  確認できません（動作中または変化中）。ゲームとWineを終了してから、もう一度2を実行してください。", file=output)
+            print("  確認できません（動作中または変化中）。ゲームとWineを終了してから、もう一度状態の確認を実行してください。", file=output)
         else:
             print("  次にすること: 1（新しいゲームを準備）はここで止まります（" + text(evaluation["stage"] + " / " + evaluation["reason"]) + "）。", file=output)
             if evaluation.get("next_step"):
@@ -321,7 +360,7 @@ def _game(key, listed, title, context):
         changing = bool(input_change(error))
         entry["next"] = {"next": "undetermined", "reason": "changing" if changing else "unreadable"}
         if changing:
-            print("  確認できません（動作中または変化中）。ゲームとWineを終了してから、もう一度2を実行してください。", file=output)
+            print("  確認できません（動作中または変化中）。ゲームとWineを終了してから、もう一度状態の確認を実行してください。", file=output)
         else:
             print("  照合できません: " + text(entry["error"]["check"]) + " / " +
                   text(str(entry["error"]["reason"] or entry["error"]["error_class"])), file=output)
