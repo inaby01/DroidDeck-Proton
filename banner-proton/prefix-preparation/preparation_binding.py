@@ -234,6 +234,7 @@ class BindingPlan:
     before: dict = field(repr=False)
     after: dict = field(repr=False)
     tool_hashes: dict = field(repr=False)
+    choice: object = field(default=None, repr=False)
 
     def summary(self):
         return {"adapter": "droiddeck-0.7.1-target-only", "app_id": self.registration_id,
@@ -246,7 +247,14 @@ class BindingPlan:
                              "binding-writer-not-exposed"], "writes": []}
 
 
-def plan_binding(steam, settings, registration_id, directory):
+def plan_binding(steam, settings, registration_id, directory, choice=None):
+    """Read-only plan to assign one registration to ``directory`` in the three files.
+
+    ``choice`` is the selection to write to ``games.json`` and ``games_applied`` (default
+    ``{"valve": False, "dir": directory}``). Aligning a DroidDeck screen choice keeps the
+    operator's entry, ``name`` included (design: Proton update 4.6); it must point to
+    ``directory`` and the registered tool ID.
+    """
     steam, settings = safe_path(steam), safe_path(settings)
     require(steam != settings and not steam.is_relative_to(settings) and not settings.is_relative_to(steam),
             "Steam/settings roots must be separate")
@@ -268,8 +276,13 @@ def plan_binding(steam, settings, registration_id, directory):
     pending = sum(1 for app, choice in original_games["games"].items() if app != key and (app not in applied or applied[app] != choice))
     games, state = copy.deepcopy(original_games), copy.deepcopy(original_state)
     wanted = {"valve": False, "dir": directory}
+    if choice is not None:
+        _choice(choice)
+        require(choice["valve"] is False and choice["dir"] == directory and choice.get("name", tool) == tool,
+                "selection does not name the target tool")
+        wanted = copy.deepcopy(choice)
     games["games"][key] = wanted
-    applied[key] = wanted
+    applied[key] = copy.deepcopy(wanted)
     state["games_applied"] = applied
     steam_node = checked("binding-steam-config", lambda: Document(before["config"], value_limit=MAX_JSON).node(STEAM_PATH).value)
     require(type(steam_node) is dict, "invalid Steam block")
@@ -297,11 +310,11 @@ def plan_binding(steam, settings, registration_id, directory):
     after = {"config": checked("binding-target-mapping", patch_game_mapping, before["config"], key, tool),
              "games": _encoded(before["games"], games, original_games),
              "state": _encoded(before["state"], state, original_state)}
-    fingerprint = {"version": VERSION, "app_id": key, "directory": directory, "tool": tool,
+    fingerprint = {"version": VERSION, "app_id": key, "directory": directory, "tool": tool, "choice": wanted,
                    "roots": [str(steam), str(settings)], "tool_hashes": tool_hashes,
                    "files": {name: hashlib.sha256(raw).hexdigest() if raw is not None else None for name, raw in before.items()}}
     digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
-    return BindingPlan(key, directory, tool, digest, pending, paths, before, after, tool_hashes)
+    return BindingPlan(key, directory, tool, digest, pending, paths, before, after, tool_hashes, choice)
 
 
 @contextlib.contextmanager
@@ -382,28 +395,48 @@ def validate_binding_record(record, any_version=False):
             all(name in FILES for name in completed) and len(completed) == len(set(completed)), "invalid binding progress")
 
 
-def apply_binding(plan, steam, settings, store, ready):
+READY_KEYS = {"normal": ("target", "dependencies", "payload", "stopped"),
+              # Revert (design: Proton update 4.8): only what is actually verified; never dependencies or payload.
+              "revert": ("target", "stopped", "slot_record")}
+
+
+def apply_binding(plan, steam, settings, store, ready, *, kind="normal", bundle_directory=None, under_lock=None,
+                  on_binding_id=None):
     """Internal only: caller holds tool/prefix locks and supplies real readiness checks.
 
-    ready must recheck target registration, dependency postconditions, trusted payload and stopped processes.
-    No CLI readiness flags, automatic rollback or full-sync invocation are available.
+    ``kind="normal"`` (ready: target registration, dependency postconditions, trusted payload,
+    stopped processes) may only assign the bundle's own slot; ``kind="revert"`` (ready:
+    target, stopped, revert slot record) may only assign another slot. ``bundle_directory``
+    names the bundle slot for both checks (required for a revert). ``under_lock(fresh)``
+    runs once right after the DroidDeck lock is taken and the plan is rebuilt, to compare
+    the confirmed target items (design 3.5); ``on_binding_id(run_id)`` runs once after the
+    binding ID is chosen and before the binding record, backups or settings are written
+    (supplementary records, a revert's cache move; design 4.3, 4.7). No CLI readiness
+    flags, automatic rollback or full-sync invocation are available.
     """
     steam, settings = safe_path(steam), safe_path(settings)
     store._guard()
     require(store._held_target == hashlib.sha256(str(safe_path(steam / "steamapps/compatdata" / plan.registration_id)).encode()).hexdigest(),
             "binding requires the target preparation lock")
     require(callable(ready), "trusted readiness callback required")
+    require(kind in READY_KEYS, "unknown binding kind")
+    if kind == "revert":
+        require(bundle_directory is not None and plan.directory != bundle_directory, "a revert cannot assign the bundle slot")
+    elif bundle_directory is not None:
+        require(plan.directory == bundle_directory, "a binding can only assign the bundle slot")
     def check_ready():
         checks = ready()
-        fields(checks, ("target", "dependencies", "payload", "stopped"))
+        fields(checks, READY_KEYS[kind])
         require(all(value is True for value in checks.values()), "binding prerequisites not verified")
     check_ready()
     for root in (steam, settings):
         require(not (store.root == root or store.root.is_relative_to(root) or root.is_relative_to(store.root)), "backup root overlaps settings")
     with droiddeck_lock(settings) as check_lock:
-        fresh = plan_binding(steam, settings, plan.registration_id, plan.directory)
+        fresh = plan_binding(steam, settings, plan.registration_id, plan.directory, plan.choice)
         require(fresh.digest == plan.digest and fresh.after == plan.after and fresh.before == plan.before
                 and fresh.paths == plan.paths and fresh.tool_hashes == plan.tool_hashes, "binding plan changed")
+        if under_lock is not None:
+            under_lock(fresh)
         expected = dict(plan.before)
 
         def guard():
@@ -416,6 +449,9 @@ def apply_binding(plan, steam, settings, store, ready):
 
         guard()
         run_id = "binding-" + secrets.token_hex(16)
+        if on_binding_id is not None:
+            on_binding_id(run_id)
+            guard()
         result = {"schema_version": 1, "tool_version": VERSION, "binding_id": run_id,
                   "app_id": plan.registration_id, "input_digest": plan.digest, "status": "binding-running",
                   "completed_files": [], "preparation_complete": False}

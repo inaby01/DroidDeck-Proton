@@ -121,12 +121,16 @@ def _pe_of(path_or_fd, dir_fd=None):
         return pe_machine(stream, info.st_size)
 
 
-def check_layout(fd, directory, inventory, tool):
+def check_layout(fd, directory, inventory, tool, previous_slots=()):
     """The x86 system directory of a 64-bit prefix: its reference builtin is x86.
 
     It is either a symbolic link to the verified payload's i386 builtin (Proton links the
     prefix builtins to its own files), or an x86 regular file. ``system32`` is not used: on
     ARM64 devices it holds both ARM64 and x64 images.
+
+    ``previous_slots`` (other preparation slot roots this tool placed) additionally accepts a
+    link into one of them, reported as ``previous-slot-link`` (design: Proton update 4.4).
+    Only read-only judgements and the move decision pass them; writing paths never do.
     """
     member = "files/lib/wine/i386-windows/" + REFERENCE
     info = os.stat(REFERENCE, dir_fd=fd, follow_symlinks=False)
@@ -136,13 +140,37 @@ def check_layout(fd, directory, inventory, tool):
         # Compared by identity: Proton may write the link with another spelling of the tool path.
         expected = safe_path(tool / member, safe_path(tool))
         resolved = os.stat(REFERENCE, dir_fd=fd, follow_symlinks=True)
-        require(stat.S_ISREG(resolved.st_mode) and _identity(resolved) == _identity(os.stat(expected, follow_symlinks=False)),
-                "reference builtin links outside the selected Proton")
-        require(_pe_of(expected) == "x86", "reference builtin is not x86")
-        return "payload-link"
+        require(stat.S_ISREG(resolved.st_mode), "reference builtin links outside the selected Proton")
+        if os.path.exists(expected) and _identity(resolved) == _identity(os.stat(expected, follow_symlinks=False)):
+            require(_pe_of(expected) == "x86", "reference builtin is not x86")
+            return "payload-link"
+        for root in previous_slots:
+            candidate = safe_path(safe_path(root) / member, safe_path(root))
+            try:
+                found = os.stat(candidate, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(found.st_mode) and _identity(resolved) == _identity(found):
+                require(_pe_of(candidate) == "x86", "reference builtin is not x86")
+                return "previous-slot-link"
+        raise Invalid("reference builtin links outside the selected Proton")
     require(stat.S_ISREG(info.st_mode), "reference builtin is not a regular file or payload link")
     require(_pe_of(REFERENCE, fd) == "x86", "reference builtin is not x86")
     return "regular-file"
+
+
+def require_own_layout(compatdata, inventory, tool):
+    """Before Wine runs in a game prefix for SoftDenchi: (a) or (b) only (design: Proton update 4.4).
+
+    A prefix whose x86 reference builtin still links into another preparation slot (or
+    anywhere else) is not written or run with the selected Proton. Raises Invalid or OSError.
+    """
+    directory = system_directory(compatdata)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return check_layout(fd, directory, inventory, tool)
+    finally:
+        os.close(fd)
 
 
 def examine(fd, name):
@@ -228,7 +256,7 @@ def state_of(facts, spec):
     return {"state": "present-verified"}
 
 
-def inspect_prefix_dll(compatdata, item, inventory, tool):
+def inspect_prefix_dll(compatdata, item, inventory, tool, previous_slots=()):
     """Read-only state of one ``prefix-dll`` dependency (the caller observes the process view)."""
     name = target_name(item)
     try:
@@ -239,7 +267,7 @@ def inspect_prefix_dll(compatdata, item, inventory, tool):
     try:
         info = os.fstat(fd)
         try:
-            layout = check_layout(fd, directory, inventory, tool)
+            layout = check_layout(fd, directory, inventory, tool, previous_slots)
         except (OSError, Invalid) as error:
             # Only our own messages; an OSError text may carry local paths.
             detail = str(error) if isinstance(error, Invalid) else type(error).__name__

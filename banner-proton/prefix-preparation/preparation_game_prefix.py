@@ -445,6 +445,7 @@ class GameBindingPlan:
     recipes: dict = field(repr=False)
     profile_revision_change: object = None
     exe_path_ascii: bool = True
+    previous_slots: tuple = ()
 
     def summary(self):
         return {"scope": "registered-game-target-only-binding", "input_digest": self.digest, "app_id": self.base.record["app_id"],
@@ -456,10 +457,13 @@ class GameBindingPlan:
                 "game_launched": False, "authentication_performed": False, "preparation_complete": False, "writes": []}
 
 
-def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe, payload=None):
+def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe, payload=None, previous_slots=()):
     """Live, offline dependency states. A view that is not clear makes every check uninspected.
 
     ``payload`` is (verified inventory, tool directory) of the selected Proton, used by ``prefix-dll``.
+    ``previous_slots`` lets the x86 layout check accept a link into another tool-placed slot
+    (read-only judgement and the move decision only; design: Proton update 4.4). The layout
+    is part of a ``prefix-dll`` state.
     """
     from preparation_dependency_state import inspect_dependency_state
     from preparation_prefix_dll import inspect_prefix_dll
@@ -481,8 +485,8 @@ def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe, pa
             states.append({**declared, **inspect_game_folder_file(exe, item["file"])})
         elif item["handler"] == "prefix-dll":
             require(payload is not None, "payload required for a prefix DLL check")
-            found = inspect_prefix_dll(compatdata, item, *payload)
-            states.append({**declared, **{key: found[key] for key in ("state", "reason") if key in found}})
+            found = inspect_prefix_dll(compatdata, item, *payload, previous_slots)
+            states.append({**declared, **{key: found[key] for key in ("state", "reason", "layout") if key in found}})
         else:
             require(item["handler"] == "softdenchi-interactive", "unsupported ready handler")
             states.append({**declared, "state": inspect_dependency_state(compatdata, recipe)["state"]})
@@ -498,8 +502,13 @@ def _payload(base):
 
 
 def plan_game_binding(*, record, record_sha256, config, directory, renderer, source, games, steam, settings, home,
-                      environment, runtime_root, stop_check, recipe=None, inventory=None):
-    """Read-only. Binding is allowed only when every profile dependency is live present-verified."""
+                      environment, runtime_root, stop_check, recipe=None, inventory=None, previous_slots=(), choice=None):
+    """Read-only. Binding is allowed only when every profile dependency is live present-verified.
+
+    ``previous_slots`` and ``choice`` are for moving a game from another preparation slot
+    (design: Proton update 4.4, 4.6): the x86 layout may still link into one of those slots,
+    and an aligned DroidDeck screen choice is written as it is.
+    """
     from preparation_binding import plan_binding
     from preparation_recheck import plan_recheck
     from preparation_softdenchi_recipe import softdenchi_recipe, validate_recipe
@@ -513,15 +522,17 @@ def plan_game_binding(*, record, record_sha256, config, directory, renderer, sou
     revision_change = profile_revision_change(profile, record["profile"])
     require(isinstance(stop_check, ProcessStopCheck) and stop_check.compatdata == base.compatdata, "matching process observation required")
     exe = base.target.exe
-    dependencies = _dependency_states(profile, recipes, base.compatdata, recipe, stop_check, exe, _payload(base))
+    previous_slots = tuple(safe_path(root) for root in previous_slots)
+    dependencies = _dependency_states(profile, recipes, base.compatdata, recipe, stop_check, exe, _payload(base),
+                                      previous_slots)
     blockers = sorted({("dependency-blocked:" if item["state"] == "blocked" else "dependency-not-verified:") + item["dependency_id"]
                        for item in dependencies if item["state"] != "present-verified"})
-    binding = plan_binding(steam, settings, record["app_id"], base.customization.directory)
+    binding = plan_binding(steam, settings, record["app_id"], base.customization.directory, choice)
     signature = {"version": VERSION, "base": base.digest, "profile": record["profile"]["profile_digest"],
                  "current_profile": digest_json(profile), "dependencies": list(dependencies), "binding": binding.digest,
-                 "blockers": blockers}
+                 "blockers": blockers, "previous_slots": [str(root) for root in previous_slots]}
     return GameBindingPlan(digest_json(signature), base, profile, dependencies, binding, tuple(blockers), recipes,
-                           revision_change, exe_path_ascii(exe))
+                           revision_change, exe_path_ascii(exe), previous_slots)
 
 
 def profile_revision_change(profile, recorded):
@@ -543,7 +554,7 @@ def profile_revision_change(profile, recorded):
             "current_revision": profile["revision"], "current_digest": current}
 
 
-def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=None):
+def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=None, *, under_lock=None, on_binding_id=None):
     """Operator-confirmed target-only binding through the guarded internal writer.
 
     The readiness callback rechecks the registration, the FEX-contract tool tree, the
@@ -573,10 +584,11 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
         require(_prefix(base.compatdata) == base.prefix_version, "game prefix version changed")
         # Same check as planning: an unclear view before or after inspection is never verified.
         states = _dependency_states(plan.profile, plan.recipes, base.compatdata, recipe, stop_check, base.target.exe,
-                                    _payload(base))
+                                    _payload(base), plan.previous_slots)
         require(all(item["state"] == "present-verified" for item in states), "dependency postconditions changed")
         return {"target": True, "dependencies": True, "payload": True, "stopped": True}
-    return apply_binding(plan.binding, base.target.steam, base.settings, store, ready)
+    return apply_binding(plan.binding, base.target.steam, base.settings, store, ready,
+                         bundle_directory=base.customization.directory, under_lock=under_lock, on_binding_id=on_binding_id)
 
 
 def interactive_game_binding(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
@@ -655,7 +667,9 @@ def interactive_game_binding(directory, renderer, config, *, input_stream=None, 
             selection._private_report_directory(home, protected)
             lock = hashlib.sha256(str(plan.base.compatdata).encode()).hexdigest()
             with PrivateStore(management) as store, store.locked(lock):
-                result = apply_game_binding(plan, store, refresh, plan.digest, stop)
+                from preparation_one_pass import apply_note
+                result = apply_game_binding(plan, store, refresh, plan.digest, stop,
+                                            on_binding_id=apply_note(store, record["app_id"], plan))
             report.update(binding=result, binding_written=result["status"] == "binding-verified",
                           writes=[{"scope": "target-only-games-config-state"}, {"scope": "private-binding-backup-and-record"}])
             print("割り当て: " + selection._text(result["status"]) + "。通常のDroidDeckから起動して確認してください。", file=output)

@@ -586,7 +586,7 @@ def selection_script(config=None):
              "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
              "preparation_tool_writer", "preparation_store", "preparation_slot_manifest", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_trial", "preparation_trial_audit", "preparation_recheck", "preparation_softdenchi_recipe",
              "preparation_dependency_state", "preparation_dependency_install", "preparation_prefix_dll", "preparation_game_prefix",
-             "preparation_one_pass", "preparation_status", "preparation_selection")
+             "preparation_one_pass", "preparation_proton_update", "preparation_status", "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}
     installer = parent.parent / "install-softdenchi.py"
     if not installer.exists():

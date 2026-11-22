@@ -207,6 +207,15 @@ def binding_history(store, key):
     return history
 
 
+def apply_note(store, key, plan):
+    """``on_binding_id`` of a new assignment: its supplementary record (design: Proton update 4.3)."""
+    from preparation_proton_update import note, write_note
+
+    def write(run_id):
+        write_note(store, note(run_id, key, "apply", plan.base.customization.directory, None, plan.binding))
+    return write
+
+
 def binding_action(binding, history):
     """Design 5.2: decided by the current three files, never by a past record alone.
 
@@ -801,7 +810,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             else:
                 result = apply_game_binding(bplan, store, lambda: plan_game_binding(
                     record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,
-                    recipe=softdenchi, **common), bplan.digest, stop, softdenchi)
+                    recipe=softdenchi, **common), bplan.digest, stop, softdenchi,
+                    on_binding_id=apply_note(store, key, bplan))
                 report["steps"].append({"step": "binding", "result": result})
                 report["binding_written"] = result["status"] == "binding-verified"
                 if result["status"] != "binding-verified":

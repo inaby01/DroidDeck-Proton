@@ -1,0 +1,479 @@
+"""Moving prepared games between preparation slots (design: Proton update 4.2-4.6, 4.8).
+
+Read-only decisions from the three DroidDeck files of one registration, the binding
+history with its supplementary records (``binding-notes``), the slots this tool placed
+and the bundle's list of slots it replaces. Writing goes through the guarded binding
+writer; this module only decides and keeps the supplementary records.
+"""
+
+import copy
+import hashlib
+import re
+import time
+
+from preparation_binding import (
+    FILES,
+    STEAM_PATH,
+    _choice,
+    _games_document,
+    _json,
+    registered_tool,
+    validate_binding_record,
+)
+from preparation_common import MAX_JSON, VERSION, Invalid, app_id, fields, require
+from preparation_slot_manifest import SLOT_PREFIX, placed_slots, slot_name
+from preparation_vdf import Document
+
+NOTES = "binding-notes"
+NOTE_KINDS = ("apply", "move", "revert")
+FIRST_NOTES_VERSION = (0, 31, 0)
+PREFIX_VERSION = re.compile(rb"^CURRENT_PREFIX_VERSION=\"([0-9.-]{1,32})\"$", re.MULTILINE)
+
+
+def _version(text):
+    match = re.fullmatch(r"([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,4})", text) if type(text) is str else None
+    return None if match is None else tuple(int(part) for part in match.groups())
+
+
+def tool_id_of(directory):
+    """The tool ID (``config.vdf`` name) of a preparation slot directory."""
+    return slot_name(directory).replace(" ", "-", 1)
+
+
+def points_to(choice, directory, tool_id):
+    """Whether a selection entry assigns ``directory`` (design 4.6: ``valve``, ``dir``, ``name``)."""
+    return (type(choice) is dict and choice.get("valve") is False and choice.get("dir") == directory and
+            choice.get("name", tool_id) == tool_id)
+
+
+def current_selection(before, key):
+    """The target's entries in the three files from a binding plan's ``before`` bytes.
+
+    Returns {"games": choice | None, "applied": choice | None, "config": tool name | None}.
+    """
+    key = app_id(key)
+    games = _games_document(before["games"])["games"].get(key)
+    state = _json(before["state"], {})
+    applied = state.get("games_applied")
+    applied = applied.get(key) if type(applied) is dict else None
+    _choice(games)
+    _choice(applied)
+    require(before["config"] is not None, "existing config required")
+    node = Document(before["config"], value_limit=MAX_JSON).node(STEAM_PATH).value
+    require(type(node) is dict, "invalid Steam block")
+    mapping = node.get("CompatToolMapping")
+    entry = mapping.value.get(key) if mapping is not None and type(mapping.value) is dict else None
+    name = entry.value.get("name") if entry is not None and type(entry.value) is dict else None
+    return {"games": games, "applied": applied, "config": None if name is None else str(name.value)}
+
+
+# ---- supplementary records -------------------------------------------------------------
+
+def file_hashes(plan):
+    """Per-file before/after evidence of a binding plan, saved before the first replacement (6)."""
+    result = {}
+    for name in FILES:
+        before, after = plan.before[name], plan.after[name]
+        result[name] = {"present_before": before is not None,
+                        "before_sha256": None if before is None else hashlib.sha256(before).hexdigest(),
+                        "after_sha256": hashlib.sha256(after).hexdigest(), "changed": before != after}
+    return result
+
+
+def note(binding_id, key, kind, directory, previous, plan, cache_move=None):
+    """A new supplementary record as written (write-time checks, design 4.3)."""
+    require(kind in NOTE_KINDS, "unknown binding note kind")
+    record = {"schema_version": 1, "kind": "binding-note", "tool_version": VERSION, "binding_id": binding_id,
+              "app_id": app_id(key), "created_ns": time.time_ns(), "note_kind": kind, "directory": slot_name(directory),
+              "previous_directory": None if previous is None else slot_name(previous), "files": file_hashes(plan),
+              "cache_move": cache_move}
+    validate_note(record)
+    require(kind != "apply" or previous is None, "a new assignment has no previous slot")
+    require(kind == "apply" or (previous is not None and previous != directory), "a move or revert needs another slot")
+    return record
+
+
+def validate_note(record):
+    """Read-time shape (does not compare with the reader's own slot, design 4.3)."""
+    fields(record, ("schema_version", "kind", "tool_version", "binding_id", "app_id", "created_ns", "note_kind",
+                    "directory", "previous_directory", "files", "cache_move"))
+    require(record["schema_version"] == 1 and record["kind"] == "binding-note", "unknown binding note")
+    require(type(record["tool_version"]) is str and 0 < len(record["tool_version"]) <= 64, "invalid note writer")
+    require(type(record["binding_id"]) is str and record["binding_id"].startswith("binding-") and
+            len(record["binding_id"]) == 40, "invalid binding ID")
+    require(app_id(record["app_id"]) == record["app_id"], "invalid app ID")
+    require(type(record["created_ns"]) is int and record["created_ns"] > 0, "invalid note time")
+    require(record["note_kind"] in NOTE_KINDS, "unknown binding note kind")
+    slot_name(record["directory"])
+    if record["note_kind"] == "apply":
+        require(record["previous_directory"] is None, "a new assignment has no previous slot")
+    else:
+        require(record["previous_directory"] is not None and slot_name(record["previous_directory"]) != record["directory"],
+                "a move or revert needs another slot")
+    files = record["files"]
+    fields(files, FILES)
+    for item in files.values():
+        fields(item, ("present_before", "before_sha256", "after_sha256", "changed"))
+        require(type(item["present_before"]) is bool and type(item["changed"]) is bool, "invalid note file")
+    require(record["cache_move"] is None or type(record["cache_move"]) is dict, "invalid cache move")
+    return record
+
+
+def write_note(store, record):
+    """Write a new supplementary record (under the held store lock). Returns its hash."""
+    validate_note(record)
+    return store.write_record(NOTES, record["binding_id"] + ".json", record)
+
+
+def history(store, key):
+    """Binding history of one registration with its supplementary records (design 4.3 table).
+
+    Each item: {"binding_id", "status", "completed_files", "tool_version", "note": record | None,
+    "note_state": "valid" | "old" | "missing"}. Also returns the orphan notes (no binding
+    record: interrupted before the record was written) and whether an unreadable binding
+    record may belong to this registration (it stops, like the current history reader).
+    """
+    key = app_id(key)
+    items, orphans = [], []
+    bindings, notes = {}, {}
+    try:
+        with store.directory(("bindings",)) as fd:
+            names = sorted(store._names(fd))
+    except FileNotFoundError:
+        names = []
+    for name in names:
+        if name.startswith("tmp-"):
+            continue
+        record, _ = store.read_record("bindings", name)  # Unreadable stops (it could hide a partial binding).
+        validate_binding_record(record, any_version=True)
+        if record["app_id"] == key:
+            bindings[record["binding_id"]] = record
+    try:
+        with store.directory((NOTES,)) as fd:
+            note_names = sorted(store._names(fd))
+    except FileNotFoundError:
+        note_names = []
+    for name in note_names:
+        if name.startswith("tmp-"):
+            continue
+        try:
+            record, _ = store.read_record(NOTES, name)
+            validate_note(record)
+        except (OSError, Invalid, TypeError, KeyError, ValueError):
+            continue  # A broken note is the same as a missing one for the binding it belongs to.
+        if record["app_id"] == key and name == record["binding_id"] + ".json":
+            notes[record["binding_id"]] = record
+    for binding_id, record in sorted(bindings.items()):
+        found = notes.get(binding_id)
+        version = _version(record["tool_version"])
+        if found is not None and found["app_id"] == record["app_id"]:
+            state = "valid"
+        elif version is not None and version < FIRST_NOTES_VERSION:
+            state = "old"
+        else:
+            state, found = "missing", None
+        items.append({"binding_id": binding_id, "status": record["status"],
+                      "completed_files": list(record["completed_files"]), "tool_version": record["tool_version"],
+                      "note": found, "note_state": state})
+    orphans = [record for binding_id, record in sorted(notes.items()) if binding_id not in bindings]
+    return items, orphans
+
+
+def history_state(items):
+    """(usable, reason) for moving or reverting with this history (design 4.2, 4.3)."""
+    relevant = [item for item in items if not (item["status"] == "binding-failed" and not item["completed_files"])]
+    if any(item["status"] == "binding-running" for item in relevant):
+        return False, "binding-running-record"
+    if any(item["status"] == "binding-failed" for item in relevant):
+        return False, "binding-failed-after-writing"
+    if not any(item["status"] == "binding-verified" for item in relevant):
+        return False, "no-verified-binding"
+    return True, None
+
+
+def touched(items, directory):
+    """Whether a valid note shows this slot was assigned before (design 4.2 exclusion)."""
+    return any(item["note_state"] == "valid" and item["status"] == "binding-verified" and
+               directory in (item["note"]["directory"], item["note"]["previous_directory"]) for item in items)
+
+
+def notes_missing(items):
+    return any(item["note_state"] == "missing" and item["status"] == "binding-verified" for item in items)
+
+
+# ---- prefix version ----------------------------------------------------------------------
+
+def proton_prefix_version(raw):
+    """``CURRENT_PREFIX_VERSION`` of a ``proton`` script (exactly one assignment line, 4.5)."""
+    found = PREFIX_VERSION.findall(raw) if type(raw) is bytes else []
+    require(len(found) == 1, "Proton prefix version not found exactly once")
+    return found[0].decode("ascii")
+
+
+def prefix_version_matches(proton_raw, version_file_raw):
+    try:
+        return proton_prefix_version(proton_raw) == version_file_raw.decode("ascii").strip()
+    except (Invalid, UnicodeError, AttributeError):
+        return False
+
+
+# ---- decisions ---------------------------------------------------------------------------
+
+def classify(before, key, bundle_directory, placed, steam, superseded, items):
+    """Where the target stands and what a move would do (design 4.2, 4.6). Read-only.
+
+    Returns {"kind": ..., "source": slot | None, "reason": text | None, "batch": bool, "choice": dict | None}:
+    - "bound": all three files assign the bundle slot.
+    - "move": all three files consistently assign another slot this tool placed (4.2).
+    - "align": the operator chose the bundle slot on the DroidDeck screen only (4.6, observed direction).
+    - "screen-other": the reverse direction (the screen chose another slot); never written.
+    - "other": anything else this tool does not move (Steam default, unknown tool, mixed files).
+    ``batch`` says whether the batch run may do it; "choice" is the selection to write for "align".
+    ``steam`` is used for ``registered_tool`` of the source slot.
+    """
+    bundle_tool = tool_id_of(bundle_directory)
+    current = current_selection(before, key)
+    games, applied, config = current["games"], current["applied"], current["config"]
+
+    def result(kind, source=None, reason=None, batch=False, choice=None):
+        return {"kind": kind, "source": source, "reason": reason, "batch": batch, "choice": choice}
+
+    if points_to(games, bundle_directory, bundle_tool) and points_to(applied, bundle_directory, bundle_tool) and \
+            config == bundle_tool:
+        return result("bound")
+
+    def source_ok(directory):
+        if type(directory) is not str or not directory.startswith(SLOT_PREFIX) or directory == bundle_directory:
+            return "not-a-preparation-slot"
+        if directory not in placed:
+            return "slot-not-placed-by-this-tool"
+        try:
+            tool, _ = registered_tool(steam, directory)
+        except (OSError, Invalid, TypeError, KeyError, ValueError):
+            return "slot-folder-missing-or-unregistered"
+        if tool != tool_id_of(directory):
+            return "slot-tool-id-differs"
+        return None
+
+    usable, why = history_state(items)
+    old_dir = applied.get("dir") if type(applied) is dict else None
+    old_tool = tool_id_of(old_dir) if type(old_dir) is str and old_dir.startswith(SLOT_PREFIX) else None
+    consistent_old = (old_tool is not None and points_to(applied, old_dir, old_tool) and config == old_tool)
+    if consistent_old and points_to(games, old_dir, old_tool):
+        problem = source_ok(old_dir) or (None if usable else why)
+        if problem:
+            return result("other", old_dir, problem)
+        if notes_missing(items):
+            return result("move", old_dir, "binding-note-missing")
+        if touched(items, bundle_directory):
+            return result("move", old_dir, "returned-from-this-slot")
+        if old_dir not in superseded:
+            return result("move", old_dir, "not-superseded-by-this-bundle")
+        return result("move", old_dir, None, batch=True)
+    if consistent_old and points_to(games, bundle_directory, bundle_tool):
+        # 4.6: only the observed direction (screen chose this slot, config and applied still on the old slot).
+        problem = source_ok(old_dir) or (None if usable else why)
+        if problem:
+            return result("other", old_dir, problem)
+        choice = copy.deepcopy(games)
+        if notes_missing(items):
+            return result("align", old_dir, "binding-note-missing", choice=choice)
+        return result("align", old_dir, None, batch=True, choice=choice)
+    if points_to(applied, bundle_directory, bundle_tool) and config == bundle_tool and type(games) is dict:
+        return result("screen-other", games.get("dir"), "screen-chose-another-proton")
+    return result("other", old_dir, "not-assigned-to-a-placed-slot")
+
+
+def placed_roots(store, steam, bundle_directory):
+    """Roots of the other preparation slots this tool placed (for the 4.4 (c) layout check)."""
+    from preparation_common import safe_path
+    placed, _ = placed_slots(store)
+    roots = []
+    for directory in sorted(placed):
+        if directory == bundle_directory:
+            continue
+        try:
+            root = safe_path(safe_path(steam) / "compatibilitytools.d" / directory, safe_path(steam))
+        except Invalid:
+            continue
+        if root.is_dir():
+            roots.append(root)
+    return tuple(roots), placed
+
+
+# ---- individual operation 5: move one game ------------------------------------------------
+
+FIRST_LAUNCH_NOTE = "切り替えたあとの最初の起動は、prefixの更新で長くなることがあります。"
+REASON_TEXT = {
+    None: "",
+    "binding-note-missing": "（割り当ての補足の記録が欠けています。まとめての実行では移しません）",
+    "returned-from-this-slot": "（このProtonから戻したゲームです。まとめての実行では移しません）",
+    "not-superseded-by-this-bundle": "（このバンドルが置き換える版ではありません。まとめての実行では移しません）",
+}
+
+
+def bundle_directory(config):
+    """The bundle's preparation slot name, from its payload root."""
+    return slot_name(SLOT_PREFIX + config["payload"]["root"].removeprefix("DroidDeck-Proton "))
+
+
+def move_candidates(store, steam, settings, config, records):
+    """Games that ``move`` or ``align`` would apply to, with their classification (read-only)."""
+    from preparation_binding import plan_binding
+    directory = bundle_directory(config)
+    roots, placed = placed_roots(store, steam, directory)
+    superseded = tuple(config.get("supersedes", ()))
+    found = []
+    for record in records:
+        key = record["app_id"]
+        try:
+            items, _ = history(store, key)
+            plan = plan_binding(steam, settings, key, directory)
+            decision = classify(plan.before, key, directory, placed, steam, superseded, items)
+        except (OSError, Invalid, TypeError, KeyError, ValueError):
+            continue
+        if decision["kind"] in ("move", "align"):
+            found.append((record, decision))
+    return found, roots
+
+
+def move_check(store, steam, config, key, pinned):
+    """The ``under_lock`` comparison: the rebuilt plan must classify exactly as confirmed (3.5)."""
+    directory = bundle_directory(config)
+
+    def check(fresh):
+        items, _ = history(store, key)
+        _, placed = placed_roots(store, steam, directory)
+        again = classify(fresh.before, key, directory, placed, steam, tuple(config.get("supersedes", ())), items)
+        require({k: again[k] for k in ("kind", "source", "choice")} == {k: pinned[k] for k in ("kind", "source", "choice")},
+                "move decision changed")
+    return check
+
+
+def interactive_move(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
+                     steam=None, settings=None, home=None, runtime_root=None):
+    """Individual operation 5: move one prepared game to this bundle's slot (design 4.2-4.6)."""
+    import hashlib
+    import os
+    import sys
+    from pathlib import Path
+
+    import preparation_selection as selection
+    from preparation_common import safe_path
+    from preparation_dependency_install import describe_error
+    from preparation_game_prefix import RECORDS, apply_game_binding, plan_game_binding
+    from preparation_processes import ProcessStopCheck
+    from preparation_store import PrivateStore
+
+    stream = sys.stdin if input_stream is None else input_stream
+    output = sys.stdout if output_stream is None else output_stream
+    environment = os.environ if environment is None else environment
+    runtime_root = Path("/") if runtime_root is None else runtime_root
+    home = safe_path(home if home is not None else Path.home())
+    steam = safe_path(steam if steam is not None else home / ".local/share/Steam")
+    settings = safe_path(settings if settings is not None else home / ".local/share/droiddeck-compat")
+    directory = safe_path(directory)
+    management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
+    protected, stage, started = [steam, settings], "move-plan", False
+    report = None
+    try:
+        selection.validate_selection_config(config)
+        require("game_preparation" in config, "game preparation not enabled")
+        target = bundle_directory(config)
+        with PrivateStore(management) as store:
+            records = []
+            for item in store.inventory()["game_prefixes"]:
+                if item.get("status") == "initialized-unverified":
+                    record, digest = store.read_record(RECORDS, item["trial_id"] + ".json")
+                    records.append((record, digest))
+            candidates, roots = move_candidates(store, steam, settings, config, [record for record, _ in records])
+        if not candidates:
+            print("このProtonへ移せるゲームはありません。", file=output)
+            report = {"mode": "move-result", "tool_version": VERSION, "status": "nothing-to-move", "writes": [],
+                      "preparation_complete": False}
+        else:
+            source, _, games = selection.registration_catalog(environment)
+            for number, (record, decision) in enumerate(candidates, 1):
+                title = games.get(record["app_id"], {}).get("title", "（登録が見つかりません）")
+                what = "移す" if decision["kind"] == "move" else "DroidDeckの画面の選択にそろえる"
+                print(f"{number}. {selection._text(title)} [ID {record['app_id']}] 今: " +
+                      selection._text(str(decision["source"])) + " → " + selection._text(target) + f"（{what}）" +
+                      REASON_TEXT.get(decision["reason"], ""), file=output)
+            print("移すゲームの番号（qで取消）: ", end="", file=output, flush=True)
+            answer = stream.readline(32).strip()
+            if answer == "q" or not answer:
+                print("取り消しました。", file=output)
+                return 0, None
+            require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(candidates), "invalid game selection")
+            record, decision = candidates[int(answer) - 1]
+            digest = next(found for rec, found in records if rec is record)
+            protected.extend(Path(game["exe"]).parent for game in games.values())
+            stop = ProcessStopCheck(safe_path(steam / "steamapps/compatdata" / record["app_id"], steam))
+
+            def refresh():
+                current, _, now = selection.registration_catalog(environment)
+                require(current == source, "registration source changed")
+                return plan_game_binding(record=record, record_sha256=digest, config=config, directory=directory,
+                                         renderer=renderer, source=current, games=now, steam=steam, settings=settings,
+                                         home=home, environment=environment, runtime_root=runtime_root, stop_check=stop,
+                                         previous_slots=roots, choice=decision["choice"])
+
+            print("prefix・tool・依存をWineを起動せず照合し、移す計画を作っています。", file=output, flush=True)
+            plan = refresh()
+            require(plan.base.customization.directory == target, "bundle slot name differs")
+            blockers = list(plan.blockers)
+            version_file = safe_path(plan.base.compatdata / "version", steam)
+            if not prefix_version_matches(plan.base.inventory.captured.get("proton"),
+                                          version_file.read_bytes() if version_file.is_file() else None):
+                blockers.append("prefix-version-differs")
+            summary = plan.summary()
+            for item in summary["dependencies"]:
+                layout = " / " + item["layout"] if item.get("layout") else ""
+                print("  依存: " + selection._text(item["dependency_id"] + " / " + item["state"] + layout +
+                                                  (" / " + item["reason"] if item.get("reason") else "")), file=output)
+            report = {"mode": "move-result", "tool_version": VERSION, "decision": decision, "plan": summary,
+                      "blockers": blockers, "binding_written": False, "preparation_complete": False}
+            if blockers:
+                for blocker in blockers:
+                    print("停止理由: " + selection._text(blocker), file=output)
+                if "prefix-version-differs" in blockers:
+                    print("このProtonはprefixの版を変えます。今の版では移せません。", file=output)
+                print("移しません。変更せずに結果を保存します。", file=output)
+                report["writes"] = []
+            else:
+                print("変更予定: " + selection._text(", ".join(summary["binding"]["planned_files"]) or "なし") +
+                      f"（他ゲームの保留選択 {summary['binding']['other_pending_count']}件は変更しません）", file=output)
+                print("DroidDeckの画面での切り替えと、同期のコマンドは要りません。", file=output)
+                print(FIRST_LAUNCH_NOTE, file=output)
+                print("このゲームを " + selection._text(target) + " へ移す場合は1、取消はq（ゲームは起動しません）: ",
+                      end="", file=output, flush=True)
+                if stream.readline(32).strip() != "1":
+                    print("取り消しました。", file=output)
+                    return 0, None
+                stage, started = "move-apply", True
+                selection._private_report_directory(home, protected)
+                lock = hashlib.sha256(str(plan.base.compatdata).encode()).hexdigest()
+                kind = "move"
+                with PrivateStore(management) as store, store.locked(lock):
+                    def on_binding_id(run_id):
+                        write_note(store, note(run_id, record["app_id"], kind, target, decision["source"], plan.binding))
+                    result = apply_game_binding(plan, store, refresh, plan.digest, stop,
+                                                under_lock=move_check(store, steam, config, record["app_id"], decision),
+                                                on_binding_id=on_binding_id)
+                report.update(binding=result, binding_written=result["status"] == "binding-verified",
+                              writes=[{"scope": "target-only-games-config-state"},
+                                      {"scope": "private-binding-backup-record-and-note"}])
+                print("移しました（" + selection._text(result["status"]) + "）。DroidDeckから起動してください。", file=output)
+                print(FIRST_LAUNCH_NOTE, file=output)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        report = {"mode": "move-result", "tool_version": VERSION, "stage": stage, **describe_error(error, stage),
+                  "preparation_complete": False, "writes": [] if not started else [{"scope": "partial-binding-preserve"}]}
+        print("検査停止: " + selection._text(report["check"]) + " / " + selection._text(report["reason"] or report["error_class"]),
+              file=output)
+    try:
+        saved, _ = selection.save_selection_result(directory, home, report, protected)
+    except (OSError, ValueError):
+        print("結果JSONを保存できませんでした。私有記録と設定のバックアップは保持しています。", file=output)
+        return 1, None
+    print("結果を保存しました: " + selection._text(str(saved)), file=output)
+    return 2, str(saved)

@@ -23,7 +23,8 @@ from preparation_payload import (
 from preparation_runtime_context import plan_runtime_environment
 from preparation_target import pin_registration
 
-CAPTURE = ("version", "toolmanifest.vdf", "user_settings.py")
+# "proton" for its CURRENT_PREFIX_VERSION before a game is moved (design: Proton update 4.5).
+CAPTURE = ("version", "toolmanifest.vdf", "user_settings.py", "proton")
 RESERVE = 64 * 1024**2
 
 

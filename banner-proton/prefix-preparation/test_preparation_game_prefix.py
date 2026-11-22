@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 DEP = runpy.run_path(str(HERE / 'test_preparation_dependency_install.py'))
 import preparation_dependency_install as dep
 import preparation_game_prefix as game
+import preparation_prefix_dll as prefix_dll
 import preparation_trial as trial
 from preparation_common import Invalid
 from preparation_processes import ProcessStopCheck
@@ -139,6 +140,11 @@ class ConfigTests(unittest.TestCase):
 class GamePrefixTests(DEP['InstallTests']):
     def setUp(self):
         super().setUp()
+        # The fixture Proton links only cmd.exe into syswow64; use it as the x86 layout reference
+        # (SoftDenchi checks the layout before running Wine in a game prefix since 0.31.0).
+        reference = patch.object(prefix_dll, 'REFERENCE', 'cmd.exe')
+        reference.start()
+        self.addCleanup(reference.stop)
         self.config['game_preparation'] = {'profiles': [copy.deepcopy(PROFILE)], 'recipes': copy.deepcopy(RECIPES)}
         self.game_key = '42'
         self.game_compat = self.f.steam / 'steamapps/compatdata/42'

@@ -57,7 +57,9 @@ if not (wow64 / 'cmd.exe').is_symlink():
     (wow64 / 'cmd.exe').symlink_to(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), 'files/lib/wine/i386-windows/cmd.exe'))
 for name in ('system.reg', 'user.reg'):
     (root / 'pfx' / name).write_text('WINE REGISTRY Version 2\\n')
-(root / 'version').write_text('synthetic-version-1\\n')
+(root / 'version').write_text('1.0-1\\n')
+# Like Proton's own constant (read before a game is moved to this Proton, 0.31.0).
+CURRENT_PREFIX_VERSION="1.0-1"
 '''
 
 GUID_A = '{11111111-2222-3333-4444-555555555555}'

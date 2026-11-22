@@ -562,6 +562,14 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
     pre = inspect_dependency_state(base.compatdata, recipe)
     if pre["state"] != "absent":
         blockers.append("dependency-state-" + pre["state"] + "-preserve-and-inspect")
+    if records != "trials":
+        # Design: Proton update 4.4. A game prefix still linked into another slot is not run with this Proton.
+        progress.append("prefix-layout")
+        from preparation_prefix_dll import require_own_layout
+        try:
+            require_own_layout(base.compatdata, base.inventory, _tool_directory(base))
+        except (OSError, Invalid):
+            blockers.append("prefix-layout-not-this-proton")
     progress.append("installation-history")
     previous, invalid = _installations(base.store_root, record["app_id"])
     latest = previous[-1] if previous else None
@@ -624,6 +632,10 @@ class DependencyInstallSession:
 
     def _launch(self):
         p = self.plan.recheck
+        if p.records != "trials":
+            # Checked again right before every Wine start, winver included (design: Proton update 4.4).
+            from preparation_prefix_dll import require_own_layout
+            require_own_layout(p.compatdata, p.inventory, _tool_directory(p))
         entries = {**p.inventory.entries, **p.customization.overlays}
         hashes = {name: entries[name]["sha256"] if name in entries else None for name in ("proton", "version", "user_settings.py")}
         return plan_launch(tool=_tool_directory(p),
