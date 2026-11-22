@@ -276,6 +276,58 @@ class PrivateStore:
                     pass
         return hashlib.sha256(raw).hexdigest()
 
+    def write_new_large(self, directory, name, value, limit):
+        """Create a large private JSON record once; an existing name is never replaced.
+
+        Written to a temporary file and published with a non-replacing rename, so a
+        reader sees either nothing or the complete record. Returns the SHA-256 of the bytes.
+        """
+        from preparation_publication import _rename_function, rename_noreplace
+        self._guard()
+        require(type(name) is str and COMPONENT.fullmatch(name) and name.endswith(".json") and not name.startswith("tmp-"),
+                "invalid record filename")
+        bounded(value)
+        raw = (json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
+        require(len(raw) <= limit, "record too large")
+        rename = _rename_function()
+        with self.directory((directory,), create=True) as fd:
+            self._capacity(fd)
+            temporary = "tmp-" + secrets.token_hex(16) + ".json"
+            try:
+                with self._new(fd, temporary) as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                self._guard()
+                rename_noreplace(rename, fd, temporary, fd, name)
+                os.fsync(fd)
+            finally:
+                # Only our own transient file.
+                try:
+                    os.unlink(temporary, dir_fd=fd)
+                except FileNotFoundError:
+                    pass
+        return hashlib.sha256(raw).hexdigest()
+
+    def read_large(self, directory, name, limit):
+        """A large private JSON record and its SHA-256, or None when it does not exist."""
+        try:
+            with self.directory((directory,)) as fd, self._existing(fd, name, limit) as stream:
+                before = os.fstat(stream.fileno())
+                raw = stream.read(limit + 1)
+                after = os.fstat(stream.fileno())
+        except FileNotFoundError:
+            return None
+        require((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) and len(raw) <= limit,
+                "record changed during read")
+        try:
+            value = json.loads(raw, object_pairs_hook=pairs)
+            bounded(value)
+        except (ValueError, UnicodeError, RecursionError) as error:
+            raise Invalid("invalid private record") from error
+        return value, hashlib.sha256(raw).hexdigest()
+
     def read_record(self, directory, name):
         with self.directory((directory,)) as fd:
             raw = self._read(fd, name)

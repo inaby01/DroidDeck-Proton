@@ -25,3 +25,13 @@ def _publish(rename, source_fd, destination_fd, name):
         raise OSError(error, "non-replacing tool publication refused")
 
 
+def rename_noreplace(rename, source_fd, source_name, destination_fd, destination_name):
+    """One non-replacing rename between two directory FDs (Linux RENAME_NOREPLACE).
+
+    Raises OSError (EEXIST, EXDEV, ...) without any fallback; the caller decides what a
+    refused move means.
+    """
+    if rename(source_fd, os.fsencode(source_name), destination_fd, os.fsencode(destination_name), 1) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, "non-replacing rename refused")
+

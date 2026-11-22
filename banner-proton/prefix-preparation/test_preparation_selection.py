@@ -368,6 +368,20 @@ class SelectionTests(unittest.TestCase):
             with self.subTest(keys=list(modification)), self.assertRaises(Invalid):
                 selection.validate_selection_config(config)
 
+    def test_superseded_slot_list(self):
+        config = copy.deepcopy(self.config)
+        config["payload"]["tool_slot"] = "preparation"
+        older = "SoftDenchi-Prep-Proton 11-12.8-softdenchi3-beta1"
+        own = "SoftDenchi-Prep-Proton " + config["payload"]["root"].removeprefix("DroidDeck-Proton ")
+        selection.validate_selection_config({**config, "supersedes": [older]})
+        for value in ([own], [older, older], "x", ["SoftDenchi-Proton x"], [older + "/x"], [None]):
+            with self.subTest(value=value), self.assertRaises((Invalid, TypeError)):
+                selection.validate_selection_config({**copy.deepcopy(config), "supersedes": value})
+        legacy = copy.deepcopy(self.config)
+        legacy["payload"].pop("tool_slot", None)
+        with self.assertRaises(Invalid):
+            selection.validate_selection_config({**legacy, "supersedes": [older]})
+
     def test_standalone_short_launcher_preserves_menu_input_and_saves_next_to_script(self):
         folder = self.home / "launcher"
         folder.mkdir()

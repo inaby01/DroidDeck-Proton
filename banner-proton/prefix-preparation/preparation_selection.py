@@ -70,7 +70,8 @@ def _text(value):
 
 def validate_selection_config(config):
     fields(config, ("schema_version", "payload", "runtime_reference"),
-           ("probe_material", "placement_review", "initialization_trial", "dependency_installation", "game_preparation"))
+           ("probe_material", "placement_review", "initialization_trial", "dependency_installation", "game_preparation",
+            "supersedes"))
     require(type(config.get("probe_material", False)) is bool, "invalid probe menu option")
     require(type(config.get("initialization_trial", False)) is bool, "invalid initialization trial menu option")
     require(type(config["schema_version"]) is int and config["schema_version"] == 1, "unknown selection config")
@@ -100,6 +101,17 @@ def validate_selection_config(config):
         require(config.get("initialization_trial") is True and "placement_review" in config,
                 "dependency installation requires the managed trial configuration")
         validate_dependency_config(config["dependency_installation"])
+    if "supersedes" in config:
+        # Earlier preparation slots this bundle replaces; only these move in the batch run (design: Proton update 4.2).
+        from preparation_slot_manifest import slot_name
+        superseded = config["supersedes"]
+        require(type(superseded) is list and len(superseded) <= 64 and len(set(superseded)) == len(superseded),
+                "invalid superseded slot list")
+        for name in superseded:
+            slot_name(name)
+        require(payload.get("tool_slot") == "preparation" and
+                "SoftDenchi-Prep-Proton " + expected_root.removeprefix("DroidDeck-Proton ") not in superseded,
+                "a bundle cannot supersede its own slot")
     if "game_preparation" in config:
         from preparation_game_prefix import validate_game_config
         require(config.get("initialization_trial") is True and "placement_review" in config,
@@ -572,7 +584,7 @@ def selection_script(config=None):
     names = ("preparation_common", "preparation_assets", "preparation_vdf", "preparation_binding", "preparation_target",
              "preparation_payload", "preparation_runtime", "preparation_customization", "preparation_runtime_context",
              "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
-             "preparation_tool_writer", "preparation_store", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_trial", "preparation_trial_audit", "preparation_recheck", "preparation_softdenchi_recipe",
+             "preparation_tool_writer", "preparation_store", "preparation_slot_manifest", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_trial", "preparation_trial_audit", "preparation_recheck", "preparation_softdenchi_recipe",
              "preparation_dependency_state", "preparation_dependency_install", "preparation_prefix_dll", "preparation_game_prefix",
              "preparation_one_pass", "preparation_status", "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}

@@ -24,6 +24,7 @@ from preparation_common import (
 from preparation_installation import InstallationPlan
 from preparation_payload import verify_tree
 from preparation_probe import verify_probe_registration
+from preparation_slot_manifest import save_after_verification
 from preparation_tool_writer import _PrivateXaliaModes, _write_installation_tree
 
 
@@ -159,6 +160,15 @@ def plan_confirmed_placement(installation, review, store_root, settings):
     return _plan_placement(installation, review, store_root, None, settings, "confirmation")
 
 
+MANIFEST_TEXT = {
+    "created": "このProtonの照合情報を保存しました（あとでこのProtonへ戻せるようにするため）。",
+    "same": "このProtonの照合情報は保存済みです。",
+    "mismatch": "保存済みの照合情報が今の中身と違うため、書き換えていません。このProtonへはツールでは戻せません。",
+    "broken": "保存済みの照合情報が読めないため、書き換えていません。このProtonへはツールでは戻せません。",
+    "failed": "照合情報を保存できませんでした。配置はそのままです。このProtonへはツールでは戻せません。",
+}
+
+
 def _plan_placement(installation, review, store_root, probe_store_root, settings, witness):
     require(isinstance(installation, InstallationPlan), "trusted installation plan required")
     review = copy.deepcopy(validate_build_review(review))
@@ -221,7 +231,9 @@ def apply_static_placement(plan, refresh, store, confirmed_digest):
     fresh = refresh()
     require(_same_plan(fresh, plan), "static placement plan changed")
     if installation.summary()["action"] == "reuse-verified-tree":
-        return {**plan.summary(), "mode": "static-matching-tool-observed", "material_installed_now": False}
+        # The slot was verified against this payload by the refreshed plan (design: Proton update 4.7).
+        return {**plan.summary(), "mode": "static-matching-tool-observed", "material_installed_now": False,
+                "slot_manifest": save_after_verification(store, installation)}
     require(fresh.installation.summary()["capacity"]["estimate_fits"], "insufficient static placement capacity")
     require(not os.path.lexists(safe_path(installation.summary()["destination"])), "new slot must be absent")
 
@@ -254,7 +266,8 @@ def apply_static_placement(plan, refresh, store, confirmed_digest):
                        {"path": str(store.root), "scope": "private-installation-journal-and-locks"},
                        {"path": str(plan.settings / "lock"), "scope": "cooperative-settings-lock-only"}],
             "prefix_created": False, "binding_written": False, "wine_executed": False,
-            "execution_authorized": False, "preparation_complete": False}
+            "execution_authorized": False, "preparation_complete": False,
+            "slot_manifest": save_after_verification(store, installation)}
 
 
 def interactive_static_placement(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
@@ -468,7 +481,20 @@ def interactive_confirmed_placement(directory, renderer, config, *, input_stream
         print("配置先: " + selection._text(preview["destination"]), file=output)
         if preview["action"] == "reuse-verified-tree":
             print("この準備用Protonは置き済みで、期待ツリー全体と一致しています。今回は配置し直しません。", file=output)
-            report = {**preview, "mode": "static-matching-tool-observed", "material_installed_now": False}
+            # Save the slot's verification data for a later revert (design: Proton update 4.7). The
+            # refreshed plan verifies the slot again under the lock first.
+            stage, started = "confirmed-placement-manifest", True
+            selection._private_report_directory(home, protected)
+            compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
+            with PrivateStore(management, create=True) as store, \
+                    store.locked(hashlib.sha256(str(compatdata).encode()).hexdigest()):
+                fresh = refresh()
+                require(_same_plan(fresh, plan) and fresh.summary()["action"] == "reuse-verified-tree",
+                        "static placement plan changed")
+                saved = save_after_verification(store, fresh.installation)
+            print(MANIFEST_TEXT[saved["state"]], file=output)
+            report = {**preview, "mode": "static-matching-tool-observed", "material_installed_now": False,
+                      "slot_manifest": saved}
         else:
             require(preview["capacity"]["estimate_fits"], "insufficient estimated static placement space")
             capacity = preview["capacity"]
@@ -490,6 +516,7 @@ def interactive_confirmed_placement(directory, renderer, config, *, input_stream
             with PrivateStore(management, create=True) as store, store.locked(lock):
                 report = apply_static_placement(plan, refresh, store, plan.digest)
             print("新しい準備用Protonを配置し、全体一致を確認しました。まだ起動しません。", file=output)
+            print(MANIFEST_TEXT[report["slot_manifest"]["state"]], file=output)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
         failure = {"stage": stage, "check": getattr(error, "preparation_check", stage), "error_class": type(error).__name__,
                    "errno": getattr(error, "errno", None), "reason": {

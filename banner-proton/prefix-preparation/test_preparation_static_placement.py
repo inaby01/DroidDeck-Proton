@@ -17,9 +17,11 @@ FIX = runpy.run_path(str(HERE / 'test_preparation_tool_writer.py'))
 FOLDER = runpy.run_path(str(HERE / 'test_preparation_folder_reads.py'))
 import preparation_probe as probe
 import preparation_selection as selection
+import preparation_slot_manifest as MANIFEST
 import preparation_static_placement as placement
 import preparation_tool_writer as writer
 from preparation_common import Invalid
+from preparation_payload import verify_tree
 from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore
 
@@ -576,6 +578,24 @@ class ConfirmedNativeTests(ConfirmedFixture):
         self.assertTrue(self.f.destination().is_dir())
         _, again, _ = self.confirmed_menu('1\n')
         self.assertEqual(again['mode'], 'static-matching-tool-observed')
+        # The slot's verification data is saved once and reused unchanged (0.31.0, design 4.7).
+        self.assertEqual(report['slot_manifest'], {'state': 'created'})
+        self.assertEqual(again['slot_manifest'], {'state': 'same'})
+        with PrivateStore(self.f.store_root) as store:
+            state, saved = MANIFEST.state(store, self.f.destination().name)
+        self.assertEqual(state, 'same')
+        self.assertTrue(MANIFEST.usable(saved))
+        verify_tree(self.f.destination(), MANIFEST.inventory_of(saved), saved['overlays'])
+
+    def test_unreadable_saved_data_is_kept_and_does_not_stop_the_placement(self):
+        _, report, _ = self.confirmed_menu('1\n1\n')
+        self.assertEqual(report['slot_manifest'], {'state': 'created'})
+        path = self.f.store_root / MANIFEST.DIRECTORY / MANIFEST.record_name(self.f.destination().name)
+        path.write_bytes(b'{broken')
+        _, again, _ = self.confirmed_menu('1\n')
+        self.assertEqual(again['mode'], 'static-matching-tool-observed')
+        self.assertEqual(again['slot_manifest'], {'state': 'broken'})
+        self.assertEqual(path.read_bytes(), b'{broken')
 
     def test_change_of_the_confirmation_game_after_preview_publishes_nothing(self):
         plan = self.confirmed_plan()

@@ -12,6 +12,7 @@ import os
 import secrets
 import stat
 import tarfile
+import time
 from dataclasses import dataclass
 
 from preparation_binding import droiddeck_lock
@@ -184,11 +185,16 @@ def _customize(root_fd, plan, directories):
     os.fsync(root_fd)
 
 
-def validate_installation_record(record):
+def validate_installation_record(record, any_version=False):
+    """Shape of an installation record. Writers require this version; ``any_version`` reads
+    records of earlier tool versions (design: Proton update 4.7). ``created_ns`` exists from 0.31.0."""
     fields(record, ("schema_version", "tool_version", "installation_id", "app_id", "input_digest", "status",
-                    "phase", "staging_name", "directory", "published", "preparation_complete"))
-    require(type(record["schema_version"]) is int and record["schema_version"] == 1 and record["tool_version"] == VERSION,
-            "unknown installation record version")
+                    "phase", "staging_name", "directory", "published", "preparation_complete"), ("created_ns",))
+    require(type(record["schema_version"]) is int and record["schema_version"] == 1 and
+            (record["tool_version"] == VERSION if not any_version else
+             type(record["tool_version"]) is str and 0 < len(record["tool_version"]) <= 64), "unknown installation record version")
+    require("created_ns" not in record or type(record["created_ns"]) is int and record["created_ns"] > 0,
+            "invalid installation time")
     token = record["installation_id"]
     require(type(token) is str and token.startswith("installation-") and len(token) == 45 and
             all(c in "0123456789abcdef" for c in token[13:]), "invalid installation ID")
@@ -281,7 +287,7 @@ def _write_installation_tree(plan, refresh, store, settings, check_ready, privat
         record = {"schema_version": 1, "tool_version": VERSION, "installation_id": "installation-" + token,
                   "app_id": plan.target.registration_id, "input_digest": plan.digest, "status": "running", "phase": "planned",
                   "staging_name": ".prefix-preparation-staging-" + token, "directory": current.customization.directory,
-                  "published": False, "preparation_complete": False}
+                  "published": False, "preparation_complete": False, "created_ns": time.time_ns()}
         validate_installation_record(record)
         record_hash = store.write_record("installations", record["installation_id"] + ".json", record)
 
