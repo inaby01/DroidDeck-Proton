@@ -236,6 +236,57 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
                       runtime, target, review, settings, work, private_home, compatdata, version, records, tool_writes)
 
 
+def check_game_identity(*, record, record_sha256, source, games, steam, home):
+    """The payload-independent part of a registered-game recheck (design: Proton update 4.8).
+
+    Same checks, in the same order and with the same check names, as ``plan_recheck`` for
+    ``game-prefixes``: the initialization record (completed, unchanged), the registration
+    and the game EXE measured at initialization, and the prefix (private directory, no
+    aliases, unchanged version, the initialized directories). It reads no payload and does
+    not verify any preparation slot, so a revert works while the bundle slot is broken.
+    Returns {"target", "compatdata", "prefix_version", "exe"}.
+    """
+    progress = ["recheck-trial-record"]
+    try:
+        from preparation_assets import exe_identity
+        from preparation_game_prefix import ID_PREFIX, registration_identity
+        from preparation_game_prefix import SCOPE as GAME_SCOPE
+        validate_trial_record(record, GAME_SCOPE, ID_PREFIX)
+        require(record["exit_code"] == 0 and record.get("settings_identity_unchanged") is True,
+                "prior fixed-command exit and unchanged settings required")
+        require(record["phase"] == "post-checks", "completed command phase required")
+        require(record["status"] == "initialized-unverified", "only initialized or tree-mismatch trial can be rechecked")
+        key = record["app_id"]
+        require(key in games, "trial registration missing")
+        steam, home = safe_path(steam), safe_path(home)
+        store_root = safe_path(home / ".local/state/droiddeck-prefix-preparation/tool-store", home)
+        with PrivateStore(store_root) as store:
+            require(store.read_record("game-prefixes", record["trial_id"] + ".json")[1] == record_sha256,
+                    "trial record changed")
+        progress.append("recheck-registration-pin")
+        exe = safe_path(games[key]["exe"])
+        target = pin_registration(source, key, exe.parent, steam)
+        progress.append("recheck-game-registration")
+        require(registration_identity(exe, games[key]["title"]) ==
+                {name: record["profile"][name] for name in ("exe_path_sha256", "title_sha256")},
+                "game registration path or title changed since initialization")
+        progress.append("recheck-game-executable")
+        identity = exe_identity(exe)
+        require({"sha256": identity["sha256"], "size": identity["size"]} ==
+                {key_: record["profile"]["exe_" + key_] for key_ in ("sha256", "size")}, "game executable changed")
+        progress.append("recheck-prefix")
+        compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
+        _private_existing(compatdata, steam)
+        _aliases(steam, key)
+        version = _prefix(compatdata)
+        _initialized_prefix(compatdata, record, version)
+        return {"target": target, "compatdata": compatdata, "prefix_version": version, "exe": exe}
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        if not hasattr(error, "preparation_check"):
+            error.preparation_check = progress[-1]
+        raise
+
+
 def validate_recheck_record(record):
     fields(record, ("schema_version", "tool_version", "scope", "recheck_id", "trial_id", "app_id", "input_digest", "status",
                     "exit_code", "prefix_version_sha256", "runtime_contract", "old_trial_record_updated",

@@ -277,11 +277,177 @@ class DllMoveTests(MoveFixture, ONE['PrefixDllOnePassTests']):
         self.assertIn('x86 system directory not confirmed', output)
 
 
+
+@unittest.skipUnless(sys.platform == 'linux', 'native writer tests require Linux')
+class RevertTests(MoveFixture, ONE['OnePassTests']):
+    """A game moved from an older slot (with saved verification data) is assigned back to it (4.7, 4.8)."""
+
+    def setUp(self):
+        super().setUp()
+        self.save_manifest(self.old)
+        _, report, output = self.move_menu('1\n1\n')
+        self.assertTrue(report['binding_written'], output)
+
+    def payload(self):
+        import preparation_selection as selection
+        from preparation_installation import CAPTURE
+        from preparation_payload import inspect_archive_from_folder
+        payload = self.config['payload']
+        return inspect_archive_from_folder(selection._archive(self.f.fixture.source.root, payload), payload['sha512'],
+                                           payload['root'], capture=CAPTURE)
+
+    def save_manifest(self, name):
+        import preparation_slot_manifest as manifest
+        from preparation_payload import OVERLAY_NAMES
+        inventory = self.payload()
+        overlays = {}
+        for item in sorted(OVERLAY_NAMES):
+            path = self.tools / name / item
+            if path.is_file():
+                raw = path.read_bytes()
+                overlays[item] = {'kind': 'file', 'mode': path.stat().st_mode & 0o7777, 'size': len(raw),
+                                  'sha256': hashlib.sha256(raw).hexdigest()}
+        record = manifest.build(name, update.tool_id_of(name), inventory, overlays,
+                                inventory.captured['version'].decode().strip())
+        with PrivateStore(self.f.store_root) as store, store.locked('d' * 64):
+            self.assertEqual(manifest.save(store, name, record), 'created')
+
+    def add_cache(self, name, body=b'synthetic bytecode, never executed'):
+        """A CPython cache beside the slot's generated user_settings.py (as after a normal launch)."""
+        import importlib.util
+        import struct
+        source = self.tools / name / 'user_settings.py'
+        info = source.stat()
+        cache = source.parent / '__pycache__'
+        cache.mkdir(mode=0o755, exist_ok=True)
+        pyc = cache / ('user_settings.' + sys.implementation.cache_tag + '.pyc')
+        pyc.write_bytes(importlib.util.MAGIC_NUMBER + struct.pack('<III', 0, int(info.st_mtime), info.st_size) + body)
+        pyc.chmod(0o644)
+        return cache
+
+    def revert_menu(self, text, **extra):
+        output = io.StringIO()
+        status, name = update.interactive_revert(
+            self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config, input_stream=io.StringIO(text),
+            output_stream=output, environment=self.environment, steam=self.f.steam, settings=self.f.settings,
+            home=self.home, runtime_root=self.f.root, **extra)
+        report = json.loads(Path(name if os.path.isabs(name) else self.f.fixture.source.root / name).read_bytes()) \
+            if name else None
+        return status, report, output.getvalue()
+
+    def test_revert_assigns_the_old_slot_and_moves_its_caches(self):
+        cache = self.add_cache(self.old)
+        files = sorted(item.name for item in cache.iterdir())
+        _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertTrue(report['binding_written'], output)
+        self.assertIn('このProtonへ移す前のProton', output)
+        self.assertIn('実機ではまだ確かめていません', output)
+        self.assertIn('Pythonキャッシュ（1か所）', output)
+        self.assertFalse(cache.exists())
+        with PrivateStore(self.f.store_root) as store:
+            items, orphans = update.history(store, '42')
+        reverted = [item['note'] for item in items if item['note'] and item['note']['note_kind'] == 'revert']
+        self.assertEqual(len(reverted), 1)
+        self.assertEqual((reverted[0]['directory'], reverted[0]['previous_directory']), (self.old, self.bundle))
+        moved = reverted[0]['cache_move']['moved']
+        self.assertEqual([item['name'] for item in moved], ['c0001'])
+        kept = self.f.store_root / update.CACHES / reverted[0]['binding_id'] / 'c0001'
+        self.assertEqual(sorted(item.name for item in kept.iterdir()), files)
+        self.assertEqual(orphans, [])
+        current = update.current_selection(update.current_files(self.f.steam, self.f.settings), '42')
+        self.assertEqual(current['config'], update.tool_id_of(self.old))
+        # Back on the old slot after a revert from this slot: the batch run does not move it again.
+        self.assertEqual(self.selection()['reason'], 'returned-from-this-slot')
+
+    def test_slot_without_saved_data_is_not_a_target(self):
+        import preparation_slot_manifest as manifest
+        (self.f.store_root / manifest.DIRECTORY / manifest.record_name(self.old)).unlink()
+        _, report, output = self.revert_menu('1\n')
+        self.assertIn('戻す先にできる準備用Protonがありません', output)
+        self.assertEqual(report['refused_targets'], {self.old: 'slot-manifest-missing'})
+
+    def test_changed_slot_is_not_a_target(self):
+        (self.tools / self.old / 'files' / 'extra.txt').write_text('changed')
+        _, report, _ = self.revert_menu('1\n')
+        self.assertEqual(report['refused_targets'], {self.old: 'slot-differs-from-saved-data'})
+
+    def test_different_prefix_version_stops(self):
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(update, 'proton_prefix_version', return_value='2.0-1'):
+            _, report, output = self.revert_menu('1\n1\n')
+        self.assertIn('prefix-version-differs', report['blockers'], output)
+        self.assertEqual(before, self.games_config.read_bytes())
+
+    def test_a_process_using_the_target_slot_stops(self):
+        import subprocess
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)', str(self.tools / self.old / 'proton')])
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        before = self.games_config.read_bytes()
+        _, report, output = self.revert_menu('1\n1\n')
+        self.assertIn('target-slot-in-use', report['blockers'], output)
+        self.assertEqual(before, self.games_config.read_bytes())
+
+    def test_broken_bundle_slot_does_not_prevent_the_revert(self):
+        (self.tools / self.bundle / 'droiddeck-proton-wrap').unlink()
+        (self.tools / self.bundle / 'compatibilitytool.vdf').write_text('broken')
+        _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertTrue(report['binding_written'], output)
+
+    def test_refused_rename_keeps_the_settings_and_the_cache(self):
+        cache = self.add_cache(self.old)
+        import preparation_publication as publication
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(publication, 'rename_noreplace', side_effect=OSError(18, 'refused')):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        self.assertEqual(before, self.games_config.read_bytes())
+        self.assertTrue(cache.is_dir())
+        with PrivateStore(self.f.store_root) as store:
+            items, orphans = update.history(store, '42')
+        self.assertFalse(any(item['status'] == 'binding-running' for item in items))
+        self.assertEqual([record['cache_move']['moved'] for record in orphans], [[]])
+
+    def test_interrupted_move_leaves_no_running_binding_and_can_be_finished(self):
+        self.add_cache(self.old)
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(update, 'move_caches', side_effect=OSError(18, 'refused')):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        self.assertEqual(before, self.games_config.read_bytes())
+        with PrivateStore(self.f.store_root) as store:
+            items, orphans = update.history(store, '42')
+        self.assertFalse(any(item['status'] == 'binding-running' for item in items))
+        self.assertEqual(len(orphans), 1)
+        self.assertEqual(orphans[0]['note_kind'], 'revert')
+        _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertTrue(report['binding_written'], output)
+
+    def test_change_of_caches_after_confirmation_stops(self):
+        cache = self.add_cache(self.old)
+        original = update.list_caches
+        calls = []
+
+        def changed(root):
+            calls.append(1)
+            result = original(root)
+            if len(calls) == 2:
+                (cache / 'extra.cpython-314.pyc').write_bytes(b'x')
+            return result
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(update, 'list_caches', side_effect=changed):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        self.assertEqual(before, self.games_config.read_bytes())
+
+
 # Only the fixtures of the one-pass tests are reused, not their tests.
-for _class, _base in ((MoveTests, ONE['OnePassTests']), (DllMoveTests, ONE['PrefixDllOnePassTests'])):
+for _class, _base in ((MoveTests, ONE['OnePassTests']), (DllMoveTests, ONE['PrefixDllOnePassTests']),
+                      (RevertTests, ONE['OnePassTests'])):
     for _name in dir(_base):
         if _name.startswith('test_') and _name not in _class.__dict__:
             setattr(_class, _name, None)
+del _class, _base, _name  # Loop names must not be collected as test classes.
 
 
 if __name__ == '__main__':

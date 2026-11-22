@@ -174,6 +174,68 @@ def observe_processes(compatdata, proc_root=Path("/proc")):
             "device_namespace_verified": False, "failure_stages": failures}
 
 
+def _under(path, root):
+    """Path-component containment of a resolved path (``...beta1`` is not under ``...beta10``)."""
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def observe_slot_users(slot_root, proc_root=Path("/proc")):
+    """Own-uid processes that use a preparation slot (design: Proton update 4.7).
+
+    A process uses the slot when its executable, its working directory or a path argument
+    (relative ones resolved from its working directory) resolves inside the slot. ``proton``
+    is a Python script started by ``env python3``, so its executable is outside the slot and
+    only the argument shows it. Processes of other owners are not counted (as in the prefix
+    observation); a process of the same owner that cannot be read is ``unknown``. Arguments
+    are never returned, only counts.
+    """
+    root = os.path.realpath(safe_path(slot_root))
+    proc_root = safe_path(proc_root)
+    users, unknown, inspected = 0, 0, 0
+    root_fd = os.open(proc_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        own_fd = os.open(str(os.getpid()), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            owner = os.fstat(own_fd).st_uid
+        finally:
+            os.close(own_fd)
+        with os.scandir(root_fd) as entries:
+            for index, entry in enumerate(entries):
+                require(index < MAX_PROCESSES, "too many proc entries")
+                if not entry.name.isascii() or not entry.name.isdecimal() or int(entry.name) == os.getpid():
+                    continue
+                descriptor = None
+                try:
+                    descriptor = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                    if os.fstat(descriptor).st_uid != owner:
+                        continue
+                    inspected += 1
+                    if _identity(_read(descriptor, "stat", 8192), entry.name)[0] in ("Z", "X"):
+                        continue
+                    cwd = os.readlink("cwd", dir_fd=descriptor)
+                    exe = os.readlink("exe", dir_fd=descriptor)
+                    argv = [os.fsdecode(item) for item in _read(descriptor, "cmdline", MAX_ENVIRON).split(b"\0") if item]
+                    paths = [exe, cwd] + [arg if arg.startswith("/") else os.path.join(cwd, arg)
+                                          for arg in argv if "/" in arg]
+                    if any(_under(os.path.realpath(path), root) for path in paths):
+                        users += 1
+                except FileNotFoundError:
+                    try:
+                        os.stat(entry.name, dir_fd=root_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    unknown += 1
+                except (OSError, ValueError, UnicodeError):
+                    unknown += 1
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+    finally:
+        os.close(root_fd)
+    return {"scope": "same-proc-directory-owner-as-self", "users": users, "unknown": unknown, "inspected": inspected,
+            "clear": users == 0 and unknown == 0}
+
+
 @dataclass(frozen=True)
 class ProcessStopCheck:
     compatdata: object = field(repr=False)

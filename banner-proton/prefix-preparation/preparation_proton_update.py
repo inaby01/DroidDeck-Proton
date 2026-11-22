@@ -67,6 +67,16 @@ def current_selection(before, key):
     return {"games": games, "applied": applied, "config": None if name is None else str(name.value)}
 
 
+def current_files(steam, settings):
+    """The three files as bytes, without needing any tool to be registered (design 4.8)."""
+    from preparation_binding import _raw
+    from preparation_common import safe_path
+    steam, settings = safe_path(steam), safe_path(settings)
+    return {"config": _raw(safe_path(steam / "config/config.vdf", steam)),
+            "games": _raw(safe_path(settings / "games.json", settings)),
+            "state": _raw(safe_path(settings / "state.json", settings))}
+
+
 # ---- supplementary records -------------------------------------------------------------
 
 def file_hashes(plan):
@@ -477,3 +487,309 @@ def interactive_move(directory, renderer, config, *, input_stream=None, output_s
         return 1, None
     print("結果を保存しました: " + selection._text(str(saved)), file=output)
     return 2, str(saved)
+
+
+# ---- individual operation 6: assign a game back to another preparation slot ----------------
+
+CACHES = "slot-caches"
+PYCACHE = "__pycache__"
+REVERT_NOTE = "新しいProtonから前のProtonへ戻す向きは、実機ではまだ確かめていません。"
+
+
+def revert_targets(store, steam, bundle):
+    """Other preparation slots this tool placed that can be verified again (design 4.7, 4.8).
+
+    Returns ([(directory, record)], {directory: reason}) for the usable and the refused ones.
+    The slot is verified against its saved inventory and generated files, caches allowed.
+    """
+    from preparation_common import safe_path
+    from preparation_payload import verify_fex_runtime_tree
+    from preparation_slot_manifest import inventory_of, state, usable
+    placed, _ = placed_slots(store)
+    usable_slots, refused = [], {}
+    for directory in sorted(placed):
+        if directory == bundle:
+            continue
+        found, record = state(store, directory)
+        if found != "same" or not usable(record):
+            refused[directory] = "slot-manifest-" + ("rules-differ" if found == "same" else found)
+            continue
+        try:
+            tool, _ = registered_tool(steam, directory)
+            require(tool == tool_id_of(directory) == record["tool_id"], "slot tool ID differs")
+            root = safe_path(safe_path(steam) / "compatibilitytools.d" / directory, safe_path(steam))
+            verify_fex_runtime_tree(root, inventory_of(record), record["overlays"])
+        except (OSError, Invalid, TypeError, KeyError, ValueError):
+            refused[directory] = "slot-differs-from-saved-data"
+            continue
+        usable_slots.append((directory, record))
+    return usable_slots, refused
+
+
+def marked_slot(items, bundle, candidates):
+    """The slot a game was moved from to this bundle slot, by the newest valid note (4.8)."""
+    found = [item["note"] for item in items if item["note_state"] == "valid" and item["status"] == "binding-verified" and
+             item["note"]["directory"] == bundle and item["note"]["previous_directory"] in candidates]
+    return max(found, key=lambda record: record["created_ns"])["previous_directory"] if found else None
+
+
+def list_caches(root):
+    """``__pycache__`` directories of a verified slot: relative path, identity, file hashes (4.7)."""
+    import os
+    caches = []
+    for current, directories, files in os.walk(root, followlinks=False):
+        directories.sort()
+        if os.path.basename(current) != PYCACHE:
+            continue
+        directories[:] = []
+        info = os.stat(current, follow_symlinks=False)
+        hashes = {}
+        for name in sorted(files):
+            path = os.path.join(current, name)
+            with open(path, "rb") as stream:
+                hashes[name] = hashlib.sha256(stream.read(16 * 1024 * 1024)).hexdigest()
+        caches.append({"relative": os.path.relpath(current, root), "device": info.st_dev, "inode": info.st_ino,
+                       "files": hashes})
+    require(len(caches) <= 4096, "too many cache directories")
+    return caches
+
+
+def move_caches(store, root, plan_caches, binding_id, record, record_hash):
+    """Move the listed cache directories into the private store, one non-replacing rename each.
+
+    The note (``record``) already holds the plan; after each move its "moved" list is
+    updated atomically. Stops at the first refusal (EXDEV, an existing name, a changed
+    directory) without touching the settings. Returns the new note hash.
+    """
+    import os
+
+    from preparation_publication import _rename_function, rename_noreplace
+    rename = _rename_function()
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with store.directory((CACHES, binding_id), create=True) as destination:
+            for number, item in enumerate(plan_caches, 1):
+                parts = item["relative"].split("/")
+                require(parts[-1] == PYCACHE and ".." not in parts and "" not in parts, "invalid cache path")
+                parent = os.dup(root_fd)
+                try:
+                    for part in parts[:-1]:
+                        following = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                        os.close(parent)
+                        parent = following
+                    info = os.stat(PYCACHE, dir_fd=parent, follow_symlinks=False)
+                    require((info.st_dev, info.st_ino) == (item["device"], item["inode"]), "cache directory changed")
+                    name = f"c{number:04d}"
+                    rename_noreplace(rename, parent, PYCACHE, destination, name)
+                    moved_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=destination)
+                    try:
+                        info = os.fstat(moved_fd)
+                        require((info.st_dev, info.st_ino) == (item["device"], item["inode"]), "moved cache differs")
+                        names = sorted(os.listdir(moved_fd))
+                        require(names == sorted(item["files"]), "moved cache files differ")
+                        for file_name in names:
+                            descriptor = os.open(file_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=moved_fd)
+                            with os.fdopen(descriptor, "rb") as stream:
+                                digest = hashlib.sha256(stream.read(16 * 1024 * 1024)).hexdigest()
+                            require(digest == item["files"][file_name], "moved cache file differs")
+                    finally:
+                        os.close(moved_fd)
+                    os.fsync(parent)
+                    os.fsync(destination)
+                finally:
+                    os.close(parent)
+                record["cache_move"]["moved"].append({"relative": item["relative"], "name": name})
+                record_hash = store.write_record(NOTES, binding_id + ".json", record, record_hash)
+    finally:
+        os.close(root_fd)
+    return record_hash
+
+
+def interactive_revert(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
+                       steam=None, settings=None, home=None, runtime_root=None, proc_root=None):
+    """Individual operation 6: assign one game back to another preparation slot (design 4.8)."""
+    import os
+    import sys
+    from pathlib import Path
+
+    import preparation_selection as selection
+    from preparation_binding import apply_binding, plan_binding
+    from preparation_common import safe_path
+    from preparation_dependency_install import describe_error
+    from preparation_game_prefix import RECORDS
+    from preparation_payload import runtime_writes, verify_fex_runtime_tree
+    from preparation_processes import ProcessStopCheck, observe_slot_users
+    from preparation_recheck import check_game_identity
+    from preparation_slot_manifest import inventory_of
+    from preparation_slot_manifest import state as manifest_state
+    from preparation_store import PrivateStore
+
+    stream = sys.stdin if input_stream is None else input_stream
+    output = sys.stdout if output_stream is None else output_stream
+    environment = os.environ if environment is None else environment
+    proc_root = Path("/proc") if proc_root is None else proc_root
+    home = safe_path(home if home is not None else Path.home())
+    steam = safe_path(steam if steam is not None else home / ".local/share/Steam")
+    settings = safe_path(settings if settings is not None else home / ".local/share/droiddeck-compat")
+    directory = safe_path(directory)
+    management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
+    protected, stage, started = [steam, settings], "revert-plan", False
+    report = None
+    try:
+        selection.validate_selection_config(config)
+        require("game_preparation" in config, "game preparation not enabled")
+        bundle = bundle_directory(config)
+        bundle_tool = tool_id_of(bundle)
+        source, _, games = selection.registration_catalog(environment)
+        with PrivateStore(management) as store:
+            bound = []
+            for item in store.inventory()["game_prefixes"]:
+                if item.get("status") != "initialized-unverified":
+                    continue
+                record, digest = store.read_record(RECORDS, item["trial_id"] + ".json")
+                key = record["app_id"]
+                try:
+                    items, _ = history(store, key)
+                    # Read without the bundle slot's registration: a broken bundle slot must not hide the game.
+                    current = current_selection(current_files(steam, settings), key)
+                except (OSError, Invalid, TypeError, KeyError, ValueError):
+                    continue
+                if points_to(current["games"], bundle, bundle_tool) and points_to(current["applied"], bundle, bundle_tool) \
+                        and current["config"] == bundle_tool and history_state(items)[0]:
+                    bound.append((record, digest, items))
+            targets, refused = revert_targets(store, steam, bundle) if bound else ([], {})
+        if not bound or not targets:
+            print("このProtonから戻せるゲームはありません。" if not bound else
+                  "戻す先にできる準備用Protonがありません（DroidDeckの画面と同期のコマンドで戻せます）。", file=output)
+            for name, reason in sorted(refused.items()):
+                print("  " + selection._text(name) + ": " + reason, file=output)
+            report = {"mode": "revert-result", "tool_version": VERSION, "status": "nothing-to-revert",
+                      "refused_targets": refused, "writes": [], "preparation_complete": False}
+        else:
+            for number, (record, _, _) in enumerate(bound, 1):
+                title = games.get(record["app_id"], {}).get("title", "（登録が見つかりません）")
+                print(f"{number}. {selection._text(title)} [ID {record['app_id']}] 今: " + selection._text(bundle), file=output)
+            print("戻すゲームの番号（qで取消）: ", end="", file=output, flush=True)
+            answer = stream.readline(32).strip()
+            if answer == "q" or not answer:
+                print("取り消しました。", file=output)
+                return 0, None
+            require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(bound), "invalid game selection")
+            record, digest, items = bound[int(answer) - 1]
+            key = record["app_id"]
+            names = [name for name, _ in targets]
+            mark = marked_slot(items, bundle, names)
+            ordered = sorted(names, key=lambda name: (name != mark, name))
+            print("別の準備用Protonへ割り当てます。割り当て先の番号（qで取消）:", file=output)
+            for number, name in enumerate(ordered, 1):
+                print(f"{number}. " + selection._text(name) + ("（このProtonへ移す前のProton）" if name == mark else ""),
+                      file=output)
+            answer = stream.readline(32).strip()
+            if answer == "q" or not answer:
+                print("取り消しました。", file=output)
+                return 0, None
+            require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(ordered), "invalid slot selection")
+            target_dir = ordered[int(answer) - 1]
+            saved = dict(targets)[target_dir]
+            target_root = safe_path(steam / "compatibilitytools.d" / target_dir, steam)
+            protected.extend(Path(game["exe"]).parent for game in games.values())
+            stage = "revert-check"
+            identity = check_game_identity(record=record, record_sha256=digest, source=source, games=games, steam=steam,
+                                           home=home)
+            compatdata = identity["compatdata"]
+            stop = ProcessStopCheck(compatdata, proc_root)
+            _, tool_hashes = registered_tool(steam, target_dir)
+            proton_raw = (target_root / "proton").read_bytes()
+            require(hashlib.sha256(proton_raw).hexdigest() == tool_hashes["proton"], "slot launcher changed while reading")
+            blockers = []
+            version_file = safe_path(compatdata / "version", steam)
+            if not prefix_version_matches(proton_raw, version_file.read_bytes() if version_file.is_file() else None):
+                blockers.append("prefix-version-differs")
+            if not stop.check()["clear_in_view"]:
+                blockers.append("game-prefix-in-use")
+            users = observe_slot_users(target_root, proc_root)
+            if not users["clear"]:
+                blockers.append("target-slot-in-use")
+            verified = verify_fex_runtime_tree(target_root, inventory_of(saved), saved["overlays"])
+            caches = list_caches(target_root)
+            plan = plan_binding(steam, settings, key, target_dir)
+            report = {"mode": "revert-result", "tool_version": VERSION, "app_id": key, "from": bundle, "to": target_dir,
+                      "marked": mark == target_dir, "caches_to_move": len(caches), "blockers": blockers,
+                      "slot_runtime_writes": runtime_writes(verified), "binding_written": False,
+                      "preparation_complete": False, "process_observation": {"slot_users": users}}
+            print("戻す先: " + selection._text(target_dir), file=output)
+            print("戻す先のProtonは、置いたときに保存した中身の一覧と照合しました（配布物とは照合していません）。", file=output)
+            print("依存（DLL・ソフト電池）の判定は求めません（prefixの中は変えません）。", file=output)
+            if blockers:
+                for blocker in blockers:
+                    print("停止理由: " + selection._text(blocker), file=output)
+                if "prefix-version-differs" in blockers:
+                    print("戻す先のProtonはprefixの版が違います。戻せません。", file=output)
+                print("戻しません。変更せずに結果を保存します。", file=output)
+                report["writes"] = []
+            else:
+                print(REVERT_NOTE, file=output)
+                print(f"戻す先のProtonのPythonキャッシュ（{len(caches)}か所）をツールの私有の場所へ移します。"
+                      "割り当てが途中で止まっても、移したキャッシュは移したままです（次の起動で作り直されます）。", file=output)
+                print("操作が終わるまで、ゲームを起動しないでください（戻す先のProtonを使うほかのゲームも含みます）。", file=output)
+                print(FIRST_LAUNCH_NOTE, file=output)
+                print("このゲームを " + selection._text(target_dir) + " へ戻す場合は1、取消はq: ", end="", file=output, flush=True)
+                if stream.readline(32).strip() != "1":
+                    print("取り消しました。", file=output)
+                    return 0, None
+                stage, started = "revert-apply", True
+                selection._private_report_directory(home, protected)
+                lock = hashlib.sha256(str(compatdata).encode()).hexdigest()
+                moved = {"done": False}
+                with PrivateStore(management) as store, store.locked(lock):
+                    def ready():
+                        check_game_identity(record=record, record_sha256=digest, source=source, games=games, steam=steam,
+                                            home=home)
+                        require(stop.check()["clear_in_view"], "target process view not clear")
+                        require(observe_slot_users(target_root, proc_root)["clear"], "revert target slot in use")
+                        found, current = manifest_state(store, target_dir)
+                        require(found == "same" and current == saved, "slot data changed")
+                        _, hashes = registered_tool(steam, target_dir)
+                        require(hashes == tool_hashes, "slot tool changed")
+                        result = verify_fex_runtime_tree(target_root, inventory_of(saved), saved["overlays"])
+                        if moved["done"]:
+                            require(result.get("python_caches") is None, "caches appeared in the revert target")
+                        return {"target": True, "stopped": True, "slot_record": True}
+
+                    def under_lock(fresh):
+                        current = current_selection(fresh.before, key)
+                        require(points_to(current["games"], bundle, bundle_tool) and
+                                points_to(current["applied"], bundle, bundle_tool) and current["config"] == bundle_tool,
+                                "assignment changed")
+                        require(list_caches(target_root) == caches, "revert target caches changed")
+
+                    def on_binding_id(run_id):
+                        entry = note(run_id, key, "revert", target_dir, bundle, plan,
+                                     cache_move={"planned": caches, "moved": [], "destination": CACHES + "/" + run_id})
+                        record_hash = write_note(store, entry)
+                        move_caches(store, target_root, caches, run_id, entry, record_hash)
+                        strict = verify_fex_runtime_tree(target_root, inventory_of(saved), saved["overlays"])
+                        require(strict.get("python_caches") is None, "caches remain in the revert target")
+                        moved["done"] = True
+
+                    result = apply_binding(plan, steam, settings, store, ready, kind="revert", bundle_directory=bundle,
+                                           under_lock=under_lock, on_binding_id=on_binding_id)
+                report.update(binding=result, binding_written=result["status"] == "binding-verified",
+                              writes=[{"scope": "target-only-games-config-state"},
+                                      {"scope": "private-binding-backup-record-and-note"},
+                                      {"scope": "revert-target-caches-moved-to-private-store", "count": len(caches)}])
+                print("戻しました（" + selection._text(result["status"]) + "）。DroidDeckから起動してください。", file=output)
+                print("もう一度新しいProtonへ移すときは、個別の操作の5を使ってください。", file=output)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        report = {"mode": "revert-result", "tool_version": VERSION, "stage": stage, **describe_error(error, stage),
+                  "preparation_complete": False,
+                  "writes": [] if not started else [{"scope": "partial-revert-preserve"}]}
+        print("検査停止: " + selection._text(report["check"]) + " / " + selection._text(report["reason"] or report["error_class"]),
+              file=output)
+    try:
+        saved_path, _ = selection.save_selection_result(directory, home, report, protected)
+    except (OSError, ValueError):
+        print("結果JSONを保存できませんでした。私有記録と設定のバックアップは保持しています。", file=output)
+        return 1, None
+    print("結果を保存しました: " + selection._text(str(saved_path)), file=output)
+    return 2, str(saved_path)
