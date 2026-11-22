@@ -341,7 +341,8 @@ Its commit and SHA-256 are recorded in `banner-proton/PINS` and build metadata. 
 
 `PROTON_SOFTDENCHI_OBSERVE=1` records process observations. The experimental
 `PROTON_SOFTDENCHI_CLEANUP=1` additionally revalidates and sends SIGTERM to residual SdProxy
-processes after an observed game handoff and exit. Both are disabled by default. Cleanup requires
+processes after an observed game handoff and exit, once no game process has been seen for two
+seconds. Both are disabled by default. Cleanup requires
 pidfd support and confirmed process identity/origin; missing observations or unknown processes
 prevent cleanup. It does not terminate UCManSvc or reset authentication state.
 

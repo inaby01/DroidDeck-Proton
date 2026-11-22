@@ -57,7 +57,8 @@ class TrackerTests(unittest.TestCase):
         result = sample(self.tracker, [self.payload, service, self.proxy], 2)
         self.assertEqual(result["phase"], "game_processes_present")
         self.assertEqual(sample(self.tracker, [service, self.proxy], 3)["phase"], "game_absence_grace")
-        result = sample(self.tracker, [service, self.proxy], 8)
+        self.assertEqual(sample(self.tracker, [service, self.proxy], 4.9)["phase"], "game_absence_grace")
+        result = sample(self.tracker, [service, self.proxy], 5)
         self.assertEqual(result["phase"], "helpers_remaining_candidate")
         self.assertEqual(result["proxy_candidates"], [[20, 10]])
         self.assertTrue(result["cleanup_requires_revalidation"])
@@ -69,17 +70,18 @@ class TrackerTests(unittest.TestCase):
     def test_game_reappearing_cancels_grace(self):
         sample(self.tracker, [self.launcher, self.proxy], 1)
         sample(self.tracker, [self.proxy], 2)
-        sample(self.tracker, [self.payload, self.proxy], 6)
-        self.assertEqual(sample(self.tracker, [self.proxy], 7)["phase"], "game_absence_grace")
-        self.assertEqual(sample(self.tracker, [self.proxy], 11)["phase"], "game_absence_grace")
+        sample(self.tracker, [self.payload, self.proxy], 3.5)
+        self.assertEqual(sample(self.tracker, [self.proxy], 4)["phase"], "game_absence_grace")
+        self.assertEqual(sample(self.tracker, [self.proxy], 5.9)["phase"], "game_absence_grace")
+        self.assertEqual(sample(self.tracker, [self.proxy], 6)["phase"], "helpers_remaining_candidate")
 
     def test_new_proxy_restarts_absence_grace(self):
         sample(self.tracker, [self.launcher, self.proxy], 1)
         sample(self.tracker, [self.proxy], 2)
         new = process(22, SOFTDENCHI_PROXY)
-        self.assertEqual(sample(self.tracker, [self.proxy, new], 6)["phase"], "game_absence_grace")
-        self.assertEqual(sample(self.tracker, [self.proxy, new], 10)["phase"], "game_absence_grace")
-        self.assertEqual(sample(self.tracker, [self.proxy, new], 11)["phase"], "helpers_remaining_candidate")
+        self.assertEqual(sample(self.tracker, [self.proxy, new], 3.5)["phase"], "game_absence_grace")
+        self.assertEqual(sample(self.tracker, [self.proxy, new], 5.4)["phase"], "game_absence_grace")
+        self.assertEqual(sample(self.tracker, [self.proxy, new], 5.5)["phase"], "helpers_remaining_candidate")
 
     def test_descendant_outside_game_directory_survives_launcher(self):
         child = process(12, r"C:\other\engine.exe", parent=10)
@@ -797,6 +799,11 @@ class EndToEndTests(unittest.TestCase):
         self.base = Path(temp.name)
         self.root = self.base / "proc"
         self.root.mkdir()
+        # snapshot() skips its own PID. In a container the test's real PID can equal
+        # a fixture PID, so use one above the kernel's PID limit.
+        getpid = patch.object(os, "getpid", return_value=4194305)
+        getpid.start()
+        self.addCleanup(getpid.stop)
         self.wine = self.base / "wine-preloader"
         self.wine.write_bytes(b"wine fixture")
         self.server = self.base / "wineserver"

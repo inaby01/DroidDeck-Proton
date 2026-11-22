@@ -77,6 +77,10 @@ def stat_of(path):
 OBSERVATION_LIMIT = 64
 IMAGE_LIMIT = 260
 SUMMARY_BYTES = 16384
+# Seconds without game processes before helper cleanup. Recorded launches showed
+# no helper changes after the game had gone, so this only absorbs a short gap
+# between game processes and polling jitter.
+GAME_ABSENCE_GRACE = 2
 
 
 def executable_identity(entry, references):
@@ -164,7 +168,7 @@ def snapshot(prefix, proc=Path("/proc"), native_references=None):
 
 
 class Tracker:
-    def __init__(self, target, game_id, grace=5):
+    def __init__(self, target, game_id, grace=GAME_ABSENCE_GRACE):
         self.target = target_path(target)
         self.directory = ntpath.dirname(self.target) if self.target else None
         self.game_id = game_id
