@@ -77,6 +77,23 @@ def current_files(steam, settings):
             "state": _raw(safe_path(settings / "state.json", settings))}
 
 
+def target_items(files, key):
+    """The target's entries in the three files that a binding writes (design 3.5 pin).
+
+    The selection entries, the ``config.vdf`` mapping name, and the target's part of
+    ``state.json``'s ``auto``, ``picked`` and ``native_choices`` (``plan_binding`` changes
+    them). Other games' entries are not part of it.
+    """
+    key = app_id(key)
+    current = current_selection(files, key)
+    state = _json(files["state"], {})
+    auto = state.get("auto")
+    return {**current, "auto": auto.get(key) if type(auto) is dict else None,
+            "picked": key in state.get("picked", []) if type(state.get("picked", [])) is list else None,
+            "native_choice": key in state.get("native_choices", []) if type(state.get("native_choices", [])) is list
+            else None}
+
+
 # ---- supplementary records -------------------------------------------------------------
 
 def file_hashes(plan):
@@ -347,17 +364,58 @@ def move_candidates(store, steam, settings, config, records):
     return found, roots
 
 
-def move_check(store, steam, config, key, pinned):
-    """The ``under_lock`` comparison: the rebuilt plan must classify exactly as confirmed (3.5)."""
+def move_check(store, steam, config, key, pinned, targets=None):
+    """The ``under_lock`` comparison: the rebuilt plan must classify exactly as confirmed (3.5),
+    and, when ``targets`` is given, the target's items must be the confirmed ones."""
     directory = bundle_directory(config)
 
     def check(fresh):
+        if targets is not None:
+            require(target_items(fresh.before, key) == targets, "confirmed target items changed")
         items, _ = history(store, key)
         _, placed = placed_roots(store, steam, directory)
         again = classify(fresh.before, key, directory, placed, steam, tuple(config.get("supersedes", ())), items)
         require({k: again[k] for k in ("kind", "source", "choice")} == {k: pinned[k] for k in ("kind", "source", "choice")},
                 "move decision changed")
     return check
+
+
+def plan_move(*, record, digest, decision, roots, config, directory, renderer, steam, settings, home, environment,
+              runtime_root, source, stop):
+    """(plan, refresh, blockers) to move or align one game (shared by operation 5 and the batch run)."""
+    import preparation_selection as selection
+    from preparation_common import safe_path
+    from preparation_game_prefix import plan_game_binding
+
+    def refresh():
+        current, _, now = selection.registration_catalog(environment)
+        require(current == source, "registration source changed")
+        return plan_game_binding(record=record, record_sha256=digest, config=config, directory=directory,
+                                 renderer=renderer, source=current, games=now, steam=steam, settings=settings,
+                                 home=home, environment=environment, runtime_root=runtime_root, stop_check=stop,
+                                 previous_slots=roots, choice=decision["choice"])
+    plan = refresh()
+    require(plan.base.customization.directory == bundle_directory(config), "bundle slot name differs")
+    blockers = list(plan.blockers)
+    version_file = safe_path(plan.base.compatdata / "version", steam)
+    if not prefix_version_matches(plan.base.inventory.captured.get("proton"),
+                                  version_file.read_bytes() if version_file.is_file() else None):
+        blockers.append("prefix-version-differs")
+    return plan, refresh, blockers
+
+
+def apply_move(store, plan, refresh, stop, *, key, decision, config, steam, targets=None, before=None):
+    """Write a planned move under the held target lock: the note first, then the three files (4.3)."""
+    from preparation_game_prefix import apply_game_binding
+    kind = "move"  # An alignment also assigns this slot coming from another one.
+
+    def on_binding_id(run_id):
+        if before is not None:
+            before(run_id)
+        write_note(store, note(run_id, key, kind, bundle_directory(config), decision["source"], plan.binding))
+    return apply_game_binding(plan, store, refresh, plan.digest, stop,
+                              under_lock=move_check(store, steam, config, key, decision, targets),
+                              on_binding_id=on_binding_id)
 
 
 def interactive_move(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
@@ -371,7 +429,7 @@ def interactive_move(directory, renderer, config, *, input_stream=None, output_s
     import preparation_selection as selection
     from preparation_common import safe_path
     from preparation_dependency_install import describe_error
-    from preparation_game_prefix import RECORDS, apply_game_binding, plan_game_binding
+    from preparation_game_prefix import RECORDS
     from preparation_processes import ProcessStopCheck
     from preparation_store import PrivateStore
 
@@ -420,22 +478,11 @@ def interactive_move(directory, renderer, config, *, input_stream=None, output_s
             protected.extend(Path(game["exe"]).parent for game in games.values())
             stop = ProcessStopCheck(safe_path(steam / "steamapps/compatdata" / record["app_id"], steam))
 
-            def refresh():
-                current, _, now = selection.registration_catalog(environment)
-                require(current == source, "registration source changed")
-                return plan_game_binding(record=record, record_sha256=digest, config=config, directory=directory,
-                                         renderer=renderer, source=current, games=now, steam=steam, settings=settings,
-                                         home=home, environment=environment, runtime_root=runtime_root, stop_check=stop,
-                                         previous_slots=roots, choice=decision["choice"])
-
             print("prefix・tool・依存をWineを起動せず照合し、移す計画を作っています。", file=output, flush=True)
-            plan = refresh()
-            require(plan.base.customization.directory == target, "bundle slot name differs")
-            blockers = list(plan.blockers)
-            version_file = safe_path(plan.base.compatdata / "version", steam)
-            if not prefix_version_matches(plan.base.inventory.captured.get("proton"),
-                                          version_file.read_bytes() if version_file.is_file() else None):
-                blockers.append("prefix-version-differs")
+            plan, refresh, blockers = plan_move(record=record, digest=digest, decision=decision, roots=roots, config=config,
+                                                directory=directory, renderer=renderer, steam=steam, settings=settings,
+                                                home=home, environment=environment, runtime_root=runtime_root,
+                                                source=source, stop=stop)
             summary = plan.summary()
             for item in summary["dependencies"]:
                 layout = " / " + item["layout"] if item.get("layout") else ""
@@ -463,13 +510,9 @@ def interactive_move(directory, renderer, config, *, input_stream=None, output_s
                 stage, started = "move-apply", True
                 selection._private_report_directory(home, protected)
                 lock = hashlib.sha256(str(plan.base.compatdata).encode()).hexdigest()
-                kind = "move"
                 with PrivateStore(management) as store, store.locked(lock):
-                    def on_binding_id(run_id):
-                        write_note(store, note(run_id, record["app_id"], kind, target, decision["source"], plan.binding))
-                    result = apply_game_binding(plan, store, refresh, plan.digest, stop,
-                                                under_lock=move_check(store, steam, config, record["app_id"], decision),
-                                                on_binding_id=on_binding_id)
+                    result = apply_move(store, plan, refresh, stop, key=record["app_id"], decision=decision,
+                                        config=config, steam=steam)
                 report.update(binding=result, binding_written=result["status"] == "binding-verified",
                               writes=[{"scope": "target-only-games-config-state"},
                                       {"scope": "private-binding-backup-record-and-note"}])

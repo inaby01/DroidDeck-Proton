@@ -442,6 +442,27 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertEqual(report['reason'], 'previous-installation-failed-review-required', report)
         self.assertEqual(commands, [])
 
+    def test_layout_changed_after_planning_stops_before_wine(self):
+        """Wine is not started in a game prefix linked outside this Proton, even with a plan made before (0.31.0)."""
+        record_, digest = self.initialize()
+        self.use_installer(DEP['installer']())
+        self.pin_silent()
+        plan = self.install_plan_for(record_, digest)
+        self.assertEqual(plan.blockers, ())
+        link = self.game_compat / 'pfx/drive_c/windows/syswow64/cmd.exe'
+        outside = self.home / 'outside-cmd.exe'
+        outside.write_bytes(link.read_bytes())
+        link.unlink()
+        link.symlink_to(outside)
+        with patch.object(dep.DependencyInstallSession, '_spawn') as spawn, \
+                patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                PrivateStore(self.f.store_root) as store, \
+                store.locked(hashlib.sha256(str(self.game_compat).encode()).hexdigest()), \
+                self.assertRaisesRegex(Invalid, 'reference builtin links outside the selected Proton'):
+            dep.DependencyInstallSession(plan, store, lambda: plan, plan.digest,
+                                         GAME['ProcessStopCheck'](self.game_compat, self.f.proc)).start_silent_installer()
+        spawn.assert_not_called()
+
     def install_plan_for(self, record_, digest, mode='silent'):
         source, _, games = DEP['TRIAL']['BASE']['selection'].registration_catalog(self.environment)
         return dep.plan_dependency_install(record=record_, record_sha256=digest, config=self.config,

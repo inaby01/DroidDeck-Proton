@@ -1169,3 +1169,72 @@ first screen offers four entries. A bundle missing one of them keeps the earlier
   evaluation reuses the payload inventory read for the confirmation (one archive read).
   Entry 3 lists two registrations of one executable as ambiguous and keeps the excluded
   candidates and their reasons in the result.
+
+## Proton update and the batch first screen (0.31.0)
+
+With the operational conditions of 0.30.0, the first screen now lists what this bundle
+would do and runs it after one confirmation. 0.30.0's four entries are under 3 with the
+same numbers, followed by two new ones.
+
+```
+1. すべて実行する            (only when something is listed)
+2. ゲームの状態を詳しく見る（何も変更しません）
+3. 個別の操作                (1-4 of 0.30.0, 5 move a game, 6 assign a game to another slot)
+```
+
+- The list is read-only (no locks, no store creation, no Wine), built with the status
+  check's global payload/slot check and menu 1's own planning (`interactive_one_pass`
+  with `mode="plan"`). It shows "to do" items: place the bundle slot, save the slot's
+  verification data, move or align games, resume, prepare new registrations; and "not
+  done" items with their reason. Registrations with a prefix but no record of this tool
+  are grouped once (the tool never adopts an existing prefix). New registrations use the
+  only profile without a pinned EXE hash; non-ASCII EXE paths are left to entry 1. When a
+  SoftDenchi installation is listed, the installer name, hash, arguments and the licence
+  sentence are shown; "1" includes that consent, as in entry 1.
+- Without the bundle slot only the placement is listed. It is done with an automatically
+  chosen confirmation registration (registrations assigned to a preparation slot first,
+  then by number); only a registration-specific failure tries the next one. The list is
+  then built again and confirmed a second time.
+- Running: each step plans again under its own locks. Before a game starts, its entries
+  in `games.json`, `state.json` (`games_applied`, and its part of `auto`, `picked`,
+  `native_choices`) and `config.vdf` must be the listed ones; menu 1 additionally compares
+  its fixed values (except the whole-file binding digest) and stops when more actions are
+  needed than confirmed. A game stopped before writing is skipped; a stop after a game
+  started writing ends the run. Outcomes per game: done, not started, stopped before
+  writing, partially applied.
+- Progress (`batch-runs/`): before a step writes, the record ID it uses (`trial_id`,
+  prefix DLL `record_id`, `install_id`, `binding_id`) is saved with the locked store of
+  that step. The next first screen reconciles an unfinished run from those IDs and the
+  private records, shows it, and marks it reviewed when a new run starts. The result JSON
+  is rewritten after every step (private copy and one shared copy, atomically).
+- Moving (operation 5, and the batch run for slots listed in the bundle's `supersedes`):
+  only games consistently assigned (all three files, compared by `valve`, `dir` and the
+  tool ID) to another preparation slot this tool placed (an `installed-tree-verified`,
+  published installation record of any tool version; the folder registered with the same
+  tool ID). Dependencies must be verified, the prefix version must equal the bundle
+  Proton's `CURRENT_PREFIX_VERSION` (read from the payload), and no game or Wine may run.
+  The x86 layout check accepts a link into such a slot only for this judgement
+  (`previous-slot-link`); writing paths (prefix DLL placement, SoftDenchi installation,
+  including `winver`) require a link into the bundle slot or an x86 regular file. A
+  DroidDeck screen choice of the bundle slot whose other two files still name the old slot
+  is aligned without rewriting `games.json`; the reverse direction is never written.
+  Games returned from this slot, or with a missing supplementary record, are moved only
+  one by one.
+- Supplementary records (`binding-notes/`): written before the binding record, with the
+  slots involved, the per-file before/after hashes and, for operation 6, the cache move.
+  Binding records keep their 0.30.0 shape, so earlier tools still read the store.
+- Slot verification data (`slot-manifests/`, up to 32 MiB, written once per slot name and
+  never replaced): the payload inventory, the expected generated files and the rule
+  versions, saved when this tool verifies the bundle slot (placement, reuse, the batch
+  run). A different or unreadable record makes the slot unusable for operation 6.
+- Operation 6 assigns a game currently on the bundle slot to another slot with saved data
+  that still verifies. It does not need the bundle slot to be intact and does not check
+  dependencies or the bundle payload; it checks the initialization record, the game
+  EXE, the prefix, the target slot (registered tool, saved data, prefix version) and that
+  no process uses the target slot (executable, working directory or a path argument; the
+  launcher is a Python script). The target slot's `__pycache__` directories are moved into
+  the private store (`slot-caches/<binding_id>/`, non-replacing renames, never deleted)
+  before the files are written, so the next launch rebuilds them from verified sources;
+  their contents are not compared. The binding writer has a separate `revert` kind whose
+  readiness keys are only what is checked; a normal binding can only assign the bundle
+  slot and a revert never can.

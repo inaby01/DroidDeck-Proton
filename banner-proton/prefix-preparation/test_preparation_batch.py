@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """The 0.31.0 first screen: the list of what this bundle would do, run after one confirmation."""
 
+import json
+import os
 import runpy
 import shutil
 import sys
@@ -110,13 +112,13 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
                                 'games': [{'app_id': '42', 'step': 'new', 'started_ns': 1, 'outcome': 'running'}]})
         _, _, output = self.first_screen('q\n')
         self.assertIn('前回のまとめての実行が途中で終わっています', output)
-        self.assertIn('ID 42 / new: 途中で止まりました', output)
+        self.assertIn('ID 42: 書き込み前に中止', output)  # Started, but nothing with its IDs was written.
 
     def test_a_stop_after_writing_ends_the_run(self):
         self.forget_manifest()
         calls = []
 
-        def partial(ctx, item):
+        def partial(ctx, item, journal):
             calls.append(item['kind'])
             return 'partial', {'report': {'status': 'stopped', 'reason': 'synthetic'}}
         with unittest.mock.patch.object(batch, '_run_one_pass', side_effect=partial), \
@@ -126,6 +128,68 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         self.assertTrue(saved.called)
         self.assertIn('一部適用・要確認', output)
         self.assertIn('再実行では飛ばされます', output)
+
+    def write_run(self, ids):
+        with PrivateStore(self.f.store_root, create=True) as store, store.locked('e' * 64):
+            name = 'batch-' + os.urandom(16).hex()
+            store.write_record(batch.RUNS, name + '.json',
+                               {'schema_version': 1, 'kind': 'batch-run', 'tool_version': '0.31.0', 'run_id': name,
+                                'created_ns': 1, 'status': 'running',
+                                'games': [{'app_id': '42', 'step': 'new', 'started_ns': 1, 'outcome': 'running',
+                                           'ids': ids}]})
+            return name
+
+    def test_interrupted_runs_are_reconciled_from_their_ids_and_closed_by_the_next_run(self):
+        self.first_screen('1\n')
+        with PrivateStore(self.f.store_root) as store:
+            trial = store.inventory()['game_prefixes'][0]['trial_id']
+            items, _ = update.history(store, '42')
+        binding = items[-1]['binding_id']
+        self.write_run({'initialize': {'trial_id': trial}, 'binding': {'binding_id': binding}})
+        self.write_run({'initialize': {'trial_id': trial}, 'softdenchi-silent': {'install_id': 'depinstall-' + 'f' * 32}})
+        self.write_run({'softdenchi-silent': {'install_id': 'depinstall-' + 'f' * 32}})
+        _, _, output = self.first_screen('q\n')
+        self.assertEqual(output.count('前回のまとめての実行が途中で終わっています'), 3)
+        self.assertIn('ID 42: 完了', output)
+        self.assertIn('ID 42: 一部適用・要確認', output)
+        self.assertIn('ID 42: 書き込み前に中止', output)
+        self.forget_manifest()
+        self.first_screen('1\n')  # A new run marks them reviewed.
+        _, _, output = self.first_screen('q\n')
+        self.assertNotIn('前回のまとめての実行が途中で終わっています', output)
+
+    def test_changed_target_items_skip_the_game(self):
+        original = batch.build
+
+        def changed(ctx):
+            listing = original(ctx)
+            for item in listing['items']:
+                if item['kind'] == 'new':
+                    item['targets'] = dict(item['targets'], picked=not item['targets']['picked'])
+            return listing
+        with unittest.mock.patch.object(batch, 'build', side_effect=changed):
+            _, report, output = self.first_screen('1\n')
+        entry = next(item for item in report['items'] if item['kind'] == 'new')
+        self.assertEqual((entry['outcome'], entry['reason']), ('skipped', 'confirmed-target-items-changed'), output)
+        self.assertFalse(self.game_compat.exists())
+
+    def test_one_shared_result_is_rewritten_after_each_step(self):
+        before = set(self.f.fixture.source.root.glob('plan-*.json'))
+        _, report, _ = self.first_screen('1\n')
+        after = set(self.f.fixture.source.root.glob('plan-*.json')) - before
+        self.assertEqual(len(after), 1, after)
+        self.assertEqual(json.loads(next(iter(after)).read_text())['run_id'], report['run_id'])
+
+    def test_a_matching_pinned_profile_is_mentioned(self):
+        import hashlib
+        exe = next(Path(game['exe']) for key, game in
+                   ONE['GAME']['DEP']['TRIAL']['BASE']['selection'].registration_catalog(self.environment)[2].items()
+                   if key == '42')
+        pinned = dict(self.config['game_preparation']['profiles'][0], profile_id='pinned-game', title='Pinned game',
+                      exe_sha256=hashlib.sha256(exe.read_bytes()).hexdigest())
+        self.config['game_preparation']['profiles'].append(pinned)
+        _, _, output = self.first_screen('q\n')
+        self.assertIn('このゲームはPinned gameのプロファイルとも一致します', output)
 
 
 @unittest.skipUnless(sys.platform == 'linux', 'native writer tests require Linux')
@@ -155,6 +219,12 @@ class MoveBatchTests(BatchFixture, UPDATE['MoveFixture'], ONE['OnePassTests']):
         self.config['supersedes'] = []
         _, report, output = self.first_screen('2\n')
         self.assertIn('置き換える版ではありません', output)
+
+    def test_games_on_preparation_slots_are_preferred_for_confirmation(self):
+        self.assertIn('42', batch._assigned_to_slots(batch.Context(
+            self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config, input_stream=None,
+            output_stream=None, environment=self.environment, steam=self.f.steam, settings=self.f.settings,
+            home=self.home, runtime_root=self.f.root)))
 
     def test_individual_operations_5_and_6_are_reachable(self):
         _, _, output = self.first_screen('3\nq\n')

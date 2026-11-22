@@ -142,6 +142,28 @@ MOVE_TEXT = {
 }
 
 
+def _interrupted_revert(context, key):
+    """A revert that stopped after its note and before its binding record (design 4.7, 4.9), or None."""
+    from preparation_proton_update import history
+    management = context["management"]
+    if not os.path.lexists(management):
+        return None
+    try:
+        with PrivateStore(management) as store:
+            items, orphans = history(store, key)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    # A later completed binding (a revert run again, a move) supersedes the interrupted one.
+    latest = max((item["note"]["created_ns"] for item in items
+                  if item["note_state"] == "valid" and item["status"] == "binding-verified"), default=0)
+    for record in sorted(orphans, key=lambda value: value["created_ns"], reverse=True):
+        move = record.get("cache_move")
+        if record["note_kind"] == "revert" and move and record["created_ns"] > latest:
+            return {"binding_id": record["binding_id"], "moved": len(move.get("moved", [])),
+                    "planned": len(move.get("planned", [])), "destination": move.get("destination")}
+    return None
+
+
 def _move_view(context, key, bundle):
     """How the move decision sees a game not assigned to this bundle slot (read-only), or None."""
     from preparation_proton_update import classify, current_files, history, placed_roots
@@ -267,6 +289,11 @@ def _game(key, listed, title, context):
     steam, settings = context["common"]["steam"], context["common"]["settings"]
     entry = {}
     stage = "status-record"
+    interrupted = _interrupted_revert(context, key)
+    if interrupted is not None:
+        entry["interrupted_revert"] = interrupted
+        print(f"  戻すときのキャッシュの退避が途中で止まりました（{interrupted['moved']}か所を移しました。場所: 私有記録の " +
+              text(interrupted["destination"]) + "）。設定は変わっていません。個別の操作の6でもう一度戻せます。", file=output)
     try:
         if title is None:
             entry.update(record="several" if len(listed) != 1 else listed[0]["status"],

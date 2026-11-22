@@ -335,6 +335,15 @@ class RevertTests(MoveFixture, ONE['OnePassTests']):
             if name else None
         return status, report, output.getvalue()
 
+    def status_output(self):
+        from preparation_status import interactive_status
+        output = io.StringIO()
+        with unittest.mock.patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe):
+            interactive_status(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
+                               output_stream=output, environment=self.environment, steam=self.f.steam,
+                               settings=self.f.settings, home=self.home, runtime_root=self.f.root)
+        return output.getvalue()
+
     def test_revert_assigns_the_old_slot_and_moves_its_caches(self):
         cache = self.add_cache(self.old)
         files = sorted(item.name for item in cache.iterdir())
@@ -420,8 +429,30 @@ class RevertTests(MoveFixture, ONE['OnePassTests']):
         self.assertFalse(any(item['status'] == 'binding-running' for item in items))
         self.assertEqual(len(orphans), 1)
         self.assertEqual(orphans[0]['note_kind'], 'revert')
+        status = self.status_output()
+        self.assertIn('戻すときのキャッシュの退避が途中で止まりました', status)
         _, report, output = self.revert_menu('1\n1\n1\n')
         self.assertTrue(report['binding_written'], output)
+        self.assertNotIn('戻すときのキャッシュの退避が途中で止まりました', self.status_output())
+
+    def test_cache_directory_replaced_after_the_note_is_not_moved(self):
+        cache = self.add_cache(self.old)
+        original = update.write_note
+
+        def swap_after_note(store, record):
+            result = original(store, record)
+            if record['note_kind'] == 'revert':
+                kept = cache.with_name('__pycache__.kept')
+                cache.rename(kept)
+                shutil.copytree(kept, cache)  # Same files, another directory.
+            return result
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(update, 'write_note', side_effect=swap_after_note):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        self.assertIn('cache directory changed', json.dumps(report, ensure_ascii=False))
+        self.assertEqual(before, self.games_config.read_bytes())
+        self.assertTrue(cache.is_dir())
 
     def test_change_of_caches_after_confirmation_stops(self):
         cache = self.add_cache(self.old)

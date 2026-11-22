@@ -208,11 +208,15 @@ def binding_history(store, key):
     return history
 
 
-def apply_note(store, key, plan):
-    """``on_binding_id`` of a new assignment: its supplementary record (design: Proton update 4.3)."""
+def apply_note(store, key, plan, before=None):
+    """``on_binding_id`` of a new assignment: its supplementary record (design: Proton update 4.3).
+
+    ``before(run_id)`` runs first (the batch run's progress record)."""
     from preparation_proton_update import note, write_note
 
     def write(run_id):
+        if before is not None:
+            before(run_id)
         write_note(store, note(run_id, key, "apply", plan.base.customization.directory, None, plan.binding))
     return write
 
@@ -408,7 +412,7 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
 
 def interactive_one_pass(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
                          steam=None, settings=None, home=None, runtime_root=Path("/"), recipe=None, silent_launch=None,
-                         select=None, mode="interactive", expected=None):
+                         select=None, mode="interactive", expected=None, journal=None):
     """Menu 1 (one-pass preparation). The batch run (design: Proton update 3.5, 6) uses the same code.
 
     ``select=(app_id, profile_id or None)`` skips the game and profile questions. ``mode="plan"``
@@ -417,7 +421,13 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
     the batch screen), stops before writing when the confirmed values (``expected``, a plan of
     ``mode="plan"``) changed, except the whole-file binding digest, or when more actions are
     needed than confirmed, and returns ``(status, report)`` without saving the result JSON.
+    ``journal(store, step, ids)`` is called with the locked private store as soon as a step's
+    record ID is chosen and before that step writes anything (design: Proton update 6).
     """
+
+    def noted(store, step, ids):
+        if journal is not None:
+            journal(store, step, ids)
     import sys
 
     import preparation_selection as selection
@@ -502,6 +512,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         report["steps"].append({"step": "softdenchi-interactive", "plan": plan.summary(), "confirmed_plan": plan.digest})
         with droiddeck_lock(settings):
             session = DependencyInstallSession(plan, store, refresh, plan.digest, stop)
+            noted(store, "softdenchi-interactive", {"install_id": session.record["install_id"]})
             live.update(step=report["steps"][-1], session=session)
             session.start_gui_check()
             print("winverの画面が出たら、内容を確認して閉じてください。", file=output, flush=True)
@@ -737,6 +748,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 print("prefixを初期化しています。", file=output, flush=True)
                 with droiddeck_lock(settings):
                     session = GamePrefixSession(plan, store, refresh_init, plan.digest, stop)
+                    noted(store, "initialize", {"trial_id": session.record["trial_id"]})
                     report["steps"].append({"step": "initialize", "plan": plan.summary()})
                     live.update(step=report["steps"][-1], session=session)
                     session.start()
@@ -774,6 +786,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 print("prefixに " + text(target_name(item)) + " を入れています。", file=output, flush=True)
                 with droiddeck_lock(settings):
                     session = PrefixDllSession(dll_plan, store, refresh_dll, dll_plan.digest, stop)
+                    noted(store, "prefix-dll", {"record_id": session.record["record_id"]})
                     live.update(step=report["steps"][-1], session=session)
                     result = session.apply()
                 report["steps"][-1]["record"] = result
@@ -819,6 +832,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                     print("ソフト電池を画面なしで導入しています（最初の10分は確認なしで待ちます）。", file=output, flush=True)
                     with droiddeck_lock(settings):
                         session = DependencyInstallSession(dplan, store, refresh_silent, dplan.digest, stop)
+                        noted(store, "softdenchi-silent", {"install_id": session.record["install_id"]})
                         report["steps"].append({"step": "softdenchi-silent", "plan": dplan.summary()})
                         live.update(step=report["steps"][-1], session=session)
                         session.start_silent_installer()
@@ -853,7 +867,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 result = apply_game_binding(bplan, store, lambda: plan_game_binding(
                     record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,
                     recipe=softdenchi, **common), bplan.digest, stop, softdenchi,
-                    on_binding_id=apply_note(store, key, bplan))
+                    on_binding_id=apply_note(store, key, bplan, lambda run_id: noted(store, "binding", {"binding_id": run_id})))
                 report["steps"].append({"step": "binding", "result": result})
                 report["binding_written"] = result["status"] == "binding-verified"
                 if result["status"] != "binding-verified":
