@@ -42,7 +42,20 @@ def scan(text):
 def template(**changes):
     keys = {ident: {"Bld": ("dword", 0x8d8f), "Installed": ("dword", 1), "Major": ("dword", 14), "Minor": ("dword", 51),
                     "Rbld": ("dword", 0), "Version": ("sz", VERSION)} for ident in vc.KEYS}
-    return {"keys": keys, "version": VERSION, "tail_sha256": "a" * 64, "archive_has_keys": False, **changes}
+    return {"keys": keys, "version": VERSION, "tail_sha256": "a" * 64, "archive": {}, **changes}
+
+
+WINE_ORIGINAL = {"Bld": ("dword", 34433), "Installed": ("dword", 1), "Major": ("dword", 14), "Minor": ("dword", 42),
+                 "Rbld": ("dword", 0), "Version": ("sz", "14.42.34433.0")}
+# The four keys the pinned Proton template carries from Wine itself (design 12).
+ORIGINAL_KEYS = ("native-arm64", "native-x64", "wow-x64", "wow-x86")
+
+
+def wine_original(ident):
+    lines = [f"[{esc(vc.KEYS[ident])}] 1795176401", "#time=1dc5a4b2c3d4e5f", '"Bld"=dword:00008681',
+             '"Installed"=dword:00000001', '"Major"=dword:0000000e', '"Minor"=dword:0000002a', '"Rbld"=dword:00000000',
+             '"Version"="14.42.34433.0"']
+    return "\n".join(lines) + "\n"
 
 
 def initial(text):
@@ -100,7 +113,7 @@ class TemplateTests(unittest.TestCase):
         found = vc.read_template(path, size, digest)
         self.assertEqual(found["version"], VERSION)
         self.assertEqual(set(found["keys"]), set(vc.KEYS))
-        self.assertFalse(found["archive_has_keys"])
+        self.assertEqual(found["archive"], {})
 
     def test_a_changed_tail_or_mixed_versions_are_refused(self):
         path, size, digest = self.write("", "\n" + block())
@@ -113,9 +126,16 @@ class TemplateTests(unittest.TestCase):
         with self.assertRaisesRegex(Invalid, "version missing"):
             vc.read_template(path, size, digest)
 
-    def test_keys_already_in_the_archive_part_are_flagged(self):
-        path, size, digest = self.write(runtimes("native-x86"), "\n" + block())
-        self.assertTrue(vc.read_template(path, size, digest)["archive_has_keys"])
+    def test_the_original_values_before_droiddeck_are_read_for_writing_back(self):
+        archive = "\n".join(wine_original(ident) for ident in ORIGINAL_KEYS)
+        path, size, digest = self.write(archive, "\n" + block())
+        found = vc.read_template(path, size, digest)
+        self.assertEqual(set(found["archive"]), set(ORIGINAL_KEYS))
+        self.assertEqual(found["archive"]["wow-x86"], WINE_ORIGINAL)
+        path, size, digest = self.write(wine_original("wow-x86").replace('"Rbld"=dword:00000000', '"Rbld"=hex:00'),
+                                        "\n" + block())
+        with self.assertRaisesRegex(Invalid, "original value type"):
+            vc.read_template(path, size, digest)
 
 
 class DecisionTests(unittest.TestCase):
@@ -143,7 +163,6 @@ class DecisionTests(unittest.TestCase):
             "registered": self.decide(block() + f'[{root}{{A}}] 1\n"DisplayName"="Microsoft Visual C++ 2015-2019 '
                                       'Redistributable (x86) - 14.24.28127"\n')["reason"],
             "template": self.decide(block(), tmpl=Invalid("x"))["reason"],
-            "archive": self.decide(block(), tmpl=template(archive_has_keys=True))["reason"],
             "legacy": self.decide(block(), init=None)["reason"],
             "unreadable": self.decide(block(), init={"state": "unreadable", "error_class": "OSError"})["reason"],
             "changed": self.decide(block(), tail="b" * 64)["reason"],
@@ -152,7 +171,7 @@ class DecisionTests(unittest.TestCase):
             "since-init": self.decide(block(), init=initial(block(("native-x86",))))["reason"],
         }
         self.assertEqual(cases, {"absent": "absent", "kept": "kept-vc-present", "registered": "vc-registered-without-mfc140",
-                                 "template": "template-mismatch", "archive": "keys-in-archive",
+                                 "template": "template-mismatch",
                                  "legacy": "no-initial-fingerprint", "unreadable": "initial-fingerprint-unreadable",
                                  "changed": "template-changed", "shape": "registry-shape", "values": "values-differ",
                                  "since-init": "values-differ"})
@@ -195,7 +214,7 @@ class ReleaseTests(unittest.TestCase):
         # An empty key left behind is not finished (design 4 resume).
         empty = runtimes_only + "[" + esc(vc.KEYS["native-x86"]) + "] 1\n"
         self.assertEqual(vc.resume(scan(empty), NO_MFC, original)["keys"], {"native-x86": {
-            "values": {}, "delete_key": True, "kept": original["native-x86"]["kept"]}})
+            "values": {}, "delete_key": True, "kept": original["native-x86"]["kept"], "restore": {}}})
         self.assertEqual(vc.resume(scan(block(version="v14.24.28127.00")), NO_MFC, original)["reason"],
                          "investigation-required")
         self.assertEqual(vc.resume(scan(text), {"syswow64": "native", "system32": "absent"}, original)["state"],
@@ -349,6 +368,51 @@ class FinalReviewTests(unittest.TestCase):
         self.assertIs(vc.unfinished([releasing, unreadable]), releasing)
 
 
+class RestoreTests(unittest.TestCase):
+    """Design 12: write back the values the template had before DroidDeck appended."""
+
+    def plan(self):
+        tmpl = template(archive={ident: dict(WINE_ORIGINAL) for ident in ORIGINAL_KEYS})
+        return vc.evaluate(scan(block()), NO_MFC, tmpl, initial(block()), "a" * 64)["keys"]
+
+    def test_original_keys_are_written_back_and_droiddecks_own_keys_deleted(self):
+        plan = self.plan()
+        self.assertEqual(plan["wow-x86"]["restore"]["Version"], ["sz", "14.42.34433.0"])
+        self.assertFalse(plan["wow-x86"]["delete_key"])
+        self.assertEqual((plan["native-x86"]["restore"], plan["native-x86"]["delete_key"]), ({}, True))
+        args = vc.command(plan)
+        key = "HKLM\\" + vc.KEYS["wow-x86"]
+        self.assertIn([vc.REG, "add", key, "/v", "Bld", "/t", "REG_DWORD", "/d", "34433", "/reg:64", "/f"],
+                      [list(args[i:i + 11]) for i in range(len(args))])
+        self.assertIn([vc.REG, "add", key, "/v", "Version", "/t", "REG_SZ", "/d", "14.42.34433.0", "/reg:64", "/f"],
+                      [list(args[i:i + 11]) for i in range(len(args))])
+        vc.validate_record({"state": "releasing", "values": 36, "keys": plan})
+
+    def restored(self):
+        return "\n".join(wine_original(ident) for ident in ORIGINAL_KEYS) + \
+            "[Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes] 1\n" \
+            "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes] 1\n"
+
+    def test_verify_wants_exactly_the_original_values_back(self):
+        plan = self.plan()
+        self.assertIsNone(vc.verify(plan, scan(self.restored())))
+        self.assertEqual(vc.verify(plan, scan(self.restored().replace("14.42.34433.0", "v14.51.36247.00", 1))),
+                         "values-remain")
+        self.assertEqual(vc.verify(plan, scan(self.restored() + runtimes("native-x86"))), "values-remain")
+        missing = self.restored().replace('"Minor"=dword:0000002a\n', "", 1)
+        self.assertEqual(vc.verify(plan, scan(missing)), "values-remain")
+
+    def test_resume_tells_written_back_from_still_droiddecks(self):
+        plan = self.plan()
+        half = self.restored().replace(wine_original("wow-x86"), runtimes("wow-x86"))
+        decision = vc.resume(scan(half), NO_MFC, plan)
+        self.assertEqual((decision["state"], sorted(decision["keys"])), ("release", ["wow-x86"]))
+        self.assertEqual(decision["keys"]["wow-x86"]["restore"]["Version"], ["sz", "14.42.34433.0"])
+        self.assertEqual(vc.resume(scan(self.restored()), NO_MFC, plan)["state"], "absent-after-release")
+        other = self.restored().replace("14.42.34433.0", "14.40.1.0", 1)
+        self.assertEqual(vc.resume(scan(other), NO_MFC, plan)["reason"], "investigation-required")
+
+
 class RecordTests(unittest.TestCase):
     def test_unfinished_is_the_newest_evaluated_release_only(self):
         keys = {"native-x86": {"values": {"Version": "a" * 64}, "delete_key": True, "kept": "b" * 64}}
@@ -366,7 +430,7 @@ class RecordTests(unittest.TestCase):
         vc.validate_record({"state": "not-evaluated"})
         vc.validate_record({**vc.failed("registry-unreadable:OSError"), "values": 6})
         vc.validate_record({"state": "released", "values": 36, "version": VERSION, "exit_code": 0, "resumed_from": None,
-                            "keys": {"wow-arm64": {"values": {"Bld": "a" * 64}, "delete_key": True, "kept": "b" * 64}},
+                            "keys": {"wow-arm64": {"values": {"Bld": "a" * 64}, "delete_key": True, "kept": "b" * 64, "restore": {}}},
                             "wineserver_observed": True, "wineserver_gone_before_read": True})
         for bad in ({"state": "released", "reason": "x"}, {"state": "failed"}, {"state": "absent", "secret": 1},
                     {"state": "released", "keys": {"elsewhere": {}}}, {"state": "releasing"}, {"state": "released"},
@@ -375,7 +439,9 @@ class RecordTests(unittest.TestCase):
                     {"state": "absent", "wineserver_observed": 1}, {"state": "absent", "exit_code": True},
                     {"state": "absent", "wineserver_observed": True}, {"state": "kept-vc-present", "exit_code": 0},
                     {"state": "releasing", "keys": {"native-x86": {"values": {"Bld": "a" * 64}, "delete_key": True,
-                                                                  "kept": "b" * 64}}, "exit_code": 0}):
+                                                                  "kept": "b" * 64, "restore": {}}}, "exit_code": 0},
+                    {"state": "releasing", "keys": {"native-x86": {"values": {"Bld": "a" * 64}, "delete_key": False,
+                                                                  "kept": "b" * 64, "restore": {"Bld": ["sz", "a b"]}}}}):
             with self.assertRaises(Invalid):
                 vc.validate_record(bad)
         with self.assertRaises(Invalid):

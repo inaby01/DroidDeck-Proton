@@ -54,7 +54,7 @@ VC14_NAME = re.compile(r"microsoft visual c\+\+ 2015-20\d\d .*redistributable|"
 STATES = ("not-evaluated", "releasing", "absent", "absent-after-release", "released", "kept-vc-present", "failed")
 # Stops the operator cannot clear by running again (design 4, Fable L4): shown as "stops", skipped by the batch.
 FINAL_REASONS = ("investigation-required", "no-initial-fingerprint", "initial-fingerprint-unreadable", "template-mismatch",
-                 "template-changed", "keys-in-archive", "registry-shape", "values-differ", "vc-registered-without-mfc140",
+                 "template-changed", "registry-shape", "values-differ", "vc-registered-without-mfc140",
                  "uninstall-unreadable")
 RETRYABLE_REASONS = ("wait-timeout", "wine-start", "values-remain", "keys-remain", "removed-too-much",
                      "persistence-unconfirmed", "registry-unreadable", "template-unreadable", "changed-before-release")
@@ -341,8 +341,9 @@ def fingerprint(scan):
 def read_template(registry, archive_size, expected_tail_sha256):
     """DroidDeck's appended Runtimes values, read from the same bytes whose hash the tool verified.
 
-    Returns {"keys": {ident: {name: (type, data)}}, "version": str, "archive_has_keys": bool,
-    "tail_sha256": str}. Raises Invalid when the template cannot be interpreted.
+    Returns {"keys": {ident: {name: (type, data)}}, "version": str, "archive": {ident: {name: (type, data)}},
+    "tail_sha256": str}. ``archive`` holds the values the template had before DroidDeck appended
+    (Wine's own, design 12): they are written back. Raises Invalid when the template cannot be interpreted.
     """
     require(type(archive_size) is int and archive_size > 0 and type(expected_tail_sha256) is str, "template contract missing")
     with regular_open(safe_path(registry), MAX_REGISTRY) as stream:
@@ -368,8 +369,25 @@ def read_template(registry, archive_size, expected_tail_sha256):
         versions.add(entry["values"]["Version"][1])
         keys[ident] = dict(entry["values"])
     require(keys and len(versions) == 1, "template versions differ")
-    return {"keys": keys, "version": versions.pop(), "tail_sha256": digest,
-            "archive_has_keys": any(entry["occurrences"] or entry["subkeys"] for entry in archive_scan["keys"].values())}
+    original = {}
+    for ident, entry in archive_scan["keys"].items():
+        if not entry["values"]:
+            continue
+        require(entry["occurrences"] == 1 and not entry["duplicate"] and not entry["link"], "template original key shape")
+        for value in entry["values"].values():
+            require(restorable(value), "template original value type")
+        original[ident] = dict(entry["values"])
+    return {"keys": keys, "version": versions.pop(), "tail_sha256": digest, "archive": original}
+
+
+RESTORE_SZ = re.compile(r"[0-9A-Za-z.]{1,40}")
+
+
+def restorable(value):
+    """Values written back with reg.exe add: DWORDs and short plain strings (Wine's version numbers)."""
+    kind, data = value
+    return (kind == "dword" and type(data) is int and 0 <= data <= 0xFFFFFFFF) or \
+        (kind == "sz" and type(data) is str and RESTORE_SZ.fullmatch(data) is not None)
 
 
 def _windows_dir(compatdata, name):
@@ -456,8 +474,6 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256):
         return failed("template-unreadable:" + type(template).__name__, values=count)
     if isinstance(template, Exception) or template is None:
         return failed("template-mismatch", values=count)
-    if template["archive_has_keys"]:
-        return failed("keys-in-archive", values=count)
     if initial is None:
         return failed("no-initial-fingerprint", values=count)
     if initial.get("state") != "captured":
@@ -473,8 +489,13 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256):
                 for ident, values in template["keys"].items()}
     if any(expected.get(ident) != values for ident, values in current.items()) or current != initial.get("keys"):
         return failed("values-differ", values=count)
-    plan = {ident: {"values": current[ident], "delete_key": not entry["others"] and not entry["subkeys"],
-                    "kept": kept_hash(entry)} for ident, entry in targets.items()}
+    plan = {}
+    for ident, entry in targets.items():
+        original = template["archive"].get(ident, {})
+        # Names the template had before DroidDeck are written back; the rest are deleted (design 12).
+        plan[ident] = {"values": current[ident], "kept": kept_hash(entry),
+                       "restore": {name: list(original[name]) for name in current[ident] if name in original},
+                       "delete_key": ident not in template["archive"] and not entry["others"] and not entry["subkeys"]}
     return {"state": "release", "values": count, "version": template["version"], "keys": plan}
 
 
@@ -504,12 +525,22 @@ def resume(scan, mfc, previous):
                 return failed("investigation-required")
             continue
         now = {name: value_hash(value) for name, value in entry["values"].items()}
-        if any(original["values"].get(name) != digest for name, digest in now.items()):
-            return failed("investigation-required")
+        restore = original.get("restore", {})
+        done = {name: value_hash(tuple(value)) for name, value in restore.items()}
+        pending = {}
+        for name in set(now) | set(original["values"]):
+            # Each name is either still DroidDeck's (to do) or done: written back, or gone when it is deleted.
+            if now.get(name) == done.get(name):
+                continue  # Written back (also when DroidDeck's value was the same), or deleted.
+            if now.get(name) is not None and now.get(name) == original["values"].get(name):
+                pending[name] = now[name]
+            else:
+                return failed("investigation-required")
         if entry["exists"] and kept_hash(entry) != original["kept"]:
             return failed("investigation-required")
-        if now or (original["delete_key"] and entry["exists"]):
-            remaining[ident] = {"values": now, "delete_key": original["delete_key"], "kept": original["kept"]}
+        if pending or (original["delete_key"] and entry["exists"]):
+            remaining[ident] = {"values": pending, "delete_key": original["delete_key"], "kept": original["kept"],
+                                "restore": {name: value for name, value in restore.items() if name in pending}}
     count = sum(len(item["values"]) for item in remaining.values())
     if not remaining:
         return {"state": "absent-after-release", "values": 0}
@@ -525,8 +556,14 @@ def command(plan):
             continue
         key = "HKLM\\" + path
         chain = []
+        restore = item.get("restore", {})
         for name in VALUE_NAMES:
-            if name in item["values"]:
+            if name in restore:
+                kind, data = restore[name]
+                require(restorable((kind, data)), "value cannot be written back")
+                chain.append([REG, "add", key, "/v", name, "/t", "REG_DWORD" if kind == "dword" else "REG_SZ",
+                              "/d", str(data), "/reg:64", "/f"])
+            elif name in item["values"]:
                 chain.append([REG, "delete", key, "/v", name, "/reg:64", "/f"])
         if item["delete_key"]:
             chain.append([REG, "delete", key, "/reg:64", "/f"])
@@ -557,12 +594,15 @@ def verify(plan, scan):
         return "registry-shape"
     if not scan["runtimes_present"]["native"] or not scan["runtimes_present"]["wow"]:
         return "removed-too-much"
-    if any(entry["values"] for entry in scan["keys"].values()):
-        return "values-remain"
+    for ident, entry in scan["keys"].items():
+        # Only the written-back values may remain, each equal to the template's original (design 12).
+        restore = {name: tuple(value) for name, value in plan.get(ident, {}).get("restore", {}).items()}
+        if set(entry["values"]) - set(restore):
+            return "values-remain"
+        if any(entry["values"].get(name) != value for name, value in restore.items()):
+            return "values-remain"
     for ident, item in plan.items():
         entry = scan["keys"][ident]
-        if entry["values"]:
-            return "values-remain"
         if item["delete_key"]:
             if entry["exists"]:
                 return "keys-remain"
@@ -639,7 +679,10 @@ def validate_record(value):
     if value.get("keys") is not None:
         require(type(value["keys"]) is dict and set(value["keys"]) <= set(KEYS), "invalid VC record keys")
         for item in value["keys"].values():
-            require(type(item) is dict and set(item) == {"values", "delete_key", "kept"} and
+            require(type(item) is dict and set(item) == {"values", "delete_key", "kept", "restore"} and
+                    type(item["restore"]) is dict and set(item["restore"]) <= set(item["values"]) and
+                    all(type(value) is list and len(value) == 2 and restorable(tuple(value))
+                        for value in item["restore"].values()) and
                     type(item["delete_key"]) is bool and type(item["kept"]) is str and
                     re.fullmatch(r"[0-9a-f]{64}", item["kept"]) is not None, "invalid VC record key")
             require(type(item["values"]) is dict and set(item["values"]) <= set(VALUE_NAMES) and
@@ -687,7 +730,8 @@ def final_stop(history):
     return None
 
 
-RELEASE_TEXT = "導入の前に、ひな形から受け継いだ『VC++ 14.51導入済み』の記録（DroidDeckが書き足したもの）を、このprefixから外します（VC++の実体がない場合だけ。ほかのゲーム・ひな形は変えません）。"
+RELEASE_TEXT = ("導入の前に、ひな形から受け継いだ『VC++ 14.51導入済み』の記録（DroidDeckが書き足したもの）を、このprefixから外します"
+                "（Protonのひな形がもともと持っていた値はその値に戻します。VC++の実体がない場合だけ。ほかのゲーム・ひな形は変えません）。")
 
 
 def text_reason(reason):
@@ -698,7 +742,6 @@ def text_reason(reason):
         "initial-fingerprint-unreadable": "初期化のときの記録を読めなかったため、受け継いだ記録かどうかを確かめられません",
         "template-mismatch": "準備用Protonのひな形の書き足し部分を確かめられません",
         "template-changed": "初期化のあとに準備用Protonのひな形が変わっています",
-        "keys-in-archive": "VC++の記録がひな形のもとの部分にあり、DroidDeckが書き足したものではありません",
         "registry-shape": "VC++の記録のキーの形が想定と違います（重複・リンクなど）",
         "values-differ": "VC++の記録の値が、ひな形または初期化のときと違います",
         "vc-registered-without-mfc140": "VC++の登録はありますが mfc140.dll がありません",

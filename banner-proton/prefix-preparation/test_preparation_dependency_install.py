@@ -59,6 +59,18 @@ if sys.argv[1:5] == ['runinprefix', 'cmd.exe', '/d', '/c'] and any(arg.endswith(
         return header[1:header.index(']')].replace(BS + BS, BS).lower()
     def run(command):
         key = command[2].split(BS, 1)[1].lower()
+        if command[1] == 'add':
+            value = command[command.index('/v') + 1]
+            data = command[command.index('/d') + 1]
+            kind = command[command.index('/t') + 1]
+            line = '"' + value + '"=' + ('dword:%08x' % int(data) if kind == 'REG_DWORD' else '"' + data + '"')
+            for header, lines in sections:
+                if name_of(header) == key:
+                    lines[:] = [old for old in lines if not old.lower().startswith('"' + value.lower() + '"=')]
+                    lines.insert(0, line)
+                    return 0
+            sections.append(['[' + key.replace(BS, BS + BS) + '] 0', [line]])
+            return 0
         if '/v' in command:
             value = command[command.index('/v') + 1]
             if value in fail or any(':' in item and item.split(':')[0] in key and item.split(':')[1] == value
@@ -1641,6 +1653,19 @@ class InheritedVcTests(InstallTests):
         self.assertIn("ひな形から受け継いだ『VC++ 14.51導入済み』", output)
         self.assertNotIn('インストーラの画面で操作してください', output)
 
+
+    def test_the_template_s_original_values_are_written_back(self):
+        archive = {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
+        self.template.stop()
+        with patch.object(self.vc, 'read_template', return_value=VC['template'](tail_sha256=None, archive=archive)):
+            _, result, _ = self.silent_flow()
+        self.template.start()
+        self.assertEqual(result['status'], 'present-verified', result)
+        self.assertEqual(result['inherited_vc_record']['state'], 'released')
+        found = self.registry()['keys']
+        for ident in VC['ORIGINAL_KEYS']:
+            self.assertEqual(found[ident]['values'], VC['WINE_ORIGINAL'], ident)
+        self.assertEqual((found['native-x86']['exists'], found['wow-arm64']['exists']), (False, False))
 
     def test_the_real_template_path_size_and_hash_are_passed(self):
         self.template.stop()

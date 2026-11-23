@@ -1330,17 +1330,23 @@ releases these inherited values from the prefix it prepared:
 
 - Only when SoftDenchi is not installed, no `mfc140.dll` exists in `syswow64` or `system32`,
   no VC++ 14.x registration exists under `Uninstall` (display names only), every value equals
-  the template's appended tail (read from the bytes whose hash the tool already verified), the
-  keys are not in the template's archive part, no key or ancestor is a registry link, nothing
-  is duplicated, and the values equal the fingerprint recorded right after the prefix was
+  the template's appended tail (read from the bytes whose hash the tool already verified), every
+  line of the prefix's `system.reg` has a form Wine writes, no key, ancestor or sub-key is a
+  registry link, nothing is duplicated, and the values equal the fingerprint recorded right after the prefix was
   initialized by 0.32.0 or later (`vc_runtime_fingerprint` in the initialization record).
   A prefix initialized by an earlier version has no fingerprint; its values are not released.
-- One Wine run of `cmd.exe /d /c` with `C:\windows\system32\reg.exe delete <key> /v <name> /reg:64 /f`
-  per value, joined by `&&` within a key (a failure stops that key) and `&` between keys. A key
-  that had no other values and no sub-keys is then deleted itself (`reg delete <key> /reg:64 /f`).
+- The pinned Proton template already carries Wine's own values in four of these keys
+  (`Version` `14.42.34433.0`, without the leading `v`); DroidDeck's tail overrides them. Those
+  values are written back (`reg.exe add <key> /v <name> /t REG_DWORD|REG_SZ /d <value> /reg:64 /f`),
+  so the prefix ends as the template was before DroidDeck appended to it. Values the template
+  did not have are deleted (`reg.exe delete <key> /v <name> /reg:64 /f`), and a key the template
+  did not have, with no other values and no sub-keys, is deleted itself (`reg delete <key> /reg:64 /f`).
+  One Wine run of `cmd.exe /d /c` does it all, joined by `&&` within a key (a failure stops that
+  key) and `&` between keys.
   The child is polled (120 s) and the prefix's processes are observed until none is left (60 s);
-  nothing is signalled. The registry file is then read again: the released values and keys must
-  be gone, kept keys and their other data unchanged, and the `Runtimes` keys present.
+  nothing is signalled. The registry file is then read again: written-back values must equal the
+  template's, deleted values and keys must be gone, kept keys and their other data unchanged, and
+  the `Runtimes` keys present.
 - Any failure stops before the installer: the installation record is
   `stopped-before-installer` and `inherited_vc_record` says why and whether running again can
   clear it. A partly finished release continues on the next run only when what is left is a
