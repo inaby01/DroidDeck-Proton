@@ -455,13 +455,13 @@ class DllStatusTests(StatusMixin, ONE['PrefixDllOnePassTests']):
         _, menu, _, _ = self.run_menu('1\n1\n1\n')
         self.agrees(entry, menu)
 
-    def test_placed_dll_with_a_missing_asset_stops_before_writing_in_both(self):
+    def test_placed_dll_needs_no_asset_file_in_both(self):
+        # A game with nothing left to do does not need the asset files (a DLL to place still does).
         self.run_menu('1\n1\n1\n1\n')
         (self.f.fixture.source.root / 'mfc42.dll').unlink()
-        _, report, _ = self.status()
+        _, report, output = self.status()
         entry = self.entry(report)
-        self.assertEqual(entry['next']['stage'], 'one-pass-precheck')
-        self.assertTrue(entry['next']['reason'].startswith('dll-asset:mfc42-prefix:'))
+        self.assertEqual(entry['next']['next'], 'ready', output)
         _, menu, _, _ = self.run_menu('1\n1\n1\n')
         self.agrees(entry, menu)
 

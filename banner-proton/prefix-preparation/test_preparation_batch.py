@@ -664,6 +664,15 @@ class DllBatchTests(BatchFixture, ONE['PrefixDllOnePassTests']):
         self.assertIn('prefix-dll:mfc42-prefix', entry['ids'])
         self.assertNotIn('prefix-dll', entry['ids'])
 
+    def test_a_prepared_game_is_not_listed_when_the_asset_files_are_gone(self):
+        # As on the device on 2026-11-23: a folder without mfc42.dll listed the ready game under "not done".
+        _, report, output = self.first_screen('1\n')
+        self.assertEqual(next(item for item in report['items'] if item['kind'] == 'new')['outcome'], 'done', output)
+        (self.f.fixture.source.root / 'mfc42.dll').unlink()
+        _, _, output = self.first_screen('q\n')
+        self.assertNotIn('[ID 42]', output)
+        self.assertIn('することはありません', output)
+
 
 # Only the fixtures of the one-pass tests are reused, not their tests.
 for _class in (NewGameBatchTests, MoveBatchTests, PlacementBatchTests, DllBatchTests):

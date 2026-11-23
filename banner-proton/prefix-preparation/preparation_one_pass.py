@@ -286,11 +286,21 @@ def current_tool(steam, settings, key):
         return "読めません"
 
 
+def _dll_asset_stop(items, reasons):
+    """The stop for prefix DLL assets missing or different in the asset folder."""
+    return ("one-pass-precheck", ",".join(sorted(reasons)),
+            "prefixに入れるDLL（" + "、".join(item["asset"]["filename"] for item in items) +
+            "）がprepare.shと同じフォルダーにないか、内容が違います。何も変更していません。")
+
+
 def pre_write_stops(*, profile, recipes, directory, record=None, softdenchi=None, installer=None):
     """Stops that menu 1 (one-pass) makes before anything is written: (stage, reason, next step) or None.
 
     ``installer`` is the SoftDenchi asset spec when a new prefix will need it. Shared by
     menu 1 and the status check (design: operational entry 6.3); read-only, no locks.
+    The prefix DLL assets are checked here only for a new prefix (every DLL will be placed);
+    for an initialized game ``evaluate_resume`` requires an asset only for a DLL it would
+    place, so a game with nothing left to do does not need the asset files.
     """
     from preparation_softdenchi_recipe import bind_asset
     if record is not None:
@@ -313,13 +323,12 @@ def pre_write_stops(*, profile, recipes, directory, record=None, softdenchi=None
         if problems:
             return stage, ",".join(sorted(problems)), ("インストーラー（" + installer["filename"] +
                                                       "）がprepare.shと同じフォルダーにないか、内容が違います。何も変更していません。")
+    if record is not None:
+        return None
     dll_items = [recipes[dep] for dep in profile["dependencies"] if recipes[dep]["handler"] == PREFIX_DLL]
-    problems = sorted({"dll-asset:" + item["dependency_id"] + ":" + reason
-                       for item, value in zip(dll_items, _dlls(profile, recipes, directory)) for reason in value["blockers"]})
-    if problems:
-        return stage, ",".join(problems), ("prefixに入れるDLL（" + "、".join(item["asset"]["filename"] for item in dll_items) +
-                                          "）がprepare.shと同じフォルダーにないか、内容が違います。何も変更していません。")
-    return None
+    problems = {"dll-asset:" + item["dependency_id"] + ":" + reason
+                for item, value in zip(dll_items, _dlls(profile, recipes, directory)) for reason in value["blockers"]}
+    return _dll_asset_stop(dll_items, problems) if problems else None
 
 
 def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, source, games, common, stop_check,
@@ -372,7 +381,11 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
                                    stop_check=stop_check, previous_slots=roots, **common, **extra)
             steps.append({"step": "prefix-dll", "evaluated": True, "plan": plan.summary()})
             if plan.action == "skip":
-                continue
+                continue  # Already in the prefix: the asset file is not needed.
+            missing = sorted(blocker.removeprefix("asset:") for blocker in plan.blockers if blocker.startswith("asset:"))
+            if missing:
+                return stopped(*_dll_asset_stop([item], ["dll-asset:" + item["dependency_id"] + ":" + reason
+                                                         for reason in missing]))
             blockers = list(plan.blockers)
             if not blockers:
                 joint = _capacity(consumed + list(dll_needs(plan.recheck, item["asset"])))

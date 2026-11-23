@@ -630,7 +630,8 @@ class PrefixDllOnePassTests(OnePassTests):
         def drifting(*args):
             calls.append(1)
             values = real(*args)
-            return values if len(calls) <= 2 else [{**values[0], 'measured': None}]
+            # The confirmed values read it once; every later read is after the confirmation.
+            return values if len(calls) <= 1 else [{**values[0], 'measured': None}]
 
         self.initialize()
         with patch.object(one_pass, '_dlls', side_effect=drifting):

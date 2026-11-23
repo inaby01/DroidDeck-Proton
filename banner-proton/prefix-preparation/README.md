@@ -1196,7 +1196,8 @@ same numbers, followed by two new ones.
   move that plan would stop is listed under "not done" with its blockers, and the status
   check shows the same dependencies and blockers. "Not done" reasons are shown in words
   (the status check uses the same text) with menu 1's next step when it has one; a resumed
-  game lists what it will do; saved slot data that differs, cannot be read or was saved
+  game lists what it will do; an initialized game needs a prefix DLL asset file only when
+  that DLL still has to be placed (a ready game is not listed when the files are gone); saved slot data that differs, cannot be read or was saved
   under other rule versions is listed under "not done" (never rewritten). The payload is
   read once for the whole list.
 - Without the bundle slot only the placement is listed. It is done with an automatically
