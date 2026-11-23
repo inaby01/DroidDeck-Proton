@@ -1317,3 +1317,44 @@ the installer runs as before and the reason is recorded.
   `warn:msi`); processes started by the installer keep their copy of the file and can
   add lines until they end; processes started through paths that rebuild the
   environment may not write to it, so an empty log does not prove there was no error.
+
+## Releasing the inherited VC++ runtime record (0.32.0)
+
+DroidDeck appends Steam redistributable flags and `Software\Microsoft\VisualStudio\14.0\VC\Runtimes`
+(`x86`, `x64`, `arm64`, also under `Wow6432Node`) to a compatibility tool's template prefix at its
+first session with that tool. A prefix created afterwards inherits these values, and the
+SoftDenchi installer then skips its own VC++ 2019 prerequisite, so `mfc140.dll` stays missing
+and the installation stops part way (InstallShield's StartServices returns 1627). Right before
+the SoftDenchi installer (silent, interactive fallback and detail menu 8 alike), the tool
+releases these inherited values from the prefix it prepared:
+
+- Only when SoftDenchi is not installed, no `mfc140.dll` exists in `syswow64` or `system32`,
+  no VC++ 14.x registration exists under `Uninstall` (display names only), every value equals
+  the template's appended tail (read from the bytes whose hash the tool already verified), the
+  keys are not in the template's archive part, no key or ancestor is a registry link, nothing
+  is duplicated, and the values equal the fingerprint recorded right after the prefix was
+  initialized by 0.32.0 or later (`vc_runtime_fingerprint` in the initialization record).
+  A prefix initialized by an earlier version has no fingerprint; its values are not released.
+- One Wine run of `cmd.exe /d /c` with `C:\windows\system32\reg.exe delete <key> /v <name> /reg:64 /f`
+  per value, joined by `&&` within a key (a failure stops that key) and `&` between keys. A key
+  that had no other values and no sub-keys is then deleted itself (`reg delete <key> /reg:64 /f`).
+  The child is polled (30 s) and the prefix's processes are observed until none is left (60 s);
+  nothing is signalled. The registry file is then read again: the released values and keys must
+  be gone, kept keys and their other data unchanged, and the `Runtimes` keys present.
+- Any failure stops before the installer: the installation record is
+  `stopped-before-installer` and `inherited_vc_record` says why and whether running again can
+  clear it. A partly finished release continues on the next run only when what is left is a
+  subset of the original values; otherwise it stops as `investigation-required`. Stops that
+  running again cannot clear are shown as stops by the status check and skipped by the batch.
+- Gaps accepted by the operator (2026-11-23): another process changing these keys between the
+  last read and the deletion (only with deliberate parallel operation on the same prefix).
+- After the installer, the record keeps `mfc140.dll` (native or not) and the `Runtimes`
+  versions. In diagnostic mode, the installer also gets
+  `/debuglogC:\windows\temp\droiddeck-setup-<install_id>.log` (InstallShield's own log, left in the
+  prefix's `windows\temp`); a copy is kept privately as `setup-debug.log` beside the installer
+  log and is copied with it as `installer-<install_id>-setup.log` when the operator agrees.
+  `reg.exe`'s output goes to `logs/<install_id>-release/release.log`.
+- Written: the released values and empty keys in this prefix's registry, the fingerprint in
+  the initialization record, and in diagnostic mode the InstallShield log in the prefix.
+  Records of 0.32.0 carry new optional fields; earlier tools refuse them, so do not run an
+  earlier `prepare.sh` after 0.32.0.

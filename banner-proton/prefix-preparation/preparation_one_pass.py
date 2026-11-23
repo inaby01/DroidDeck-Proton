@@ -186,8 +186,23 @@ def failed_then_menu9(config):
             menu_ref(config, 9) + "で導入状態を確認し、結果を戻してください。")
 
 
+def release_next_step(record, config):
+    """After a stop of the inherited VC record release (design: inherited VC record 4)."""
+    from preparation_vc_record import text_reason
+    item = record.get("inherited_vc_record") or {}
+    head = "ソフト電池は導入していません（受け継いだVC++の記録を外す段で止まりました：" + text_reason(item.get("reason")) + "）。"
+    if item.get("retryable") is False:
+        return head + "もう一度実行しても進みません。結果JSONを戻してください。"
+    if (item.get("reason") or "").startswith(("wait-timeout", "persistence-unconfirmed")):
+        return head + "ゲームとWineをすべて終了し、DroidDeckを起動し直してから、もう一度 " + one_pass_ref(config) + " を実行してください。"
+    return head + "もう一度 " + one_pass_ref(config) + " を実行すると、外す段からやり直します。"
+
+
 def installation_next_step(result, config):
     """What the operator does after an installation that did not end present-verified."""
+    if result is not None and result.get("status") == "stopped-before-installer" and \
+            (result.get("inherited_vc_record") or {}).get("state") == "failed":
+        return release_next_step(result, config)
     if result is None:
         return "ソフト電池は導入していません。導入する場合は、もう一度 " + one_pass_ref(config) + " を実行してください。"
     if result["status"] == "failed":
@@ -453,6 +468,15 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
             base = plan_recheck(record=record, record_sha256=record_digest, source=source, games=games, records=RECORDS,
                                 **common, **extra)
             previous, invalid = _installations(base.store_root, key)
+            from preparation_dependency_install import vc_latest
+            from preparation_vc_record import text_reason
+            vc, vc_stop = vc_latest(base.store_root, record["trial_id"])
+            if vc is not None:
+                steps.append({"step": "inherited-vc-record", "latest": vc})
+            if vc_stop is not None:
+                # Running again cannot clear this stop (design: inherited VC record, Fable L4).
+                return stopped("softdenchi-state", "inherited-vc-record-" + vc_stop.split(":", 1)[0],
+                               "ソフト電池の導入前に止まりました：" + text_reason(vc_stop) + "。もう一度実行しても進みません。")
             clear = stop_check.check()["clear_in_view"]
             state = inspect_dependency_state(base.compatdata, softdenchi)["state"] if clear else "uninspected"
             if clear and not stop_check.check()["clear_in_view"]:
@@ -621,6 +645,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         if plan.blockers:
             raise Stopped(stage, "dependency-plan-blocked:" + ",".join(plan.blockers))
         print("画面なしの導入のあと、ソフト電池の検査対象は入っていませんでした。", file=output)
+        from preparation_vc_record import RELEASE_TEXT
+        print(RELEASE_TEXT, file=output)
         print("画面ありで導入する場合は1、やめる場合はq（画面が出るかをwinverで確かめてから、インストーラーを起動します）: ",
               end="", file=output, flush=True)
         if stream.readline(32).strip() != "1":
@@ -638,16 +664,19 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 print("winverの画面が表示され、閉じられましたか？ 表示された場合は1、表示されなかった場合はq: ", end="", file=output, flush=True)
                 if session.confirm_display(stream.readline(32).strip() == "1")["phase"] == "gui-check-stopped":
                     session.start_installer()
-                    print("インストーラーの画面で操作してください。完了を待っています"
-                          f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
-                    try:
-                        _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
-                        if session.record["installer"]["status"] == "exited-processes-remain":
-                            _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
-                    except Exception:
+                    if session.release_stopped is not None:
+                        print(release_next_step(session.record, config), file=output)
+                    else:
+                        print("インストーラーの画面で操作してください。完了を待っています"
+                              f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
+                        try:
+                            _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
+                            if session.record["installer"]["status"] == "exited-processes-remain":
+                                _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
+                        except Exception:
+                            _record_log(session, report["steps"][-1], output)
+                            raise
                         _record_log(session, report["steps"][-1], output)
-                        raise
-                    _record_log(session, report["steps"][-1], output)
         result = dict(session.record)
         report["steps"][-1]["record"] = result
         live.clear()
@@ -841,13 +870,16 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                   file=output)
             print("     導入後にSdProxyが残った場合は、" + menu_ref(config, 8) +
                   "と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。", file=output)
+            from preparation_vc_record import RELEASE_TEXT
+            print("     " + RELEASE_TEXT, file=output)
         print(f"  {next(steps)}) ゲームフォルダーのファイルなど、ほかの依存は読み取りで照合（配置はしません）", file=output)
         print(f"  {next(steps)}) 依存がすべて検証済みなら、このゲームだけを準備用Protonへ割り当て（" +
               text(", ".join(binding.summary()["planned_files"]) or "変更なし") + "）", file=output)
         if evaluation is not None:
             print("今の状態から見込まれること: " + ("・".join(text(action_text(action, recipes)) for action in evaluation["actions"])
                                              or "入れるもの・割り当ての変更はありません（照合だけ）"), file=output)
-        print("書くもの: 新規prefix・専用work/HOME・prefix内（" + ("DLL・" if dll_items else "") + "ソフト電池）・このゲームの設定項目・私有記録/lock・結果JSON。"
+        print("書くもの: 新規prefix・専用work/HOME・prefix内（" + ("DLL・" if dll_items else "") +
+              "ソフト電池" + ("・受け継いだVC++の記録を外す" if uses_softdenchi else "") + "）・このゲームの設定項目・私有記録/lock・結果JSON。"
               "既存の他prefix・ゲームフォルダー・認証・セーブは変更しません。", file=output)
         print("すべてのゲーム・Wineを終了してから続行してください。", file=output)
         print("この内容で準備する場合は1、取消はq: ", end="", file=output, flush=True)
@@ -937,6 +969,12 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 check_fixed(from_base(base, asset, plan_binding(steam, settings, key, proton["directory"]).digest))
                 previous, invalid = _installations(base.store_root, key)
                 latest = previous[-1] if previous else None
+                from preparation_dependency_install import vc_latest
+                from preparation_vc_record import text_reason
+                vc_stop = vc_latest(base.store_root, record["trial_id"])[1]
+                if vc_stop is not None:
+                    raise Stopped(stage, "inherited-vc-record-" + vc_stop.split(":", 1)[0],
+                                  "ソフト電池の導入前に止まりました：" + text_reason(vc_stop) + "。もう一度実行しても進みません。")
                 state = inspect_managed_dependency(base, store, stop, softdenchi)
                 action, reason, separately = softdenchi_action(latest, invalid, state["state"])
                 step = {"step": "softdenchi-state", "latest_installation": latest and {k: latest.get(k) for k in
@@ -966,18 +1004,22 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                         report["steps"].append({"step": "softdenchi-silent", "plan": dplan.summary()})
                         live.update(step=report["steps"][-1], session=session)
                         session.start_silent_installer()
-                        try:
-                            _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
-                            if session.record["installer"]["status"] == "exited-processes-remain":
-                                _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
-                        except Exception:
-                            # Also when the wait or the stop raised (not Ctrl+C: a run left before its end stays open).
+                        if session.release_stopped is None:
+                            try:
+                                _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
+                                if session.record["installer"]["status"] == "exited-processes-remain":
+                                    _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
+                            except Exception:
+                                # Also when the wait or the stop raised (not Ctrl+C: a run left before its end stays open).
+                                _record_log(session, report["steps"][-1], output)
+                                raise
                             _record_log(session, report["steps"][-1], output)
-                            raise
-                        _record_log(session, report["steps"][-1], output)
                     result = dict(session.record)
                     report["steps"][-1]["record"] = result
                     live.clear()
+                    if session.release_stopped is not None:
+                        raise Stopped(stage, "inherited-vc-record-" + session.release_stopped.split(":", 1)[0],
+                                      release_next_step(session.record, config))
                     if result["status"] == "cancelled-absent":
                         result = interactive_fallback(record, record_digest)
                     if result is None or result["status"] != "present-verified":

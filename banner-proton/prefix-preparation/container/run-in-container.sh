@@ -40,6 +40,7 @@ for test in \
     /input/prefix-preparation/test_preparation_store.py \
     /input/prefix-preparation/test_preparation_slot_manifest.py \
     /input/prefix-preparation/test_preparation_installer_log.py \
+    /input/prefix-preparation/test_preparation_vc_record.py \
     /input/prefix-preparation/test_preparation_dependencies.py \
     /input/prefix-preparation/test_preparation_binding.py \
     /input/prefix-preparation/test_preparation_execution.py \

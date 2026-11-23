@@ -442,6 +442,51 @@ class OnePassTests(GAME['GamePrefixTests']):
         step = next(item for item in report['steps'] if item['step'] == 'softdenchi-silent')
         self.assertEqual(step['installer_log']['state'], 'final', step)
 
+    def inherit_vc(self):
+        """Design: inherited VC record. The fake initialization writes DroidDeck's appended keys."""
+        import preparation_vc_record as vc
+        vc_tests = runpy.run_path(str(Path(__file__).with_name('test_preparation_vc_record.py')))
+        (self.f.steam / 'steamapps/compatdata/vc-block.reg').write_text('\n' + vc_tests['block']())
+        return vc, vc_tests
+
+    def test_one_pass_releases_the_inherited_vc_record_before_the_silent_installer(self):
+        vc, vc_tests = self.inherit_vc()
+        with patch.object(vc, 'read_template', return_value=vc_tests['template'](tail_sha256=None)):
+            _, report, output, _ = self.run_detail('12\n1\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertIn("ひな形から受け継いだ『VC++ 14.51導入済み』", output)
+        self.assertEqual([item['inherited_vc_record']['state'] for item in self.installs()], ['released'])
+
+    def test_a_release_stop_never_waits_for_an_installer_and_a_final_one_stays(self):
+        vc, _ = self.inherit_vc()
+        with patch.object(vc, 'read_template', side_effect=Invalid('template tail changed')):
+            _, report, output, commands = self.run_detail('12\n1\n1\n1\n')
+        self.assertEqual((report['status'], report['reason']), ('stopped', 'inherited-vc-record-template-mismatch'), report)
+        self.assertIn('もう一度実行しても進みません', output)
+        self.assertFalse(any(len(command) > 1 and str(command[1]).endswith('.exe') and str(command[1]).startswith('/')
+                             for command in commands))
+        self.assertEqual([item['status'] for item in self.installs()], ['stopped-before-installer'])
+        # Running again stops before planning an installation (design: inherited VC record, Fable L4).
+        _, report, _, _ = self.run_detail('12\n1\n1\n1\n')
+        self.assertEqual((report['stage'], report['reason']), ('softdenchi-state', 'inherited-vc-record-template-mismatch'))
+        self.assertEqual(len(self.installs()), 1)
+
+    def test_the_interactive_fallback_reports_a_release_stop_without_waiting(self):
+        self.use_installer(DEP['installer'](silent_noop=True))
+        self.pin_silent()
+        real = dep.DependencyInstallSession._release_inherited_vc
+
+        def interactive_stops(session):
+            if session.plan.installer_mode == 'interactive':
+                import preparation_vc_record as vc
+                return session._release_stop(vc.failed('wine-start:OSError'))
+            return real(session)
+        with patch.object(dep.DependencyInstallSession, '_release_inherited_vc', interactive_stops):
+            _, report, output, _ = self.run_detail('12\n1\n1\n1\n1\n1\n')
+        self.assertEqual((report['status'], report['reason']), ('stopped', 'installation-stopped-before-installer'), report)
+        self.assertIn('受け継いだVC++の記録を外す段で止まりました', output)
+        self.assertNotIn('インストーラーの画面で操作してください', output)
+
     def test_ctrl_c_after_the_installer_leaves_the_log_open(self):
         import preparation_installer_log as log
         self.config['diagnostics'] = {'installer_log': True}

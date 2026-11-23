@@ -36,6 +36,71 @@ from pathlib import Path
 root = Path(os.environ['STEAM_COMPAT_DATA_PATH'])
 if sys.argv[1:] == ['runinprefix', 'winver.exe']:
     raise SystemExit(0)
+if sys.argv[1:5] == ['runinprefix', 'cmd.exe', '/d', '/c'] and any(arg.endswith('reg.exe') for arg in sys.argv[5:]):
+    # reg.exe delete on the prefix's system.reg (inherited VC record release). Control files beside the
+    # prefixes: reg-fail (value names that fail), reg-sleep (seconds before acting).
+    import time
+    BS, NL = chr(92), chr(10)
+    control = root.parent
+    if (control / 'reg-sleep').exists():
+        time.sleep(float((control / 'reg-sleep').read_text()))
+    fail = (control / 'reg-fail').read_text().split() if (control / 'reg-fail').exists() else []
+    path = root / 'pfx/system.reg'
+    head, _, body = path.read_text().partition(NL)
+    preamble, sections = [], []
+    for line in body.split(NL):
+        if line.startswith('['):
+            sections.append([line, []])
+        elif sections:
+            sections[-1][1].append(line)
+        else:
+            preamble.append(line)
+    def name_of(header):
+        return header[1:header.index(']')].replace(BS + BS, BS).lower()
+    def run(command):
+        key = command[2].split(BS, 1)[1].lower()
+        if '/v' in command:
+            value = command[command.index('/v') + 1]
+            if value in fail:
+                return 1
+            for header, lines in sections:
+                if name_of(header) == key:
+                    kept = [line for line in lines if not line.lower().startswith('"' + value.lower() + '"=')]
+                    if len(kept) != len(lines):
+                        lines[:] = kept
+                        return 0
+            return 1
+        found = [section for section in sections if name_of(section[0]) == key or name_of(section[0]).startswith(key + BS)]
+        for section in found:
+            sections.remove(section)
+        parent = key.rsplit(BS, 1)[0]
+        if found and not any(name_of(section[0]) == parent or name_of(section[0]).startswith(parent + BS)
+                             for section in sections):
+            # Like Wine: a key left without values and sub-keys is saved as an empty leaf.
+            sections.append(['[' + parent.replace(BS, BS + BS) + '] 0', []])
+        return 0 if found else 1
+    groups, current = [], []
+    for arg in sys.argv[5:] + ['&']:
+        if arg == '&':
+            groups.append(current)
+            current = []
+        else:
+            current.append(arg)
+    code = 0
+    for group in groups:
+        commands, part = [], []
+        for arg in group + ['&&']:
+            if arg == '&&':
+                commands.append(part)
+                part = []
+            else:
+                part.append(arg)
+        for command in commands:
+            code = run(command)
+            if code:
+                break
+    path.write_text(head + NL + NL.join(preamble + [line for section in sections for line in [section[0]] + section[1]]))
+    raise SystemExit(code)
 if len(sys.argv) >= 3 and sys.argv[1] == 'runinprefix' and sys.argv[2].startswith('/'):
     raw = Path(sys.argv[2]).read_bytes()
     spec = json.loads(raw.split(b'\\nDROIDDECK_SYNTHETIC_INSTALLER\\n', 1)[1])
@@ -60,6 +125,10 @@ if not (wow64 / 'cmd.exe').is_symlink():
     (wow64 / 'cmd.exe').symlink_to(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), 'files/lib/wine/i386-windows/cmd.exe'))
 for name in ('system.reg', 'user.reg'):
     (root / 'pfx' / name).write_text('WINE REGISTRY Version 2\\n')
+if (root.parent / 'vc-block.reg').exists():
+    # Like a template DroidDeck has appended to: the new prefix inherits the VC++ runtime record.
+    with open(root / 'pfx/system.reg', 'a') as registry:
+        registry.write((root.parent / 'vc-block.reg').read_text())
 (root / 'version').write_text('1.0-1\\n')
 # Like Proton's own constant (read before a game is moved to this Proton, 0.31.0).
 CURRENT_PREFIX_VERSION="1.0-1"
@@ -306,8 +375,12 @@ class InstallTests(TRIAL['TrialTests']):
             member.size, member.mode = 1, 0o644
             package.addfile(member, io.BytesIO(b'x'))
 
+    VC_BLOCK = None  # The inherited VC record the fake initialization writes (design: inherited VC record).
+
     def setUp(self):
         super().setUp()
+        if self.VC_BLOCK is not None:
+            (self.f.steam / 'steamapps/compatdata/vc-block.reg').write_text(self.VC_BLOCK)
         patch.object(dep, 'RESERVE', 1024 * 1024).start()
         patch.object(dep, 'STOP_GRACE', 1).start()
         self.trial_record, self.trial_digest, _ = self.recheck_origin()
@@ -361,7 +434,7 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(summary['blockers'], [])
         self.assertEqual(summary['pre_state'], 'absent')
         self.assertFalse(summary['execution_authorized'])
-        self.assertEqual(summary['steps'][1]['arguments'], [])
+        self.assertEqual(next(step for step in summary['steps'] if step['step'] == 'original-bootstrap')['arguments'], [])
         self.assertEqual(before, self.protected())
         self.assertFalse((self.f.store_root / dep.RECORDS).exists())
 
@@ -1458,6 +1531,111 @@ class InstallTests(TRIAL['TrialTests']):
 for _name in dir(TRIAL['TrialTests']):
     if _name.startswith('test_'):
         setattr(InstallTests, _name, None)
+
+
+VC = runpy.run_path(str(HERE / 'test_preparation_vc_record.py'))
+
+
+class InheritedVcTests(InstallTests):
+    """Design: inherited VC record. The fake initialization writes DroidDeck's appended VC++ 14.51 keys."""
+    VC_BLOCK = '\n' + VC['block']()
+
+    def setUp(self):
+        super().setUp()
+        import preparation_vc_record as vc
+        self.vc = vc
+        self.template = patch.object(vc, 'read_template', return_value=VC['template'](tail_sha256=None))
+        self.template.start()
+        self.control = self.f.steam / 'steamapps/compatdata'
+
+    def registry(self):
+        return self.vc.scan_file(self.install_plan().recheck.compatdata / 'pfx/system.reg')
+
+    def silent_flow(self):
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep.subprocess, 'Popen', wraps=subprocess.Popen) as spawned:
+            plan = self.install_plan()
+            session = self.install_session(store, plan)
+            session.start_gui_check()
+            session.wait_gui_check(10)
+            session.confirm_display(True)
+            session.start_installer()
+            result = session.wait_installer(10) if session.release_stopped is None else dict(session.record)
+            return session, result, spawned
+
+    def test_the_inherited_record_is_released_before_the_installer(self):
+        self.assertEqual(self.trial_record['vc_runtime_fingerprint']['state'], 'captured')
+        session, result, spawned = self.silent_flow()
+        self.assertIsNone(session.release_stopped)
+        self.assertEqual(result['status'], 'present-verified', result)
+        item = result['inherited_vc_record']
+        self.assertEqual((item['state'], item['values'], item['exit_code'], item['wineserver_gone_before_read']),
+                         ('released', 36, 0, True))
+        commands = [call.args[0][1:] for call in spawned.call_args_list]
+        release = next(command for command in commands if command[:2] == ('runinprefix', 'cmd.exe'))
+        self.assertEqual(release[1:], self.vc.command(item['keys']))
+        # Released before the installer started (the GUI check came first, the installer last).
+        self.assertLess(commands.index(release), max(i for i, c in enumerate(commands) if len(c) > 1 and c[1].startswith('/')))
+        self.assertEqual(self.vc.fingerprint(self.registry()), {})
+        self.assertIn('runtime_versions', result['vc_after_install'])
+
+    def test_a_failed_value_stops_before_the_installer_and_the_next_run_continues(self):
+        (self.control / 'reg-fail').write_text('Installed')
+        session, result, spawned = self.silent_flow()
+        self.assertEqual(session.release_stopped, 'values-remain')
+        self.assertEqual(result['status'], 'stopped-before-installer')
+        self.assertEqual(result['installer']['status'], 'not-started')
+        self.assertTrue(result['inherited_vc_record']['retryable'])
+        self.assertFalse(any(len(call.args[0]) > 2 and str(call.args[0][2]).startswith('/') for call in spawned.call_args_list))
+        # Bld went first; the chain of each key stopped at Installed (the && contract).
+        left = self.registry()['keys']['native-x86']['values']
+        self.assertEqual(sorted(left), ['Installed', 'Major', 'Minor', 'Rbld', 'Version'])
+        first = session.record['install_id']
+        (self.control / 'reg-fail').unlink()
+        session, result, _ = self.silent_flow()
+        item = result['inherited_vc_record']
+        self.assertEqual((item['state'], item['resumed_from'], result['status']), ('released', first, 'present-verified'))
+        # The record keeps the first run's original values, so a later resume still compares against them.
+        self.assertEqual(len(item['keys']), 6)
+        self.assertEqual(self.vc.fingerprint(self.registry()), {})
+
+    def test_an_unreadable_template_is_a_stop_the_next_plan_reports(self):
+        self.template.stop()
+        with patch.object(self.vc, 'read_template', side_effect=Invalid('template tail changed')):
+            session, result, _ = self.silent_flow()
+        self.template.start()
+        self.assertEqual((session.release_stopped, result['inherited_vc_record']['retryable']), ('template-mismatch', False))
+        self.assertIn('inherited-vc-record-template-mismatch', self.install_plan().blockers)
+
+    def test_a_present_mfc140_keeps_the_record(self):
+        windows = self.install_plan().recheck.compatdata / 'pfx/drive_c/windows/syswow64'
+        windows.mkdir(parents=True, exist_ok=True)
+        (windows / 'mfc140.dll').write_bytes(b'MZ' + b'\0' * 0x7e)
+        _, result, _ = self.silent_flow()
+        self.assertEqual(result['inherited_vc_record']['state'], 'kept-vc-present')
+        self.assertEqual(len(self.vc.fingerprint(self.registry())), 6)
+
+    def test_waiting_too_long_only_stops_waiting(self):
+        (self.control / 'reg-sleep').write_text('3')
+        with patch.object(dep, 'RELEASE_WAIT', 1), patch('os.kill', side_effect=AssertionError('never signalled')):
+            session, result, _ = self.silent_flow()
+        self.assertEqual(session.release_stopped, 'wait-timeout', result)
+        self.assertTrue(result['inherited_vc_record']['retryable'])
+
+    def test_menu8_reports_the_stop_and_skips_the_wait(self):
+        with patch.object(self.vc, 'read_template', side_effect=Invalid('x')), \
+                patch.object(dep, 'softdenchi_recipe', return_value=self.recipe), \
+                patch.object(dep, 'plan_launch', side_effect=self.launch_fixture):
+            _, report, output = self.menu('8\n1\n1\n1\n1\n')
+        self.assertEqual(report['installation']['status'], 'stopped-before-installer', output)
+        self.assertIn('受け継いだVC++の記録を外す段で止まりました', output)
+        self.assertIn("ひな形から受け継いだ『VC++ 14.51導入済み』", output)
+        self.assertNotIn('インストーラの画面で操作してください', output)
+
+
+for _name in dir(InstallTests):
+    if _name.startswith('test_') and _name not in vars(InheritedVcTests):
+        setattr(InheritedVcTests, _name, None)
 
 
 if __name__ == '__main__':

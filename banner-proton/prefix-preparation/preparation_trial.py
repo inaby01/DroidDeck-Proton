@@ -141,7 +141,10 @@ def validate_trial_record(record, scope=SCOPE, id_prefix="trial-"):
                     "exit_code", "prefix_version_sha256", "runtime_execution_verified", "device_namespace_verified",
                     "preparation_complete"),
            ("error", "stop_observation", "settings_identity_unchanged", "profile", "prefix_identity",
-            "wineprefix_identity"))
+            "wineprefix_identity", "vc_runtime_fingerprint"))
+    if "vc_runtime_fingerprint" in record:
+        from preparation_vc_record import validate_initial
+        validate_initial(record["vc_runtime_fingerprint"])
     require(("profile" in record) == (scope != SCOPE), "game records require a profile; probe trials carry none")
     if "profile" in record:
         fields(record["profile"], ("profile_id", "revision", "profile_digest", "exe_sha256", "exe_size", "selection",
@@ -296,6 +299,16 @@ class TrialSession:
             raise
         return self
 
+    def _vc_fingerprint(self):
+        """Design: inherited VC record 3. Right after initialization; never raises."""
+        from preparation_vc_record import capture_initial
+        try:
+            writes = self.plan.placement.installation.summary().get("tool_runtime_writes") or {}
+            tail = (writes.get("droiddeck_redist") or {}).get("registry_tail_sha256")
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+            return {"state": "unreadable", "error_class": type(error).__name__}
+        return capture_initial(self.plan.compatdata, tail)
+
     def wait(self, timeout=30):
         require(type(timeout) is int and 1 <= timeout <= 120 and self.process is not None, "bounded live trial wait required")
         if self.record["status"] in ("failed", "initialized-unverified"):
@@ -326,6 +339,7 @@ class TrialSession:
                 _identities(self.launch.spec["tool"], self.launch.spec["expected_hashes"])
                 self.record["prefix_version_sha256"] = _prefix(self.plan.compatdata)
                 self._initialized()
+                self.record["vc_runtime_fingerprint"] = self._vc_fingerprint()
                 self.record["status"] = "initialized-unverified"
         except (OSError, ValueError, TypeError, KeyError) as error:
             self.record.update(status="failed", error={"check": "trial-post-checks", "error_class": type(error).__name__,

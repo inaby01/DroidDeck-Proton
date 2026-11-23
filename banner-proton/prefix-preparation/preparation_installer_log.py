@@ -459,7 +459,7 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder, expected=None
         os.close(folder_fd)
         return None, "not-copied:folder-changed"
     temporary = "." + name + "." + secrets.token_hex(8) + ".tmp"
-    created, placed, note = False, False, None
+    created, placed, note, setup_name = False, False, None, None
     try:
         src = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
         try:
@@ -478,6 +478,7 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder, expected=None
         require(sha.hexdigest() == current["final"]["sha256"], "installer log changed")
         _place(folder_fd, temporary, name)
         placed = True
+        setup_name = _copy_setup_log(folder_fd, source.parent / SETUP_LOG, install_id)
         os.fsync(folder_fd)
     except FileExistsError:
         return None, "not-copied:name-exists"
@@ -495,10 +496,45 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder, expected=None
                 pass
         os.close(folder_fd)
     try:
-        store.write_record(RECORDS, install_id + ".json", {**current, "shared_copy": {"name": name}}, digest)
+        store.write_record(RECORDS, install_id + ".json",
+                           {**current, "shared_copy": {"name": name, "setup_name": setup_name}}, digest)
     except (OSError, Invalid, TypeError, ValueError):
         pass  # The copy exists; the result tells the operator.
     return name, note
+
+
+SETUP_LOG = "setup-debug.log"  # InstallShield's own log of this run, when collected (design: inherited VC record 6).
+
+
+def _copy_setup_log(folder_fd, source, install_id):
+    """Beside the installer log, the InstallShield log of the same run; never raises, never replaces."""
+    name = "installer-" + install_id + "-setup.log"
+    temporary = "." + name + "." + secrets.token_hex(8) + ".tmp"
+    created = False
+    try:
+        src = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder_fd)
+        created = True
+        try:
+            while chunk := os.read(src, 1024 * 1024):
+                _write_all(fd, chunk)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _place(folder_fd, temporary, name)
+        return name
+    except (OSError, Invalid, ValueError):
+        return None
+    finally:
+        os.close(src)
+        if created:
+            try:
+                os.unlink(temporary, dir_fd=folder_fd)  # Only the tool's own temporary file.
+            except OSError:
+                pass
 
 
 COPY_LOCK = hashlib.sha256(b"droiddeck-installer-logs").hexdigest()  # One lock file for every shared copy.
@@ -538,6 +574,8 @@ def _offer(candidates, confirmed, done, shared_folder, store_root, home, stream,
             print("ゲーム: " + text(labels[install_id]), file=output)
         print("導入のログ（導入のときの標準エラー全体、" + str(view.get("bytes", 0)) + "バイト）を、次のフォルダーに " +
               "installer-" + install_id + ".log として写せます: " + text(str(shared_folder)), file=output)
+        print("インストーラー自身のログ（前提条件の判定など）が取れていれば、installer-" + install_id +
+              "-setup.log も一緒に写します。", file=output)
         print("端末のパス・ゲームのフォルダー名を含みます。共有のフォルダーに置いたものは、保存・複製された分を回収できません。",
               file=output)
         print("写す場合は1、写さない場合はq: ", end="", file=output, flush=True)

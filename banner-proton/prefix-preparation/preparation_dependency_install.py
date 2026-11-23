@@ -11,6 +11,7 @@ the Unix exit status alone.
 import hashlib
 import ntpath
 import os
+import re
 import secrets
 import select
 import signal
@@ -67,6 +68,10 @@ SCOPE = "managed-prefix-dependency-installation"
 RECORDS = "dependency-installs"
 RESERVE = 1024**3
 STOP_GRACE = 60
+RELEASE_WAIT = 30  # Child (cmd.exe) of the inherited VC record release (design: inherited VC record 4).
+DEBUGLOG_ARGUMENT = re.compile(r"/debuglogC:\\windows\\temp\\droiddeck-setup-depinstall-[0-9a-f]{32}\.log")
+DEBUGLOG_STATE = re.compile(r"requested|collected|absent|name-taken|failed:[A-Za-z0-9_]{1,64}")
+MFC_KINDS = ("absent", "native", "wine-builtin", "wine-placeholder", "other")
 GUI_COMMAND = ("runinprefix", "winver.exe")
 STATUSES = ("running", "needs-user", "failed", "stopped-before-installer", "cancelled-absent", "partial",
             "incompatible", "installed-unverified", "present-verified")
@@ -360,7 +365,7 @@ def validate_install_record(record):
                     "phase", "status", "gui_check", "installer", "pre_state", "post_state", "runtime_execution_verified",
                     "device_namespace_verified", "preparation_complete"),
            ("post_inspection", "stop_observation", "settings_identity_unchanged", "prefix_allocation", "lingering", "error",
-            "license_consent"))
+            "license_consent", "inherited_vc_record", "installer_debuglog", "vc_after_install"))
     require(type(record["schema_version"]) is int and record["schema_version"] == 1 and record["scope"] == SCOPE,
             "unsupported installation record")
     require(type(record["tool_version"]) is str and 0 < len(record["tool_version"]) <= 64, "invalid installation version")
@@ -403,6 +408,23 @@ def validate_install_record(record):
             "present-unverified", "present-verified"), "invalid dependency state")
     require(all(record[name] is False for name in ("runtime_execution_verified", "device_namespace_verified",
                                                    "preparation_complete")), "installation cannot grant full readiness")
+    if "inherited_vc_record" in record:
+        from preparation_vc_record import validate_record as validate_vc_record
+        validate_vc_record(record["inherited_vc_record"])
+    if "installer_debuglog" in record:
+        debuglog = record["installer_debuglog"]
+        fields(debuglog, ("argument", "state"), ("bytes", "sha256"))
+        require(type(debuglog["argument"]) is str and DEBUGLOG_ARGUMENT.fullmatch(debuglog["argument"]) and
+                type(debuglog["state"]) is str and DEBUGLOG_STATE.fullmatch(debuglog["state"]) and
+                (debuglog.get("bytes") is None or type(debuglog["bytes"]) is int and debuglog["bytes"] >= 0) and
+                (debuglog.get("sha256") is None or type(debuglog["sha256"]) is str and SHA256.fullmatch(debuglog["sha256"])),
+                "invalid installer debug log record")
+    if "vc_after_install" in record:
+        after = record["vc_after_install"]
+        fields(after, ("mfc140", "runtime_versions"), ("error_class",))
+        require(type(after["mfc140"]) is dict and set(after["mfc140"]) <= {"syswow64", "system32"} and
+                all(kind in MFC_KINDS for kind in after["mfc140"].values()) and type(after["runtime_versions"]) is dict and
+                all(type(v) is str and len(v) <= 40 for v in after["runtime_versions"].values()), "invalid VC after install")
     return record
 
 
@@ -469,6 +491,29 @@ def _installations(store_root, key):
     return sorted(items, key=lambda item: item["created_ns"]), invalid
 
 
+def _vc_final_stop(store_root, trial_id):
+    """A release stop of this initialization that running again cannot clear (Fable L4), or None."""
+    return vc_latest(store_root, trial_id)[1]
+
+
+def vc_latest(store_root, trial_id):
+    """(the newest evaluated release of this initialization or None, its final stop reason or None)."""
+    from preparation_vc_record import final_stop
+    history = []
+    with PrivateStore(store_root) as store:
+        for item in store.inventory()["dependency_installs"]:
+            if item.get("status") == "invalid" or item.get("trial_id") != trial_id:
+                continue
+            full, _ = store.read_record(RECORDS, item["install_id"] + ".json")
+            validate_install_record(full)
+            history.append(full)
+    history.sort(key=lambda record: record["created_ns"])
+    evaluated = [record["inherited_vc_record"] for record in history
+                 if record.get("inherited_vc_record", {}).get("state") not in (None, "not-evaluated")]
+    latest = {name: evaluated[-1].get(name) for name in ("state", "reason", "retryable")} if evaluated else None
+    return latest, final_stop(history)
+
+
 def retry_blockers(latest, invalid):
     """A new attempt follows only a cancelled, pre-installer or interrupted record (design section 7)."""
     if invalid:
@@ -511,6 +556,8 @@ class InstallPlan:
                 "previous_installation": self.previous, "capacity": self.capacity,
                 "installer_mode": self.installer_mode, "installer_log": self.installer_log,
                 "steps": [*([] if silent else [{"step": "gui-check", "command": list(GUI_COMMAND)}]),
+                          {"step": "release-inherited-vc-record", "conditional": True,
+                           "command": ["runinprefix", "cmd.exe", "/d", "/c", "<reg.exe delete of the inherited VC++ 14.51 record>"]},
                           {"step": "original-bootstrap", "command": ["runinprefix", "<private copy of " + self.spec["filename"] + ">"],
                            "arguments": list(self.installer_arguments), "silent_arguments_inferred": False,
                            "silent_arguments_source": "pinned-installshield-basic-msi" if silent else None, "msi_only_bypass": False},
@@ -583,6 +630,10 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
     previous, invalid = _installations(base.store_root, record["app_id"])
     latest = previous[-1] if previous else None
     blockers.extend(retry_blockers(latest, invalid))
+    progress.append("inherited-vc-record")
+    stop = _vc_final_stop(base.store_root, record["trial_id"])
+    if stop is not None:
+        blockers.append("inherited-vc-record-" + stop.split(":", 1)[0])
     progress.append("capacity")
     home = safe_path(home)
     inputs_root = safe_path(base.work.parent / "inputs", home)
@@ -594,9 +645,12 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
                  # The history is shown, not pinned: this session's own record must not invalidate its plan.
                  "pre_state": digest_json(pre), "inputs": str(inputs_root),
                  "capacity_sufficient": capacity["sufficient"], "blockers": sorted(blockers),
-                 "installer_mode": installer_mode, "installer_arguments": list(arguments)}
+                 "installer_mode": installer_mode, "installer_arguments": list(arguments),
+                 # Recorded behaviour of 0.32.0: release the inherited VC record before the installer.
+                 "inherited_vc_record": "release-v1"}
     if installer_log:
         signature["installer_log"] = True
+        signature["installer_debuglog"] = True
     return InstallPlan(digest_json(signature), base, recheck_id, recheck_sha256, recipe, spec, directory, report["measured"],
                        pre, latest, inputs_root, capacity, tuple(sorted(blockers)), installer_mode, arguments, installer_log, home)
 
@@ -621,6 +675,8 @@ class DependencyInstallSession:
                        "installer": {"status": "not-started", "unix_exit_status": None}, "pre_state": plan.pre_state["state"],
                        "post_state": None, "runtime_execution_verified": False, "device_namespace_verified": False,
                        "preparation_complete": False}
+        self.record["inherited_vc_record"] = {"state": "not-evaluated"}
+        self.release_stopped = None  # The reason when the release before the installer stopped (design: inherited VC record).
         if plan.installer_mode == "silent":
             self.record["gui_check"] = {"status": "not-applicable", "unix_exit_status": None}
             self.record["installer"].update(mode="silent", arguments=list(plan.installer_arguments))
@@ -690,6 +746,18 @@ class DependencyInstallSession:
             self._fail("gui-check-spawn", error)
             raise
         return self
+
+    def _vc_after_install(self):
+        """Read-only, after the installer (Fable M6): mfc140.dll and the Runtimes versions now."""
+        import preparation_vc_record as vc
+        try:
+            scan = vc.scan_file(self.plan.recheck.compatdata / "pfx/system.reg")
+            versions = {ident: entry["values"]["Version"][1] for ident, entry in scan["keys"].items()
+                        if "Version" in entry["values"] and entry["values"]["Version"][0] == "sz"
+                        and len(entry["values"]["Version"][1]) <= 40}
+            return {"mfc140": vc.mfc140(self.plan.recheck.compatdata), "runtime_versions": versions}
+        except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError) as error:
+            return {"mfc140": {}, "runtime_versions": {}, "error_class": type(error).__name__}
 
     def _settings_unchanged(self):
         from preparation_recheck import _settings
@@ -906,7 +974,213 @@ class DependencyInstallSession:
         self._clear()
         return self._start_installer(("runinprefix",))
 
+    def _history(self):
+        """Valid installation records of this initialization (same trial_id), oldest first."""
+        found = []
+        for item in self.store.inventory()["dependency_installs"]:
+            if item.get("status") == "invalid" or item.get("trial_id") != self.record["trial_id"] or \
+                    item.get("install_id") == self.record["install_id"]:
+                continue
+            record, _ = self.store.read_record(RECORDS, item["install_id"] + ".json")
+            validate_install_record(record)
+            found.append(record)
+        return sorted(found, key=lambda record: record["created_ns"])
+
+    def _release_stop(self, decision):
+        self.record["inherited_vc_record"] = decision
+        self.record["status"] = "stopped-before-installer"
+        self.release_stopped = decision["reason"]
+        self._save()
+        return decision["reason"]
+
+    def _release_inherited_vc(self):
+        """Design: inherited VC record. None to continue with the installer, else the stop reason (saved).
+
+        Reads only, except one Wine run of reg.exe that deletes the inherited values (and keys that
+        become empty). Never signals; a timeout only stops waiting.
+        """
+        import preparation_vc_record as vc
+        p = self.plan.recheck
+        registry = p.compatdata / "pfx/system.reg"
+        try:
+            scan = vc.scan_file(registry)
+            mfc = vc.mfc140(p.compatdata)
+            history = self._history()
+        except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError) as error:
+            return self._release_stop(vc.failed("registry-unreadable:" + type(error).__name__))
+        previous = vc.unfinished(history)
+        if previous is not None:
+            original = previous["inherited_vc_record"]
+            decision = vc.resume(scan, mfc, original["keys"])
+            decision.update(resumed_from=previous["install_id"])
+            if "version" in original and original["version"] is not None:
+                decision.setdefault("version", original["version"])
+            keys = original["keys"]
+        else:
+            writes = p.tool_writes or {}
+            tail_sha256 = (writes.get("droiddeck_redist") or {}).get("registry_tail_sha256")
+            try:
+                from preparation_payload import REDIST_REGISTRY
+                template = vc.read_template(_tool_directory(p) / REDIST_REGISTRY,
+                                            (p.inventory.entries.get(REDIST_REGISTRY) or {}).get("size"), tail_sha256)
+            except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError) as error:
+                template = error
+            decision = vc.evaluate(scan, mfc, template, p.record.get("vc_runtime_fingerprint"), tail_sha256)
+            keys = decision.get("keys")
+        if decision["state"] == "failed":
+            if previous is not None:
+                decision["keys"] = keys  # Keep what a later run needs to continue (design 4, Codex M3).
+            return self._release_stop(decision)
+        if decision["state"] != "release":
+            self.record["inherited_vc_record"] = decision
+            self._save()
+            return None
+        work = decision.pop("keys")
+        record = {**decision, "state": "releasing", "keys": keys}
+        self.record["inherited_vc_record"] = record
+        self._save()
+        outcome = self._run_release(work)
+        record = {**record, **outcome}
+        if record.get("reason") is None:
+            try:
+                after = vc.scan_file(registry)
+                reason = vc.verify(work, after)
+            except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError) as error:
+                reason = "registry-unreadable:" + type(error).__name__
+            if reason is None:
+                record.update(state="released")
+                record.pop("reason", None)
+                record.pop("retryable", None)
+                self.record["inherited_vc_record"] = record
+                self._save()
+                return None
+            record.update(vc.failed(reason))
+        else:
+            record.update(state="failed")
+        return self._release_stop(record)
+
+    def _run_release(self, work):
+        """One Wine run of reg.exe; returns exit_code, observation flags and a reason when it stopped."""
+        import preparation_vc_record as vc
+        result = {"exit_code": None, "wineserver_observed": False, "wineserver_gone_before_read": False}
+        output = None
+        try:
+            if self.plan.installer_log:
+                output = self._release_log()
+            self._guard()
+            self._clear()
+            launch = self._launch()
+            require_no_bytecode_cache(launch)
+            child = subprocess.Popen((launch.argv[0], "runinprefix", *vc.command(work)), cwd=self.plan.recheck.work,
+                                     env=launch.environment, shell=False, close_fds=True, start_new_session=True,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL if output is None else output,
+                                     stderr=subprocess.DEVNULL if output is None else output)
+        except (OSError, Invalid, ValueError, TypeError, KeyError) as error:
+            return {**result, **vc.failed("wine-start:" + type(error).__name__)}
+        finally:
+            if output is not None:
+                os.close(output)
+
+        def look():
+            try:
+                view = inventory_processes(self.plan.recheck.compatdata, self.stop.proc_root)
+                if any(classify_process(process) == "wineserver" for process in view["processes"]):
+                    result["wineserver_observed"] = True
+            except (OSError, ValueError):
+                pass
+
+        deadline = time.monotonic() + RELEASE_WAIT
+        while child.poll() is None:
+            look()
+            if time.monotonic() >= deadline:
+                return {**result, **vc.failed("wait-timeout")}  # Stop waiting only; nothing is signalled.
+            time.sleep(0.25)
+        result["exit_code"] = child.returncode
+        deadline = time.monotonic() + STOP_GRACE
+        observation = self.stop.check()
+        while not observation["clear_in_view"] and time.monotonic() < deadline:
+            look()
+            time.sleep(0.5)
+            observation = self.stop.check()
+        if not observation["clear_in_view"]:
+            reason = "persistence-unconfirmed" if observation["unknown_count"] and not observation["active_count"] else "wait-timeout"
+            return {**result, **vc.failed(reason)}
+        result["wineserver_gone_before_read"] = True
+        return result
+
+    def _release_log(self):
+        """Diagnostic mode: reg.exe's output into a private folder beside the installer log (Fable L5)."""
+        from preparation_installer_log import work_parent
+        parent = work_parent(self.plan.home, self.record["app_id"])
+        folder = safe_path(parent / "logs" / (self.record["install_id"] + "-release"), safe_path(self.plan.home))
+        _new_private(folder, parent)
+        return os.open(folder / "release.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+
+    def _debuglog_argument(self):
+        """Diagnostic mode: InstallShield's own log of its prerequisites (design: inherited VC record 6)."""
+        import preparation_vc_record as vc
+        name = "droiddeck-setup-" + self.record["install_id"] + ".log"
+        argument = "/debuglogC:\\windows\\temp\\" + name
+        state = "requested"
+        try:
+            fd = vc._windows_dir(self.plan.recheck.compatdata, "temp")
+            if fd is not None:
+                try:
+                    if any(entry.name.casefold() == name for entry in os.scandir(fd)):
+                        state = "name-taken"
+                finally:
+                    os.close(fd)
+        except OSError:
+            state = "failed:OSError"
+        self.record["installer_debuglog"] = {"argument": argument, "state": state}
+        return () if state != "requested" else (argument,)
+
+    def collect_debuglog(self):
+        """After the installer: copy this run's InstallShield log into the private log folder; never raises."""
+        import preparation_vc_record as vc
+        entry = self.record.get("installer_debuglog")
+        if entry is None or entry["state"] != "requested":
+            return
+        name = "droiddeck-setup-" + self.record["install_id"] + ".log"
+        try:
+            from preparation_installer_log import log_folder
+            fd = vc._windows_dir(self.plan.recheck.compatdata, "temp")
+            if fd is None:
+                entry["state"] = "absent"
+            else:
+                try:
+                    names = [item.name for item in os.scandir(fd) if item.name.casefold() == name]
+                    if not names:
+                        entry["state"] = "absent"
+                    else:
+                        source = os.open(names[0], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                        with os.fdopen(source, "rb") as stream:
+                            info = os.fstat(stream.fileno())
+                            require(stat.S_ISREG(info.st_mode) and info.st_size <= 64 * 1024**2, "invalid debug log")
+                            data = stream.read(info.st_size + 1)
+                        folder = log_folder(self.plan.home, self.record["app_id"], self.record["install_id"])
+                        if not folder.exists():
+                            from preparation_installer_log import work_parent
+                            _new_private(folder, work_parent(self.plan.home, self.record["app_id"]))
+                        target = os.open(folder / "setup-debug.log",
+                                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                        with os.fdopen(target, "wb") as out:
+                            out.write(data)
+                            out.flush()
+                            os.fsync(out.fileno())
+                        entry.update(state="collected", bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                finally:
+                    os.close(fd)
+        except (OSError, Invalid, ValueError) as error:
+            entry["state"] = "failed:" + type(error).__name__
+        try:
+            self._save()
+        except (OSError, Invalid, ValueError):
+            pass
+
     def _start_installer(self, head):
+        if self._release_inherited_vc() is not None:
+            return self  # Stopped before the installer; the caller reads release_stopped (Codex M5).
         try:
             require(self.refresh().digest == self.plan.digest, "dependency installation plan changed")
             self._guard()
@@ -929,7 +1203,8 @@ class DependencyInstallSession:
                 from preparation_installer_log import open_log
                 self.log, _ = open_log(self.store, self.record["install_id"], self.record["app_id"], self.plan.home)
             try:
-                self.process = self._spawn(launch, (*head, str(self.staged), *self.plan.installer_arguments),
+                extra = self._debuglog_argument() if self.plan.installer_log else ()
+                self.process = self._spawn(launch, (*head, str(self.staged), *self.plan.installer_arguments, *extra),
                                            None if self.log is None else self.log.write_fd)
             except BaseException:
                 if self.log is not None:
@@ -978,6 +1253,7 @@ class DependencyInstallSession:
         return self._post_inspect()
 
     def _post_inspect(self):
+        self.collect_debuglog()
         # Independent post-checks: each is collected even if another fails.
         errors = {}
         for name, check in (("inputs", self._guard), ("staged-input", lambda: self._check_staged(self.staged))):
@@ -1004,6 +1280,7 @@ class DependencyInstallSession:
                                       else None)
         self.record["prefix_allocation"] = allocation
         self.record.update(phase="post-inspected", post_state=post["state"], post_inspection=post)
+        self.record["vc_after_install"] = self._vc_after_install()
         status = POST_STATUS[post["state"]]
         if errors or self.record["settings_identity_unchanged"] is not True:
             self.record["error"] = {"check": "installer-postconditions", "error_class": ",".join(sorted(errors)) or "SettingsChanged",
@@ -1171,6 +1448,8 @@ def _print_plan(plan, output, text):
     print("手順: 1) Wine内蔵winverの画面を表示 → 閉じる  2) 表示を確認後、正規インストーラを起動（ライセンス同意は画面であなたが操作）", file=output)
     print("      3) 終了後に停止を確認し、ファイル・登録・サービス・COMをWineを起動せず読み取り検査", file=output)
     print("書込範囲: このprefix内（Program Files、windows\\system32・syswow64・ucharge、レジストリ）。VC++2019前提資材も入り得ます。", file=output)
+    from preparation_vc_record import RELEASE_TEXT
+    print(RELEASE_TEXT, file=output)
     print("          私有キャッシュ・私有入力コピー・導入記録・lock・結果JSON。ゲーム・割り当て設定・他prefixは変更しません。", file=output)
     print("ゲームの認証はしません。インストーラの通信は遮断していません。他namespaceの停止保証はありません。強制終了はしません。", file=output)
 
@@ -1234,31 +1513,38 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                 if outcome["phase"] == "gui-check-stopped":
                     print("winverの画面が表示され、閉じられましたか？ 表示された場合は1、表示されなかった場合はq: ", end="", file=output, flush=True)
                     if session.confirm_display(stream.readline(32).strip() == "1")["phase"] == "gui-check-stopped":
+                        from preparation_vc_record import RELEASE_TEXT
+                        print(RELEASE_TEXT, file=output)
                         print("2) 正規インストーラを起動する場合は1、取消はq: ", end="", file=output, flush=True)
                         if stream.readline(32).strip() == "1":
                             stage = "dependency-installer"
                             session.start_installer()
-                            print("インストーラの画面で操作してください。完了を待っています"
-                                  f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
-                            def note_log():
-                                from preparation_installer_log import report_view
-                                log_view = report_view(session.finalize_log())
-                                if log_view is not None:
-                                    report["steps"] = [{"step": "softdenchi-interactive", "installer_log": log_view,
-                                                        "record": {"status": session.record["status"]}}]
-                                    if log_view["state"] == "final" and log_view.get("writers_remaining"):
-                                        print(f"導入のログに、まだ書き手が残っています（{log_view['writers_remaining']}件）。"
-                                              "プロセスには何もしていません。", file=output)
-                            try:
-                                _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
-                                if session.record["installer"]["status"] == "exited-processes-remain":
-                                    _offer_session_proxy_stop(session, stream, output, selection._text,
-                                                              next_step=restart_then_menu9(config))
-                            except Exception:
-                                # Also when the wait or the stop raised; not Ctrl+C (design: installer log 3.5).
+                            if session.release_stopped is not None:
+                                from preparation_vc_record import text_reason
+                                print("ソフト電池は導入していません（受け継いだVC++の記録を外す段で止まりました：" +
+                                      text_reason(session.release_stopped) + "）。詳細メニューの8に戻ります。", file=output)
+                            else:
+                                print("インストーラの画面で操作してください。完了を待っています"
+                                      f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
+                                def note_log():
+                                    from preparation_installer_log import report_view
+                                    log_view = report_view(session.finalize_log())
+                                    if log_view is not None:
+                                        report["steps"] = [{"step": "softdenchi-interactive", "installer_log": log_view,
+                                                            "record": {"status": session.record["status"]}}]
+                                        if log_view["state"] == "final" and log_view.get("writers_remaining"):
+                                            print(f"導入のログに、まだ書き手が残っています（{log_view['writers_remaining']}件）。"
+                                                  "プロセスには何もしていません。", file=output)
+                                try:
+                                    _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
+                                    if session.record["installer"]["status"] == "exited-processes-remain":
+                                        _offer_session_proxy_stop(session, stream, output, selection._text,
+                                                                  next_step=restart_then_menu9(config))
+                                except Exception:
+                                    # Also when the wait or the stop raised; not Ctrl+C (design: installer log 3.5).
+                                    note_log()
+                                    raise
                                 note_log()
-                                raise
-                            note_log()
                         else:
                             session.decline_installer()
             report.update(installation=dict(session.record), writes=[

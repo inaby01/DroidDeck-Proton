@@ -335,6 +335,8 @@ def show(ctx, listing):
               "（新しいゲームは、先に詳細メニューの10で初期化します）。", file=output)
         print("  導入後にSdProxyが残った場合は、詳細メニューの8と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。",
               file=output)
+        from preparation_vc_record import RELEASE_TEXT
+        print("  " + RELEASE_TEXT, file=output)
     skipped, groups = listing["skipped"], listing["groups"]
     manifest = MANIFEST_SKIP_TEXT.get(listing.get("manifest"))
     if skipped or groups or manifest:

@@ -215,6 +215,11 @@ def _binding_verified(context, key):
     return any(item["status"] == "binding-verified" for item in items)
 
 
+VC_STATE_TEXT = {"releasing": "外している途中で止まりました", "absent": "なし（外すものはありませんでした）",
+                 "absent-after-release": "外し終えています（前回の続き）", "released": "外しました",
+                 "kept-vc-present": "VC++の実体があるため外していません", "failed": "外せませんでした"}
+
+
 def _describe_steps(steps):
     for step in steps:
         if step["step"] == "binding-plan":
@@ -444,6 +449,13 @@ def _game(key, listed, title, context):
         if dependencies is not None:
             entry["dependencies"] = dependencies
             print("  依存: " + "、".join(text(item["dependency_id"] + " / " + item["state"]) for item in dependencies), file=output)
+        released = next((step["latest"] for step in evaluation["steps"] if step["step"] == "inherited-vc-record"), None)
+        if released is not None:
+            # The newest evaluated release of this initialization (design: inherited VC record 6, Codex L1).
+            from preparation_vc_record import text_reason
+            entry["inherited_vc_record"] = released
+            print("  受け継いだVC++の記録: " + text(VC_STATE_TEXT.get(released["state"], released["state"])) +
+                  ("（" + text(text_reason(released["reason"])) + "）" if released.get("reason") else ""), file=output)
         if evaluation["next"] == "ready":
             print("  次にすること: 起動できます（依存はすべて検証済みで、準備用Protonに割り当て済み）。", file=output)
         elif evaluation["next"] == "continue":

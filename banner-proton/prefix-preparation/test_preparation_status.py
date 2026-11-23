@@ -94,6 +94,21 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         _, menu, _, _ = self.run_menu('1\n1\n1\n')
         self.agrees(entry, menu)
 
+    def test_a_release_stop_that_running_again_cannot_clear_is_shown_as_a_stop(self):
+        vc, _ = self.inherit_vc()
+        with patch.object(vc, 'read_template', side_effect=status.require.__globals__['Invalid']('template tail changed')):
+            self.run_detail('12\n1\n1\n1\n')
+        before = self.state()
+        _, report, output = self.status()
+        self.assertEqual(before, self.state())
+        entry = self.entry(report)
+        self.assertEqual(entry['next'], {'next': 'stop', 'stage': 'softdenchi-state',
+                                         'reason': 'inherited-vc-record-template-mismatch', 'actions': []})
+        self.assertEqual(entry['inherited_vc_record']['state'], 'failed')
+        self.assertIn('受け継いだVC++の記録: 外せませんでした（準備用Protonのひな形の書き足し部分を確かめられません）', output)
+        self.assertIn('もう一度実行しても進みません', output)
+        self.assertNotIn('続きから進めます', output)
+
     def test_prepared_game_is_ready_and_nothing_is_written(self):
         self.run_menu('1\n1\n1\n1\n')
         locks = sorted(os.listdir(self.f.store_root / 'locks')) if (self.f.store_root / 'locks').exists() else []
