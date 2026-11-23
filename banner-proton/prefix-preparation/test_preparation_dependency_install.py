@@ -1637,6 +1637,7 @@ class InheritedVcTests(InstallTests):
             _, report, output = self.menu('8\n1\n1\n1\n1\n')
         self.assertEqual(report['installation']['status'], 'stopped-before-installer', output)
         self.assertIn('受け継いだVC++の記録を外す段で止まりました', output)
+        self.assertIn('もう一度実行しても進みません', output)  # The reason decides the guidance (Codex final L2).
         self.assertIn("ひな形から受け継いだ『VC++ 14.51導入済み』", output)
         self.assertNotIn('インストーラの画面で操作してください', output)
 

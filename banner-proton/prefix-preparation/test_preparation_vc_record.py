@@ -332,7 +332,10 @@ class RecordTests(unittest.TestCase):
                             "keys": {"wow-arm64": {"values": {"Bld": "a" * 64}, "delete_key": True, "kept": "b" * 64}},
                             "wineserver_observed": True, "wineserver_gone_before_read": True})
         for bad in ({"state": "released", "reason": "x"}, {"state": "failed"}, {"state": "absent", "secret": 1},
-                    {"state": "released", "keys": {"elsewhere": {}}}):
+                    {"state": "released", "keys": {"elsewhere": {}}}, {"state": "releasing"}, {"state": "released"},
+                    {"state": "failed", "reason": "wait-timeout"}, {"state": "failed", "reason": "wait-timeout", "retryable": False},
+                    {"state": "absent", "retryable": True}, {"state": "not-evaluated", "values": 0},
+                    {"state": "absent", "wineserver_observed": 1}, {"state": "absent", "exit_code": True}):
             with self.assertRaises(Invalid):
                 vc.validate_record(bad)
         with self.assertRaises(Invalid):

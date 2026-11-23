@@ -458,7 +458,13 @@ def validate_record(value):
     reason = value.get("reason")
     require(reason is None or (type(reason) is str and REASON.fullmatch(reason)), "invalid VC record reason")
     require((value["state"] == "failed") == (reason is not None), "reason only for a failed release")
-    require(value.get("retryable") in (None, True, False), "invalid retryable flag")
+    # Per state (Codex final L1): a failed release says whether running again can clear it; a release in
+    # progress or done carries what a resume compares with; nothing else is set before an evaluation.
+    require((value["state"] == "failed") == (type(value.get("retryable")) is bool), "retryable only for a failed release")
+    if value["state"] == "failed":
+        require(value["retryable"] == (reason.split(":", 1)[0] in RETRYABLE_REASONS), "retryable flag differs from reason")
+    require(value["state"] not in ("releasing", "released") or value.get("keys"), "release without its keys")
+    require(value["state"] != "not-evaluated" or set(value) == {"state"}, "not-evaluated carries no data")
     require(value.get("values") is None or (type(value["values"]) is int and 0 <= value["values"] <= 36), "invalid count")
     require(value.get("version") is None or (type(value["version"]) is str and len(value["version"]) <= 40), "invalid version")
     if value.get("keys") is not None:
@@ -474,7 +480,7 @@ def validate_record(value):
     require(resumed is None or (type(resumed) is str and re.fullmatch(r"depinstall-[0-9a-f]{32}", resumed)), "invalid resume ID")
     require(value.get("exit_code") is None or type(value["exit_code"]) is int, "invalid exit code")
     for name in ("wineserver_observed", "wineserver_gone_before_read"):
-        require(value.get(name) in (None, True, False), "invalid observation flag")
+        require(value.get(name) is None or type(value[name]) is bool, "invalid observation flag")
     return value
 
 

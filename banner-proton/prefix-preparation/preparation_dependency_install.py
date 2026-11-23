@@ -1545,9 +1545,19 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                             stage = "dependency-installer"
                             session.start_installer()
                             if session.release_stopped is not None:
+                                from preparation_selection import menu_ref
                                 from preparation_vc_record import text_reason
-                                print("ソフト電池は導入していません（受け継いだVC++の記録を外す段で止まりました：" +
-                                      text_reason(session.release_stopped) + "）。詳細メニューの8に戻ります。", file=output)
+                                item = session.record.get("inherited_vc_record") or {}
+                                head = ("ソフト電池は導入していません（受け継いだVC++の記録を外す段で止まりました：" +
+                                        text_reason(session.release_stopped) + "）。")
+                                if item.get("retryable") is False:  # Per reason, as the one pass (Codex final L2).
+                                    head += "もう一度実行しても進みません。結果JSONを戻してください。"
+                                elif session.release_stopped.startswith(("wait-timeout", "persistence-unconfirmed")):
+                                    head += ("ゲームとWineをすべて終了し、DroidDeckを起動し直してから、" +
+                                             menu_ref(config, 8) + "をもう一度実行してください。")
+                                else:
+                                    head += menu_ref(config, 8) + "をもう一度実行すると、外す段からやり直します。"
+                                print(head, file=output)
                             else:
                                 print("インストーラの画面で操作してください。完了を待っています"
                                       f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
