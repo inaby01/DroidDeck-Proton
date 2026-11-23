@@ -72,7 +72,7 @@ def _text(value):
 def validate_selection_config(config):
     fields(config, ("schema_version", "payload", "runtime_reference"),
            ("probe_material", "placement_review", "initialization_trial", "dependency_installation", "game_preparation",
-            "supersedes"))
+            "supersedes", "diagnostics"))
     require(type(config.get("probe_material", False)) is bool, "invalid probe menu option")
     require(type(config.get("initialization_trial", False)) is bool, "invalid initialization trial menu option")
     require(type(config["schema_version"]) is int and config["schema_version"] == 1, "unknown selection config")
@@ -113,6 +113,10 @@ def validate_selection_config(config):
         require(payload.get("tool_slot") == "preparation" and
                 "SoftDenchi-Prep-Proton " + expected_root.removeprefix("DroidDeck-Proton ") not in superseded,
                 "a bundle cannot supersede its own slot")
+    if "diagnostics" in config:
+        # Explicit diagnostic mode (design: installer log): only installer_log, a strict boolean.
+        from preparation_installer_log import validate_diagnostics
+        validate_diagnostics(config["diagnostics"])
     if "game_preparation" in config:
         from preparation_game_prefix import validate_game_config
         require(config.get("initialization_trial") is True and "placement_review" in config,
@@ -586,7 +590,7 @@ def selection_script(config=None):
              "preparation_payload", "preparation_runtime", "preparation_customization", "preparation_runtime_context",
              "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
              "preparation_tool_writer", "preparation_store", "preparation_slot_manifest", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_trial", "preparation_trial_audit", "preparation_recheck", "preparation_softdenchi_recipe",
-             "preparation_dependency_state", "preparation_dependency_install", "preparation_prefix_dll", "preparation_game_prefix",
+             "preparation_dependency_state", "preparation_installer_log", "preparation_dependency_install", "preparation_prefix_dll", "preparation_game_prefix",
              "preparation_one_pass", "preparation_proton_update", "preparation_status", "preparation_batch",
              "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}

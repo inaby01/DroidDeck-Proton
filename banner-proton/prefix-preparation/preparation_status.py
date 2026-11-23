@@ -336,6 +336,12 @@ def _game(key, listed, title, context):
                   "可能性があります。" + ("書き換える前の設定のバックアップは私有記録の backups/" +
                                           text(interrupted["binding_id"]) + " にあります。" if interrupted["backup"] else "") +
                   "ツールではもう一度戻せません。DroidDeckの画面と同期のコマンドで割り当てを直してください。", file=output)
+    from preparation_installer_log import logs_of
+    unfinished_logs = [record["install_id"] for record in logs_of(context["management"], key) if record["state"] == "open"]
+    if unfinished_logs:
+        # Design: installer log 3.5. An attempt left before its end (q, Ctrl+C, a refused stop) is never fixed later.
+        entry["installer_logs_open"] = unfinished_logs
+        print(f"  導入のログ（未確定）があります（{len(unfinished_logs)}件、私有の場所。導入の途中で抜けた回の分です）。", file=output)
     try:
         if title is None:
             entry.update(record="several" if len(listed) != 1 else listed[0]["status"],

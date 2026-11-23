@@ -194,6 +194,17 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         self.assertIn('3つのファイルで食い違っています', output)
         self.assertNotEqual(entry['next']['next'], 'out-of-scope')
 
+    def test_an_unfinished_installer_log_is_shown(self):
+        import preparation_installer_log as log
+        from preparation_store import PrivateStore
+        self.initialize()
+        install_id = 'depinstall-' + 'b' * 32
+        with PrivateStore(self.f.store_root) as store, store.locked('c' * 64):
+            store.write_record(log.RECORDS, install_id + '.json', log._record(install_id, '42', 'open'))
+        _, report, output = self.status()
+        self.assertEqual(self.entry(report)['installer_logs_open'], [install_id])
+        self.assertIn('導入のログ（未確定）があります（1件', output)
+
     def test_running_game_cannot_be_checked(self):
         self.initialize()
         with patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):

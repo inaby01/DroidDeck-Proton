@@ -427,11 +427,16 @@ def _capacity(needs):
             "reserve_bytes": RESERVE, "growth_upper_bound_known": False}
 
 
-def capacity_needs(base, spec, home):
-    """Bytes the installation needs per path: the private cache, the work input copy and the prefix reserve."""
+def capacity_needs(base, spec, home, installer_log=False):
+    """Bytes the installation needs per path: the private cache, the work input copy and the prefix reserve.
+
+    With the diagnostic installer log, the log budget is added to the private work folder.
+    """
+    from preparation_installer_log import LOG_BUDGET
     inputs_root = safe_path(base.work.parent / "inputs", safe_path(home))
     size = spec["expected_size"]
-    return ((base.store_root, size), (inputs_root, size), (base.compatdata, RESERVE))
+    needs = ((base.store_root, size), (inputs_root, size), (base.compatdata, RESERVE))
+    return needs + ((base.work.parent, LOG_BUDGET),) if installer_log else needs
 
 
 def _records_of(record):
@@ -492,6 +497,8 @@ class InstallPlan:
     blockers: tuple
     installer_mode: str = "interactive"
     installer_arguments: tuple = ()
+    installer_log: bool = False  # Diagnostic mode of the bundle (design: installer log).
+    home: object = field(default=None, repr=False)  # The Linux home, for the private log folder.
 
     def summary(self):
         p = self.recheck
@@ -502,7 +509,7 @@ class InstallPlan:
                 "sha256": self.measured["sha256"] if self.measured else None, "size": self.measured["size"] if self.measured else None},
                 "pre_state": self.pre_state["state"], "pre_groups": self.pre_state["groups"],
                 "previous_installation": self.previous, "capacity": self.capacity,
-                "installer_mode": self.installer_mode,
+                "installer_mode": self.installer_mode, "installer_log": self.installer_log,
                 "steps": [*([] if silent else [{"step": "gui-check", "command": list(GUI_COMMAND)}]),
                           {"step": "original-bootstrap", "command": ["runinprefix", "<private copy of " + self.spec["filename"] + ">"],
                            "arguments": list(self.installer_arguments), "silent_arguments_inferred": False,
@@ -531,9 +538,11 @@ def plan_dependency_install(**kwargs):
 def _plan_dependency_install(progress, *, record, record_sha256, config, directory, renderer, source, games, steam, settings,
                              home, environment, runtime_root, recipe=None, installer_mode="interactive", silent_launch=None,
                              inventory=None):
+    from preparation_installer_log import enabled as installer_log_enabled
     recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
     require(installer_mode in INSTALLER_MODES, "invalid installer mode")
     arguments = tuple(silent_arguments(recipe, silent_launch)) if installer_mode == "silent" else ()
+    installer_log = installer_log_enabled(config)
     dependency = validate_dependency_config(config.get("dependency_installation"))
     require(dependency["recipe_revision"] == recipe["revision"], "configured recipe revision differs")
     progress.append("managed-recheck-plan")
@@ -577,7 +586,7 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
     progress.append("capacity")
     home = safe_path(home)
     inputs_root = safe_path(base.work.parent / "inputs", home)
-    capacity = _capacity(capacity_needs(base, spec, home))
+    capacity = _capacity(capacity_needs(base, spec, home, installer_log))
     if not capacity["sufficient"]:
         blockers.append("insufficient-capacity")
     signature = {"version": VERSION, "scope": SCOPE, "recheck_plan": base.digest, "recheck": recheck_sha256,
@@ -586,8 +595,10 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
                  "pre_state": digest_json(pre), "inputs": str(inputs_root),
                  "capacity_sufficient": capacity["sufficient"], "blockers": sorted(blockers),
                  "installer_mode": installer_mode, "installer_arguments": list(arguments)}
+    if installer_log:
+        signature["installer_log"] = True
     return InstallPlan(digest_json(signature), base, recheck_id, recheck_sha256, recipe, spec, directory, report["measured"],
-                       pre, latest, inputs_root, capacity, tuple(sorted(blockers)), installer_mode, arguments)
+                       pre, latest, inputs_root, capacity, tuple(sorted(blockers)), installer_mode, arguments, installer_log, home)
 
 
 class DependencyInstallSession:
@@ -598,6 +609,7 @@ class DependencyInstallSession:
         # target, prefix version, settings identity and private paths.
         self.base_guard = RecheckSession(plan.recheck, store, None, None, stop_check)
         self.process, self.hash, self.staged = None, None, None
+        self.log, self.log_record = None, None  # Diagnostic installer log (design: installer log).
         p = plan.recheck
         self.record = {"schema_version": 1, "tool_version": VERSION, "scope": SCOPE,
                        "install_id": "depinstall-" + secrets.token_hex(16), "created_ns": time.time_ns(),
@@ -649,11 +661,14 @@ class DependencyInstallSession:
                 "matching process observation required")
         require(self.stop.check()["clear_in_view"], "target process view not clear")
 
-    def _spawn(self, launch, tail):
+    def _spawn(self, launch, tail, log=None):
+        """``log``: the diagnostic log's write end; only then are Wine's err/msi-warn channels on."""
         require_no_bytecode_cache(launch)
-        return subprocess.Popen((launch.argv[0], *tail), cwd=self.plan.recheck.work, env=launch.environment, shell=False,
+        from preparation_installer_log import launch_environment
+        environment = launch.environment if log is None else launch_environment(launch.environment)
+        return subprocess.Popen((launch.argv[0], *tail), cwd=self.plan.recheck.work, env=environment, shell=False,
                                 close_fds=True, start_new_session=True, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL if log is None else log)
 
     def start_gui_check(self):
         require(self.plan.installer_mode == "interactive", "GUI check belongs to the interactive installer")
@@ -910,7 +925,13 @@ class DependencyInstallSession:
             self.record.update(phase="installer-spawned")
             self.record["installer"]["status"] = "running"
             self._save()
-            self.process = self._spawn(launch, (*head, str(self.staged), *self.plan.installer_arguments))
+            if self.plan.installer_log:
+                from preparation_installer_log import open_log
+                self.log, _ = open_log(self.store, self.record["install_id"], self.record["app_id"], self.plan.home)
+            self.process = self._spawn(launch, (*head, str(self.staged), *self.plan.installer_arguments),
+                                       None if self.log is None else self.log.write_fd)
+            if self.log is not None:
+                self.log.close_write()  # The installer holds its own copy; the tool keeps only the read end.
         except (OSError, ValueError, TypeError, KeyError) as error:
             self._fail("installer-start", error)
             raise
@@ -922,6 +943,19 @@ class DependencyInstallSession:
         except (OSError, ValueError):
             pass
         return self
+
+    def finalize_log(self):
+        """Fix the diagnostic log once the installer stage is over; never raises into the caller."""
+        if self.log is None:
+            return self.log_record
+        from preparation_installer_log import finalize
+        try:
+            self.log_record = finalize(self.store, self.log, self.record, self.stop, self.stop.proc_root)
+        except (OSError, ValueError, TypeError, KeyError):
+            self.log_record = None
+        if self.log_record is None or self.log_record["state"] != "open":
+            self.log = None
+        return self.log_record
 
     def wait_installer(self, timeout=30):
         require(self.record["phase"] in ("installer-spawned", "installer-exited"), "installer not running")
@@ -1200,6 +1234,11 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                             if session.record["installer"]["status"] == "exited-processes-remain":
                                 _offer_session_proxy_stop(session, stream, output, selection._text,
                                                           next_step=restart_then_menu9(config))
+                            from preparation_installer_log import report_view
+                            log_view = report_view(session.finalize_log())
+                            if log_view is not None:
+                                report["steps"] = [{"step": "softdenchi-interactive", "installer_log": log_view,
+                                                    "record": {"status": session.record["status"]}}]
                         else:
                             session.decline_installer()
             report.update(installation=dict(session.record), writes=[
@@ -1218,7 +1257,11 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
             report["diagnostics"] = collect_diagnostics(record=record, config=config, directory=directory, renderer=renderer,
                 environment=environment, steam=steam, settings=settings, home=home, runtime_root=runtime_root, recipe=recipe)
         print("導入処理は停止しました。prefix・記録・資材を削除せず結果を保存します。", file=output)
-    return _save_result(selection, directory, home, report, protected, output)
+    status, saved = _save_result(selection, directory, home, report, protected, output)
+    if saved is not None and report.get("steps"):
+        from preparation_one_pass import offer_log_copies
+        offer_log_copies(report, saved, directory, home, stream, output, selection._text)
+    return status, saved
 
 
 def _wait_loop(wait, stream, output, section, quiet=0):

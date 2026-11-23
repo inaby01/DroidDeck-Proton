@@ -79,9 +79,12 @@ def _profile(profile, recipes, softdenchi):
 
 
 def _asset(config, softdenchi, mode, silent_launch):
+    from preparation_installer_log import enabled
     from preparation_softdenchi_recipe import silent_arguments
     arguments = silent_arguments(softdenchi, silent_launch) if mode == "silent" else []
-    return {"spec": digest_json(config["dependency_installation"]["asset"]), "mode": mode, "arguments": arguments}
+    # The diagnostic installer log is part of what the batch screen confirmed (design: installer log 3.8).
+    return {"spec": digest_json(config["dependency_installation"]["asset"]), "mode": mode, "arguments": arguments,
+            "installer_log": enabled(config)}
 
 
 def _dlls(profile, recipes, directory):
@@ -96,6 +99,44 @@ def _dlls(profile, recipes, directory):
     return values
 
 
+def _record_log(session, step, output):
+    """Fix the diagnostic installer log of this attempt and keep its path-free view in the step."""
+    from preparation_installer_log import report_view
+    view = report_view(session.finalize_log())
+    if view is not None:
+        step["installer_log"] = view
+        if view["state"] == "final" and view.get("writers_remaining"):
+            print(f"導入のログに、まだ書き手が残っています（{view['writers_remaining']}件）。プロセスには何もしていません。",
+                  file=output)
+
+
+def log_views(report):
+    """Installer log views and installation statuses of a one-pass report, per install ID."""
+    views, statuses = [], {}
+    for step in report.get("steps", []):
+        view = step.get("installer_log")
+        if view:
+            views.append(view)
+            statuses[view["install_id"]] = (step.get("record") or {}).get("status")
+    return views, statuses
+
+
+def offer_log_copies(report, saved, directory, home, stream, output, text):
+    """After the result is saved: offer each eligible log next to it (design: installer log 3.7)."""
+    from preparation_installer_log import offer_shared_copies
+    views, statuses = log_views(report)
+    if not views:
+        return []
+    store_root = safe_path(home) / ".local/state/droiddeck-prefix-preparation/tool-store"
+    copies = offer_shared_copies(views, statuses, saved=saved, shared_folder=directory, store_root=store_root, home=home,
+                                 stream=stream, output=output, text=text)
+    if copies:
+        from preparation_installer_log import rewrite_result
+        report["installer_log_copies"] = copies
+        rewrite_result(saved, report)
+    return copies
+
+
 def fixed_values(*, registration, profile, proton, paths, asset, binding, dlls):
     """The values the single confirmation is given for; stage-dependent states are excluded."""
     return {"registration": registration, "profile": profile, "proton": proton, "paths": paths, "asset": asset,
@@ -103,7 +144,7 @@ def fixed_values(*, registration, profile, proton, paths, asset, binding, dlls):
 
 
 ITEM_TEXT = {"registration": "登録", "profile": "作品", "proton": "Proton", "paths": "場所", "asset": "資材",
-             "installer_mode": "導入の方式", "binding": "割り当て・設定", "dlls": "prefixに入れるDLL"}
+             "installer_mode": "導入の方式", "installer_log": "導入のログ", "binding": "割り当て・設定", "dlls": "prefixに入れるDLL"}
 
 
 def item_digests(values):
@@ -111,6 +152,8 @@ def item_digests(values):
     items = {name: values[name] for name in ("registration", "profile", "proton", "paths", "binding", "dlls")}
     items["asset"] = values["asset"]["spec"]
     items["installer_mode"] = {"mode": values["asset"]["mode"], "arguments": values["asset"]["arguments"]}
+    # The diagnostic installer log (design: installer log 3.8); absent in plans of earlier versions.
+    items["installer_log"] = values["asset"].get("installer_log", False)
     return {name: digest_json(value) for name, value in sorted(items.items())}
 
 
@@ -425,7 +468,8 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
                                                **common, **extra)
                 steps.append({"step": "softdenchi-silent", "evaluated": True, "plan": plan.summary()})
                 blockers = list(plan.blockers)
-                needs = installer_needs(plan.recheck, common["config"]["dependency_installation"]["asset"], common["home"])
+                needs = installer_needs(plan.recheck, common["config"]["dependency_installation"]["asset"], common["home"],
+                                        plan.installer_log)
                 if not blockers:
                     joint = _capacity(consumed + list(needs))
                     steps[-1]["capacity_after_earlier_steps"] = joint
@@ -597,6 +641,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                     _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
                     if session.record["installer"]["status"] == "exited-processes-remain":
                         _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
+                    _record_log(session, report["steps"][-1], output)
         result = dict(session.record)
         report["steps"][-1]["record"] = result
         live.clear()
@@ -918,6 +963,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                         _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
                         if session.record["installer"]["status"] == "exited-processes-remain":
                             _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
+                        _record_log(session, report["steps"][-1], output)
                     result = dict(session.record)
                     report["steps"][-1]["record"] = result
                     live.clear()
@@ -982,4 +1028,5 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         print("結果JSONを保存できませんでした。私有記録と作成物は保持しています。", file=output)
         return 1, None
     print("結果を保存しました: " + text(str(saved)), file=output)
+    offer_log_copies(report, saved, directory, home, stream, output, text)
     return 2, str(saved)

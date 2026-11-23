@@ -962,6 +962,7 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
         print("実行しています。操作が終わるまで、ゲームを起動しないでください。", file=output, flush=True)
         run(ctx, listing, protected, report)
         show_outcomes(ctx, report, listing)
+        _offer_log_copies(ctx, protected, report)
     except (OSError, ValueError, TypeError, KeyError) as error:
         report.update(status="stopped", **describe_error(error, "batch-run"))
         print("停止: " + _text(str(report.get("reason") or report.get("error_class"))), file=output)
@@ -985,6 +986,50 @@ def _show_placement(ctx, placement):
     manifest = (placement.get("result") or {}).get("slot_manifest") or {}
     if manifest.get("state") in MANIFEST_TEXT:
         print(MANIFEST_TEXT[manifest["state"]], file=output)
+
+
+def _offer_log_copies(ctx, protected, report):
+    """Per attempt, after this result is saved to the shared folder (design: installer log 3.7)."""
+    from preparation_installer_log import offer_shared_copies
+    from preparation_one_pass import log_views
+    views, statuses = [], {}
+    for entry in report.get("items", []):
+        found, status = log_views(entry.get("report") or {})
+        views.extend(found)
+        statuses.update(status)
+    if not views:
+        return
+    saved = _save_shared_now(ctx, protected, report)
+    if saved is None:
+        print("結果を共有のフォルダーに保存できなかったので、導入のログは写しません（私有の場所にあります）。", file=ctx.output)
+        return
+    copies = offer_shared_copies(views, statuses, saved=saved, shared_folder=ctx.directory, store_root=ctx.management,
+                                 home=ctx.home, stream=ctx.stream, output=ctx.output, text=_text)
+    if copies:
+        report["installer_log_copies"] = copies
+
+
+def _save_shared_now(ctx, protected, report):
+    """Save this result to the shared folder now; the path only when that save succeeded there."""
+    import preparation_selection as selection
+    try:
+        if report.get("shared_result"):
+            path = Path(report["shared_result"])
+            raw = (json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode()
+            temporary = path.parent / (path.name + "." + secrets.token_hex(8) + ".tmp")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        else:
+            saved, _ = selection.save_selection_result(ctx.directory, ctx.home, report, protected)
+            path = Path(saved)
+            report["shared_result"] = str(path)
+    except (OSError, ValueError):
+        return None
+    return path if safe_path(path.parent) == safe_path(ctx.directory) else None
 
 
 def _assigned_to_slots(ctx):

@@ -337,6 +337,18 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         lines = batch._partial_lines(self.batch_context(), {'kind': 'resume'}, {'ids': ids})
         self.assertIn('「prefixのDLLの用意」の途中かその後で止まりました。', lines)
 
+    def test_a_run_stops_when_the_diagnostic_option_changed_after_the_list(self):
+        ctx = self.batch_context()
+        profile = self.config['game_preparation']['profiles'][0]['profile_id']
+        _, plan, _, _ = self.run_menu('', lambda text: (0, ctx.one_pass(select=('42', profile), mode='plan')[1], ''))
+        self.config['diagnostics'] = {'installer_log': True}
+        _, report, _, _ = self.run_menu('', lambda text: (0, ctx.one_pass(select=('42', profile), mode='run',
+                                                                          expected=plan)[1], ''))
+        self.assertEqual(plan['fixed']['asset']['mode'], 'silent', plan['fixed']['asset'])
+        self.assertEqual((report.get('stage'), report.get('reason')), ('batch-confirmation', 'confirmed-values-changed:installer_log'),
+                         report)
+        self.assertFalse(self.game_compat.exists())
+
     def test_a_run_of_another_kind_than_confirmed_stops(self):
         ctx = self.batch_context()
         profile = self.config['game_preparation']['profiles'][0]['profile_id']

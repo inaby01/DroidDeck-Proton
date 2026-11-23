@@ -1284,3 +1284,36 @@ placed; every missing asset is reported at once; and when a DLL is not placed fo
 reason (a running game, a changed layout), that reason is shown instead of the asset. A
 new prefix still checks every DLL asset before anything is written, and the measured
 assets stay part of the confirmed values.
+
+## Diagnostic log of the SoftDenchi installer (0.31.2)
+
+Off unless the bundle sets `"diagnostics": {"installer_log": true}` (a strict boolean;
+other keys are refused). With it, each SoftDenchi installer run (silent and interactive)
+gets Wine's `err` lines of every channel and `warn` lines of `msi`
+(`WINEDEBUG=fixme-all,warn+msi`; other log switches a slot's `user_settings.py` could set
+are turned off). The installer's standard error is a private append-only file in the
+game's work folder (`logs/<install_id>/live.log`, 0600); nothing reads it while the
+installer runs, and other launches keep `WINEDEBUG=-all` and `/dev/null`. The
+pre-install capacity check adds 16 MiB to the work folder. If the log cannot be opened,
+the installer runs as before and the reason is recorded.
+
+- A separate record `installer-logs/<install_id>.json` (the installation record keeps
+  its shape) is `open` until the installer has exited and no process of the prefix is
+  visible; then the file up to its current end is fixed as `final.log`, and the
+  processes of this user still holding the log are counted (read from `/proc`; nothing
+  is done to them). An attempt left before that (q, Ctrl+C, a refused stop) stays
+  `open`; the status check lists it.
+- Results carry a summary of allowed forms only: counts per channel and per function
+  (functions from a fixed list taken from the pinned Wine source, others as `other`),
+  MSI return values, standard MSI action names (others as `custom`), fixed message
+  counts and the kind of `wine:` lines. No paths or other names.
+- When an install did not end present-verified and its result was saved in the shared
+  folder, the screen offers to copy the whole log next to it as
+  `installer-<install_id>.log` after showing the folder and that the copy contains
+  device paths and cannot be recalled once shared. The copy is written to a temporary
+  file and linked to its name without replacing anything. The batch run asks at the end,
+  per attempt; the option is part of what its list confirmed.
+- Accepted limits: the log has no size cap while it is written (only `err` and
+  `warn:msi`); processes started by the installer keep their copy of the file and can
+  add lines until they end; processes started through paths that rebuild the
+  environment may not write to it, so an empty log does not prove there was no error.

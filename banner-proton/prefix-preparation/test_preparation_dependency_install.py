@@ -41,6 +41,9 @@ if len(sys.argv) >= 3 and sys.argv[1] == 'runinprefix' and sys.argv[2].startswit
     spec = json.loads(raw.split(b'\\nDROIDDECK_SYNTHETIC_INSTALLER\\n', 1)[1])
     if sys.argv[3:] and spec.get('silent_noop'):
         raise SystemExit(0)
+    for line in spec.get('stderr', []):
+        sys.stderr.write(line + '\\n')
+    sys.stderr.flush()
     drive = root / 'pfx/drive_c'
     for relative, data in spec['files'].items():
         path = drive / relative
@@ -103,10 +106,10 @@ FILES = {'Program Files (x86)/SoftDenchi/SatX4.ocx': X86, 'Program Files/SoftDen
          'Program Files (x86)/SoftDenchi/UCManSvc.exe': SERVICE, 'Program Files (x86)/SoftDenchi/License.txt': TEXT}
 
 
-def installer(files=None, registry=None, exit_code=0, silent_noop=False):
+def installer(files=None, registry=None, exit_code=0, silent_noop=False, stderr=()):
     files = FILES if files is None else files
     body = {'files': {k: base64.b64encode(v).decode() for k, v in files.items()},
-            'registry': wine_registry() if registry is None else registry, 'exit': exit_code}
+            'registry': wine_registry() if registry is None else registry, 'exit': exit_code, 'stderr': list(stderr)}
     if silent_noop:
         # A bootstrap that ignores the silent arguments: it installs nothing when given any.
         body['silent_noop'] = True
@@ -400,6 +403,83 @@ class InstallTests(TRIAL['TrialTests']):
             self.assertEqual(store.read_record('rechecks', self.recheck_id + '.json')[0]['status'], 'probe-exited-unverified')
         self.assertEqual([item['status'] for item in listed], ['present-verified'])
         self.assertTrue(listed[0]['reinspection_required'])
+
+    def test_without_diagnostics_the_installer_output_is_discarded_as_before(self):
+        result, spawned = self.run_flow()
+        self.assertEqual(result['status'], 'present-verified', result)
+        call = spawned.call_args_list[1]
+        self.assertEqual((call.kwargs['env']['WINEDEBUG'], call.kwargs['stderr']), ('-all', subprocess.DEVNULL))
+        self.assertFalse((self.f.store_root / 'installer-logs').exists())
+
+    def test_diagnostic_log_keeps_the_installer_errors_and_a_path_free_summary(self):
+        import preparation_installer_log as log
+        lines = ['0024:err:msi:ITERATE_Actions Execution halted, action L"InstallServices" returned 1627',
+                 '0024:0028:err:msi:execute_script Execution of script 1 halted; action L"Example.Game" returned 1603',
+                 '0030:err:module:import_dll Library MFC140.dll (which is needed by L"Z:\\\\root\\\\Example Game\\\\x.dll") not found',
+                 'wine: Call from 7B000000 to unimplemented function example.dll.Example, aborting',
+                 'an unrelated line /root/Storage/Documents/Example Game']
+        self.use_installer(installer(stderr=lines))
+        self.config['diagnostics'] = {'installer_log': True}
+        plan = self.install_plan()
+        self.assertTrue(plan.installer_log)
+        needs = dep.capacity_needs(plan.recheck, self.config['dependency_installation']['asset'], self.home, True)
+        self.assertIn((plan.recheck.work.parent, log.LOG_BUDGET), needs)
+        self.assertNotIn((plan.recheck.work.parent, log.LOG_BUDGET),
+                         dep.capacity_needs(plan.recheck, self.config['dependency_installation']['asset'], self.home))
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep.subprocess, 'Popen', wraps=subprocess.Popen) as spawned:
+            session = self.install_session(store, plan).start_gui_check()
+            session.wait_gui_check(10)
+            session.confirm_display(True)
+            session.start_installer()
+            result = session.wait_installer(10)
+            record = session.finalize_log()
+        self.assertEqual(result['status'], 'present-verified', result)
+        call = spawned.call_args_list[1]
+        self.assertEqual(call.kwargs['env']['WINEDEBUG'], log.WINEDEBUG)
+        self.assertEqual(call.kwargs['env']['DXVK_LOG_LEVEL'], 'none')
+        self.assertEqual(spawned.call_args_list[0].kwargs['env']['WINEDEBUG'], '-all')  # The GUI check keeps it off.
+        self.assertEqual(record['state'], 'final', record)
+        folder = log.log_folder(self.home, result['app_id'], result['install_id'])
+        live, final = (folder / log.LIVE).read_bytes(), (folder / log.FINAL).read_bytes()
+        self.assertEqual(final, live)
+        self.assertEqual(record['final']['sha256'], hashlib.sha256(final).hexdigest())
+        self.assertEqual(oct((folder / log.FINAL).stat().st_mode & 0o777), '0o600')
+        summary = record['final']['summary']
+        self.assertEqual(summary['returned'], {'1603': 1, '1627': 1})
+        actions = [entry.get('action') for entry in summary['entries'] if 'action' in entry]
+        self.assertEqual(actions, ['InstallServices', 'custom'])
+        self.assertEqual(summary['wine'], {'unimplemented-function': 1})
+        self.assertEqual(summary['messages']['execution-halted'], 1)
+        text = json.dumps(record)
+        for secret in ('Example', 'root', 'Storage', 'MFC140', 'Z:'):
+            self.assertNotIn(secret, text)
+        view = log.report_view(record)
+        self.assertNotIn('Example', json.dumps(view))
+
+    def test_an_installer_not_finished_keeps_the_log_open(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture):
+            session = self.install_session(store).start_gui_check()
+            session.wait_gui_check(10)
+            session.confirm_display(True)
+            session.start_installer()
+            running = dict(session.record, installer=dict(session.record['installer'], status='waiting'))
+            kept = log.finalize(store, session.log, running, session.stop, self.f.proc)
+            self.assertEqual(kept['state'], 'open')
+            session.wait_installer(10)
+
+    def test_a_log_that_cannot_be_opened_never_stops_the_installer(self):
+        self.config['diagnostics'] = {'installer_log': True}
+        with patch('preparation_trial._new_private', side_effect=OSError(13, 'denied')):
+            result, spawned = self.run_flow()
+        self.assertEqual(result['status'], 'present-verified', result)
+        call = spawned.call_args_list[1]
+        self.assertEqual((call.kwargs['env']['WINEDEBUG'], call.kwargs['stderr']), ('-all', subprocess.DEVNULL))
+        with self.f.store() as store:
+            record, _ = store.read_record('installer-logs', result['install_id'] + '.json')
+        self.assertEqual((record['state'], record['reason']), ('none', 'log-unavailable:PermissionError'))
 
     def test_unconfirmed_display_never_starts_installer(self):
         record, spawned = self.run_flow(display=False)

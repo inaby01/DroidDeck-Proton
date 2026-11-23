@@ -295,7 +295,7 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertEqual(report['reason'], 'fixed-values-changed:profile')
         self.assertEqual(report['stage'], 'initialize')
         self.assertEqual(sorted(report['confirmed_fixed_values']['items']),
-                         ['asset', 'binding', 'dlls', 'installer_mode', 'paths', 'profile', 'proton', 'registration'])
+                         ['asset', 'binding', 'dlls', 'installer_log', 'installer_mode', 'paths', 'profile', 'proton', 'registration'])
         self.assertEqual(commands, [])
         self.assertFalse(self.game_compat.exists())
         self.assertEqual(before, self.protected())
@@ -415,6 +415,33 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertEqual(report['stage'], 'binding')
         self.assertFalse(report['binding_written'])
         self.assertNotIn('42', json.loads(self.games_config.read_text())['games'])
+
+    def test_diagnostic_log_of_a_verified_install_is_summarised_and_not_offered(self):
+        self.config['diagnostics'] = {'installer_log': True}
+        _, report, output, _ = self.run_detail('12\n1\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        step = next(item for item in report['steps'] if item['step'] == 'softdenchi-silent')
+        self.assertEqual(step['installer_log']['state'], 'final')
+        self.assertEqual(step['installer_log']['writers_remaining'], 0)
+        self.assertNotIn('installer_log_copies', report)
+        self.assertNotIn('導入のログ（導入のときの標準エラー全体', output)
+        self.assertTrue(step['plan']['installer_log'])
+
+    def test_a_partial_install_offers_its_log_next_to_the_result(self):
+        files = dict(list(DEP['FILES'].items())[:1])
+        self.use_installer(DEP['installer'](files=files, exit_code=91,
+                                            stderr=['0024:err:msi:ITERATE_Actions Execution halted, action L"InstallServices" returned 1627']))
+        self.pin_silent()
+        self.config['diagnostics'] = {'installer_log': True}
+        _, report, output, _ = self.run_detail('12\n1\n1\n1\n1\n')
+        self.assertEqual((report['stage'], report['reason']), ('softdenchi-silent', 'installation-partial'), report)
+        step = next(item for item in report['steps'] if item['step'] == 'softdenchi-silent')
+        self.assertEqual(step['installer_log']['summary']['returned'], {'1627': 1})
+        self.assertIn('回収できません', output)
+        copies = report['installer_log_copies']
+        self.assertTrue(copies[0]['copied'], copies)
+        copied = self.f.fixture.source.root / copies[0]['name']
+        self.assertIn(b'returned 1627', copied.read_bytes())
 
     def test_an_exception_inside_a_step_keeps_that_step_record_in_the_result(self):
         with patch.object(dep.DependencyInstallSession, '_spawn', side_effect=OSError('spawn refused')):
