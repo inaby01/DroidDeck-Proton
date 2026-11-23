@@ -283,6 +283,23 @@ class FinalReviewTests(unittest.TestCase):
         self.assertTrue(found["keys"]["wow-x86"]["link"])
         self.assertEqual(vc.evaluate(found, NO_MFC, template(), initial(block()), "a" * 64)["reason"], "registry-shape")
 
+    def test_only_hex_data_continues_a_line_like_wine(self):
+        ancestor = block() + "[Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC] 1\n;note\\\n#link\n"
+        self.assertEqual(scan(ancestor)["ancestor_links"], ["software\\microsoft\\visualstudio\\14.0\\vc"])
+        target = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n"Other"=dword:0000000a\\\n#link\n', 1)
+        self.assertTrue(scan(target)["keys"]["native-x86"]["link"])
+        wrapped = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n"Q"=hex(b):01,00,00,00,\\\n  00,00,00,00\n', 1)
+        flat = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n"Q"=hex(b):01,00,00,00,00,00,00,00\n', 1)
+        self.assertEqual(vc.kept_hash(scan(wrapped)["keys"]["native-x86"]), vc.kept_hash(scan(flat)["keys"]["native-x86"]))
+
+    def test_other_values_compare_the_same_after_wine_rewrites_their_case(self):
+        upper = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n"Q"=hex(b):0A,00,00,00,00,00,00,00\n', 1)
+        lower = upper.replace("0A,00", "0a,00")
+        self.assertEqual(vc.kept_hash(scan(upper)["keys"]["native-x86"]), vc.kept_hash(scan(lower)["keys"]["native-x86"]))
+        dword = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n"D"=dword:0000000A\n', 1)
+        self.assertEqual(vc.kept_hash(scan(dword)["keys"]["native-x86"]),
+                         vc.kept_hash(scan(dword.replace("0000000A", "0000000a"))["keys"]["native-x86"]))
+
     def test_a_qword_beside_the_inherited_values_is_kept(self):
         qword = '"Other"=hex(b):01,00,00,00,00,00,00,00\n'
         self.assertEqual(vc.evaluate(scan(f"[{esc(vc.KEYS['native-x86'])}] 1\n" + qword), NO_MFC, Invalid("x"), None,

@@ -17,10 +17,10 @@ import stat
 from preparation_common import Invalid, regular_open, require, safe_path, unchanged
 from preparation_dependency_state import (
     MAX_KEY_HEADERS,
+    MAX_LOGICAL_LINE,
     MAX_REGISTRY,
     _data,
     _directory,
-    _logical_lines,
     _quoted,
     _unescape,
 )
@@ -69,6 +69,50 @@ def value_hash(value):
 
 def _empty_key():
     return {"occurrences": 0, "values": {}, "duplicate": False, "link": False, "others": [], "subkeys": set()}
+
+
+def _hex_value(line):
+    """A value line whose data is hex: the only lines Wine continues with a trailing backslash."""
+    try:
+        if line[:1] == "@":
+            end = 1
+        elif line[:1] == '"':
+            _, end = _quoted(line, 0)
+        else:
+            return False
+    except Invalid:
+        return False
+    return line[end:end + 4].lower() == "=hex"
+
+
+def wine_lines(stream):
+    """Registry text lines as Wine's loader reads them (server/registry.c, Codex final recheck H).
+
+    Wine joins a line ending in a backslash with the next one only inside hex data; comments,
+    ``#link`` and other values are lines of their own whatever they end with.
+    """
+    pending = None
+    for raw in stream:
+        line = raw.decode("utf-8").rstrip("\r\n")  # Invalid bytes make the registry unreadable.
+        require(len(line) <= MAX_LOGICAL_LINE, "registry line too long")
+        if pending is not None:
+            line = pending + line.lstrip()
+            pending = None
+        if _hex_value(line) and line.rstrip().endswith("\\"):
+            pending = line.rstrip()[:-1]
+            require(len(pending) <= MAX_LOGICAL_LINE, "registry line too long")
+            continue
+        yield line
+    require(pending is None, "unterminated registry continuation")
+
+
+def _other_hash(text):
+    """Other values of a key, compared before and after Wine rewrote the file (Codex final recheck M4)."""
+    try:
+        return value_hash(_data(text))
+    except Invalid:
+        # Formats the parser does not decode (hex(b): and others): Wine writes their digits in lower case.
+        return value_hash(("raw", text.lower() if text[:3].lower() in ("hex", "dwo") else text))
 
 
 def scan_lines(lines):
@@ -146,7 +190,7 @@ def scan_lines(lines):
                 if any(item[0] == folded for item in entry["others"]):
                     entry["duplicate"] = True
                 # Hashed as written: any type Wine saves (hex(b): for QWORD too) is kept (Codex final M4).
-                entry["others"].append((folded, value_hash(("raw", rest[1:]))))
+                entry["others"].append((folded, _other_hash(rest[1:])))
         elif current_kind == "uninstall" and name.casefold() == "displayname":
             try:
                 kind, text = _data(rest[1:])
@@ -171,7 +215,7 @@ def scan_file(path):
     with regular_open(safe_path(path), MAX_REGISTRY) as stream:
         before = os.fstat(stream.fileno())
         require(stream.readline(64).startswith(b"WINE REGISTRY Version 2"), "registry header missing")
-        result = scan_lines(_logical_lines(stream))
+        result = scan_lines(wine_lines(stream))
         unchanged(before, os.fstat(stream.fileno()))
     return result
 
@@ -204,8 +248,8 @@ def read_template(registry, archive_size, expected_tail_sha256):
     require(digest == expected_tail_sha256, "template tail changed")
     archive = data[:archive_size]
     require(archive.startswith(b"WINE REGISTRY Version 2"), "registry header missing")
-    archive_scan = scan_lines(_logical_lines(io.BytesIO(archive.split(b"\n", 1)[1] if b"\n" in archive else b"")))
-    tail_scan = scan_lines(_logical_lines(io.BytesIO(tail)))
+    archive_scan = scan_lines(wine_lines(io.BytesIO(archive.split(b"\n", 1)[1] if b"\n" in archive else b"")))
+    tail_scan = scan_lines(wine_lines(io.BytesIO(tail)))
     keys, versions = {}, set()
     for ident, entry in tail_scan["keys"].items():
         if entry["occurrences"] == 0:
