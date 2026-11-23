@@ -442,6 +442,21 @@ class OnePassTests(GAME['GamePrefixTests']):
         step = next(item for item in report['steps'] if item['step'] == 'softdenchi-silent')
         self.assertEqual(step['installer_log']['state'], 'final', step)
 
+    def test_ctrl_c_after_the_installer_leaves_the_log_open(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        real = dep._wait_loop
+
+        def then_interrupt(wait, *args, **kwargs):
+            outcome = real(wait, *args, **kwargs)
+            if args and args[2] == 'installer':
+                raise KeyboardInterrupt
+            return outcome
+        with patch.object(dep, '_wait_loop', side_effect=then_interrupt), self.assertRaises(KeyboardInterrupt):
+            self.run_detail('12\n1\n1\n1\n')
+        records = [json.loads(path.read_text()) for path in (self.f.store_root / log.RECORDS).glob('depinstall-*.json')]
+        self.assertEqual([record['state'] for record in records], ['open'])
+
     def test_a_partial_install_offers_its_log_next_to_the_result(self):
         files = dict(list(DEP['FILES'].items())[:1])
         self.use_installer(DEP['installer'](files=files, exit_code=91,

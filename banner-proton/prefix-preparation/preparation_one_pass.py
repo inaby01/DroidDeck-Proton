@@ -644,8 +644,10 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                         _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
                         if session.record["installer"]["status"] == "exited-processes-remain":
                             _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
-                    finally:
+                    except Exception:
                         _record_log(session, report["steps"][-1], output)
+                        raise
+                    _record_log(session, report["steps"][-1], output)
         result = dict(session.record)
         report["steps"][-1]["record"] = result
         live.clear()
@@ -968,9 +970,11 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                             _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
                             if session.record["installer"]["status"] == "exited-processes-remain":
                                 _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
-                        finally:
-                            # Also when the wait or the stop raised: the log is fixed if its conditions hold.
+                        except Exception:
+                            # Also when the wait or the stop raised (not Ctrl+C: a run left before its end stays open).
                             _record_log(session, report["steps"][-1], output)
+                            raise
+                        _record_log(session, report["steps"][-1], output)
                     result = dict(session.record)
                     report["steps"][-1]["record"] = result
                     live.clear()

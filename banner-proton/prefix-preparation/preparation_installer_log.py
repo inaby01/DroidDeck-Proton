@@ -399,8 +399,16 @@ def shared_copy_candidates(views, statuses):
     return [view for view in views if view and view["state"] == "final" and statuses.get(view["install_id"]) != "present-verified"]
 
 
-def copy_to_shared(store, install_id, app_id, home, shared_folder):
-    """Copy ``final.log`` next to the shared result without replacing anything; returns (name or None, reason)."""
+def folder_identity(folder):
+    info = os.stat(safe_path(folder), follow_symlinks=False)
+    return info.st_dev, info.st_ino
+
+
+def copy_to_shared(store, install_id, app_id, home, shared_folder, expected=None):
+    """Copy ``final.log`` next to the shared result without replacing anything; returns (name or None, reason).
+
+    ``expected``: the (device, inode) of the folder the operator confirmed; another folder at that path is refused.
+    """
     name = "installer-" + install_id + ".log"
     try:
         source = log_folder(home, app_id, install_id) / FINAL
@@ -410,8 +418,12 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder):
         folder_fd = os.open(safe_path(shared_folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except (OSError, Invalid, TypeError, ValueError, KeyError) as error:
         return None, "not-copied:" + type(error).__name__
+    info = os.fstat(folder_fd)
+    if expected is not None and (info.st_dev, info.st_ino) != tuple(expected):
+        os.close(folder_fd)
+        return None, "not-copied:folder-changed"
     temporary = "." + name + "." + secrets.token_hex(8) + ".tmp"
-    created = False
+    created, placed, note = False, False, None
     try:
         src = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
         try:
@@ -429,11 +441,16 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder):
             os.close(src)
         require(sha.hexdigest() == current["final"]["sha256"], "installer log changed")
         _place(folder_fd, temporary, name)
+        placed = True
         os.fsync(folder_fd)
     except FileExistsError:
         return None, "not-copied:name-exists"
     except (OSError, Invalid, ValueError) as error:
-        return None, "not-copied:" + type(error).__name__
+        if placed:
+            # The file is there under its name; only making that durable failed.
+            note = "copied-sync-failed:" + type(error).__name__
+        else:
+            return None, "not-copied:" + type(error).__name__
     finally:
         if created:
             try:
@@ -445,7 +462,7 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder):
         store.write_record(RECORDS, install_id + ".json", {**current, "shared_copy": {"name": name}}, digest)
     except (OSError, Invalid, TypeError, ValueError):
         pass  # The copy exists; the result tells the operator.
-    return name, None
+    return name, note
 
 
 COPY_LOCK = hashlib.sha256(b"droiddeck-installer-logs").hexdigest()  # One lock file for every shared copy.
@@ -461,6 +478,10 @@ def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, ho
     done = []
     if not candidates or saved is None or safe_path(Path(saved).parent) != safe_path(shared_folder):
         return done
+    try:
+        confirmed = folder_identity(shared_folder)  # The folder shown is the folder written to (Codex medium).
+    except OSError:
+        return done
     for view in candidates:
         install_id = view["install_id"]
         if labels and labels.get(install_id):
@@ -473,12 +494,9 @@ def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, ho
         if stream.readline(32).strip() != "1":
             done.append({"install_id": install_id, "copied": False, "reason": "declined"})
             continue
-        if safe_path(Path(saved).parent) != safe_path(shared_folder):
-            done.append({"install_id": install_id, "copied": False, "reason": "folder-changed"})
-            continue
         try:
             with PrivateStore(store_root) as store, store.locked(COPY_LOCK):
-                name, reason = copy_to_shared(store, install_id, view["app_id"], home, shared_folder)
+                name, reason = copy_to_shared(store, install_id, view["app_id"], home, shared_folder, confirmed)
         except (OSError, Invalid, ValueError) as error:
             name, reason = None, "not-copied:" + type(error).__name__
         print(("写しました: " + name) if name else ("写せませんでした（" + str(reason) + "）"), file=output)

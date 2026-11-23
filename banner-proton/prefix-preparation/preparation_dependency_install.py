@@ -931,7 +931,10 @@ class DependencyInstallSession:
             self.process = self._spawn(launch, (*head, str(self.staged), *self.plan.installer_arguments),
                                        None if self.log is None else self.log.write_fd)
             if self.log is not None:
-                self.log.close_write()  # The installer holds its own copy; the tool keeps only the read end.
+                try:
+                    self.log.close_write()  # The installer holds its own copy; the tool keeps only the read end.
+                except OSError:
+                    pass  # The installer is running; it must still be waited for and its SdProxy handled.
         except (OSError, ValueError, TypeError, KeyError) as error:
             self._fail("installer-start", error)
             raise
@@ -1231,13 +1234,7 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                             session.start_installer()
                             print("インストーラの画面で操作してください。完了を待っています"
                                   f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
-                            try:
-                                _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
-                                if session.record["installer"]["status"] == "exited-processes-remain":
-                                    _offer_session_proxy_stop(session, stream, output, selection._text,
-                                                              next_step=restart_then_menu9(config))
-                            finally:
-                                # Also when the wait or the stop raised (design: installer log 3.5).
+                            def note_log():
                                 from preparation_installer_log import report_view
                                 log_view = report_view(session.finalize_log())
                                 if log_view is not None:
@@ -1246,6 +1243,16 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                                     if log_view["state"] == "final" and log_view.get("writers_remaining"):
                                         print(f"導入のログに、まだ書き手が残っています（{log_view['writers_remaining']}件）。"
                                               "プロセスには何もしていません。", file=output)
+                            try:
+                                _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
+                                if session.record["installer"]["status"] == "exited-processes-remain":
+                                    _offer_session_proxy_stop(session, stream, output, selection._text,
+                                                              next_step=restart_then_menu9(config))
+                            except Exception:
+                                # Also when the wait or the stop raised; not Ctrl+C (design: installer log 3.5).
+                                note_log()
+                                raise
+                            note_log()
                         else:
                             session.decline_installer()
             report.update(installation=dict(session.record), writes=[

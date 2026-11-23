@@ -3,6 +3,7 @@
 
 import io
 import json
+import os
 import runpy
 import subprocess
 import sys
@@ -191,6 +192,36 @@ class CopyTests(unittest.TestCase):
         self.assertEqual((saved["title"], saved["installer_log_copies"][0]["copied"]), ("日本語", True))
         self.assertNotIn("日本語", path.read_text())  # The same ASCII form as the saved result.
         self.assertEqual(sorted(p.name for p in self.shared.iterdir()), ["plan-1.json"])
+
+    def test_a_folder_replaced_after_the_confirmation_is_not_written(self):
+        shared = self.shared
+
+        class Swap:
+            def readline(self, size):
+                shared.rename(shared.with_name("moved"))
+                shared.mkdir(mode=0o700)  # Another folder at the confirmed path.
+                return "1\n"
+        view = {"install_id": INSTALL_ID, "app_id": "42", "state": "final", "bytes": 21}
+        done = log.offer_shared_copies([view], {INSTALL_ID: "partial"}, saved=shared / "plan-1.json", shared_folder=shared,
+                                       store_root=self.store_root, home=self.home, stream=Swap(), output=io.StringIO(),
+                                       text=str)
+        self.assertEqual((done[0]["copied"], done[0]["reason"]), (False, "not-copied:folder-changed"))
+        self.assertEqual(list(shared.iterdir()), [])
+
+    def test_a_copy_in_place_is_reported_as_made_even_if_syncing_the_folder_fails(self):
+        from unittest import mock
+        real, calls = os.fsync, []
+
+        def second_fails(fd):
+            calls.append(fd)
+            if len(calls) == 2:
+                raise OSError(5, "I/O error")
+            return real(fd)
+        with mock.patch.object(log.os, "fsync", side_effect=second_fails):
+            done, _output = self.offer("1\n")
+        self.assertTrue(done[0]["copied"], done)
+        self.assertEqual(done[0]["reason"], "copied-sync-failed:OSError")
+        self.assertTrue((self.shared / done[0]["name"]).exists())
 
     def test_a_changed_log_is_not_copied(self):
         (self.folder / log.FINAL).write_bytes(b"changed after it was fixed\n")

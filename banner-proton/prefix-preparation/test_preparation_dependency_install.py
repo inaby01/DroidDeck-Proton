@@ -457,6 +457,20 @@ class InstallTests(TRIAL['TrialTests']):
         view = log.report_view(record)
         self.assertNotIn('Example', json.dumps(view))
 
+    def test_a_failure_closing_the_tool_copy_never_hides_the_running_installer(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        real, calls = log.LiveLog.close_write, []
+
+        def first_fails(live):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError(9, 'bad descriptor')
+            return real(live)
+        with patch.object(log.LiveLog, 'close_write', first_fails):
+            result, _ = self.run_flow()
+        self.assertEqual(result['status'], 'present-verified', result)
+
     def test_an_installer_not_finished_keeps_the_log_open(self):
         import preparation_installer_log as log
         self.config['diagnostics'] = {'installer_log': True}
