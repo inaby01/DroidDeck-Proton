@@ -107,6 +107,57 @@ def wine_lines(stream):
     require(pending is None, "unterminated registry continuation")
 
 
+_CANONICAL_HEADER = re.compile(r"\[(?:[^\]\\]|\\.)*\] \d+")
+_CANONICAL_HASH = re.compile(r"#(?:time=[0-9a-f]+|link|class=\"(?:[^\"\\]|\\.)*\"|arch=[a-z0-9]+)")
+_CANONICAL_NAME = re.compile(r'(@|"(?:[^"\\]|\\.)*")=(.*)')
+_CANONICAL_DATA = re.compile(r'"(?:[^"\\]|\\.)*"|str\(\d+\):"(?:[^"\\]|\\.)*"|dword:[0-9a-f]{8}')
+_CANONICAL_HEX = re.compile(r"hex(?:\([0-9a-f]+\))?:(?:(?:[0-9a-f]{2},)*[0-9a-f]{2})?(,\\)?")
+_CANONICAL_MORE = re.compile(r" *(?:[0-9a-f]{2},)*[0-9a-f]{2}(,\\)?")
+
+
+def canonical(stream):
+    """Whether every line has a form Wine writes (server/registry.c save_subkeys/dump_value).
+
+    A file Wine saved always passes (checked against a template prefix of the pinned Proton:
+    all 64 thousand lines). Anything else (a value Wine would stop reading, a continuation that
+    swallows a header, a key name ending in a separator, a link mark with more on its line) is
+    refused before any deletion, instead of imitating every corner of Wine's loader (Codex final recheck H).
+    """
+    more = False
+    for raw in stream:
+        line = raw.decode("utf-8").rstrip("\r\n")
+        if more:
+            match = _CANONICAL_MORE.fullmatch(line)
+            if not match:
+                return False
+            more = match.group(1) is not None
+            continue
+        if not line or line.startswith(";;"):
+            continue
+        if line[0] == "[":
+            if not _CANONICAL_HEADER.fullmatch(line):
+                return False
+            key = _header_key(line)
+            if not key or key.endswith("\\") or "\\\\" in key or key.startswith("\\"):
+                return False
+            continue
+        if line[0] == "#":
+            if not _CANONICAL_HASH.fullmatch(line):
+                return False
+            continue
+        match = _CANONICAL_NAME.fullmatch(line)
+        if not match:
+            return False
+        data = match.group(2)
+        if _CANONICAL_DATA.fullmatch(data):
+            continue
+        hexed = _CANONICAL_HEX.fullmatch(data)
+        if not hexed:
+            return False
+        more = hexed.group(1) is not None
+    return not more
+
+
 def _header_key(line):
     end = 1
     while end < len(line) and line[end] != "]":
@@ -133,16 +184,18 @@ def physical_links(stream):
 def _canonical(text):
     """A value as Wine stores it, so equal values written differently compare equal (Codex final recheck M)."""
     lowered = text.strip().lower()
-    match = re.match(r"dword:([0-9a-f]*)", lowered)
+    match = re.fullmatch(r"dword:([0-9a-f]{1,8})", lowered)
     if match:
-        return ("dword", int(match.group(1) or "0", 16) & 0xFFFFFFFF)  # strtoul reads the leading digits.
+        return ("dword", int(match.group(1), 16))
     match = re.fullmatch(r"hex(?:\(([0-9a-f]{1,8})\))?:(.*)", lowered, re.DOTALL)
+    if match and int(match.group(1) or "3", 16) in (1, 2):
+        return ("data", _data(text))  # A string written as hex compares with its quoted form.
     if match:
         parts = [part.strip() for part in match.group(2).split(",")]
         if parts and parts[-1] == "":
             parts.pop()
         if all(re.fullmatch(r"[0-9a-f]{1,2}", part) for part in parts):
-            return ("hex(" + (match.group(1) or "3") + ")", bytes(int(part, 16) for part in parts).hex())
+            return ("hex(" + format(int(match.group(1) or "3", 16), "x") + ")", bytes(int(part, 16) for part in parts).hex())
         return ("raw", lowered)
     return ("data", _data(text))
 
@@ -265,7 +318,11 @@ def scan_file(path):
         links = physical_links(stream)
         stream.seek(0)
         stream.readline(64)
+        shape = canonical(stream)
+        stream.seek(0)
+        stream.readline(64)
         result = scan_lines(wine_lines(stream), links)
+        result["canonical"] = shape
         unchanged(before, os.fstat(stream.fileno()))
     return result
 
@@ -388,6 +445,8 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256):
         return {"state": "absent", "values": 0}
     if any(kind != "absent" for kind in mfc.values()):
         return {"state": "kept-vc-present", "values": count}
+    if not scan.get("canonical", True):
+        return failed("registry-shape", values=count)  # Not as Wine writes it: never delete from it.
     if scan["uninstall"]["unreadable"]:
         return failed("uninstall-unreadable", values=count)
     if scan["uninstall"]["vc14"]:
@@ -423,6 +482,8 @@ def resume(scan, mfc, previous):
     """Continue a release a previous attempt began (design 4 resume). ``previous`` is its record's keys."""
     if any(kind != "absent" for kind in mfc.values()):
         return {"state": "kept-vc-present", "values": sum(len(entry["values"]) for entry in scan["keys"].values())}
+    if not scan.get("canonical", True):
+        return failed("investigation-required")
     # Condition 2 holds for a resume as well (design 4, Codex final M1).
     if scan["uninstall"]["unreadable"]:
         return failed("uninstall-unreadable")
@@ -484,7 +545,7 @@ def command(plan):
 def same_state(before, after):
     """What the decision was made on is still there: values, kept data, links and duplicates (design 4)."""
     def shape(found):
-        return (fingerprint(found), found["ancestor_links"], found["runtimes_present"],
+        return (fingerprint(found), found["ancestor_links"], found["runtimes_present"], found.get("canonical", True),
                 {ident: (kept_hash(entry), entry["exists"], entry["link"], entry["duplicate"], entry["occurrences"])
                  for ident, entry in found["keys"].items()})
     return shape(before) == shape(after)
@@ -492,6 +553,8 @@ def same_state(before, after):
 
 def verify(plan, scan):
     """The re-read after the Wine run (design 4): returns None when it passed, else a retryable reason."""
+    if not scan.get("canonical", True):
+        return "registry-shape"
     if not scan["runtimes_present"]["native"] or not scan["runtimes_present"]["wow"]:
         return "removed-too-much"
     if any(entry["values"] for entry in scan["keys"].values()):
@@ -563,10 +626,14 @@ def validate_record(value):
     by_state = {"absent": {"state", "values", "resumed_from", "version"},
                 "absent-after-release": {"state", "values", "resumed_from", "version"},
                 "kept-vc-present": {"state", "values", "resumed_from", "version"},
-                "releasing": {"state", "values", "version", "keys", "resumed_from"}}
+                "releasing": {"state", "values", "version", "keys", "resumed_from"},
+                "released": {"state", "values", "version", "keys", "resumed_from", "exit_code", "wineserver_observed",
+                             "wineserver_gone_before_read"}}
     if value["state"] in by_state:
         # No Wine ran in these states: no exit code or observation (Codex final recheck L1).
         require(set(value) <= by_state[value["state"]], "fields do not fit the state")
+    if value["state"] == "released":
+        require(value.get("wineserver_gone_before_read") is True, "released without the re-read after Wine")
     require(value.get("values") is None or (type(value["values"]) is int and 0 <= value["values"] <= 36), "invalid count")
     require(value.get("version") is None or (type(value["version"]) is str and len(value["version"]) <= 40), "invalid version")
     if value.get("keys") is not None:
