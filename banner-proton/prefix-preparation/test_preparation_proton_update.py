@@ -384,6 +384,32 @@ class MoveTests(MoveFixture, ONE['OnePassTests']):
         self.assertIn('move decision changed', json.dumps(report, ensure_ascii=False))
         self.assertEqual(self.selection()['kind'], 'move')
 
+    def test_a_game_no_longer_for_the_batch_is_not_moved_by_its_confirmed_decision(self):
+        decision = self.selection()
+        self.assertTrue(decision['batch'])
+        changed = dict(decision, batch=False, reason='returned-from-this-slot')  # As after a move and a revert elsewhere.
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(update, 'classify', return_value=changed), PrivateStore(self.f.store_root) as store:
+            check = update.move_check(store, self.f.steam, self.config, '42', decision)
+            with self.assertRaisesRegex(Invalid, 'move decision changed'):
+                check(plan_binding(self.f.steam, self.f.settings, '42', self.bundle))
+        self.assertEqual(before, self.games_config.read_bytes())
+
+    def test_the_whole_config_entry_is_a_confirmed_item(self):
+        files = update.current_files(self.f.steam, self.f.settings)
+        before = update.target_items(files, '42')
+        self.assertEqual(before['config_entry']['name'], update.tool_id_of(self.old))
+        config = self.f.steam / 'config/config.vdf'
+        raw = config.read_bytes()
+        text = raw.decode()
+        marker = '"name"'
+        index = text.index(marker, text.index('"42"'))
+        config.write_bytes((text[:index] + '"extra_setting" "250"\n' + text[index:]).encode())
+        after = update.target_items(update.current_files(self.f.steam, self.f.settings), '42')
+        self.assertNotEqual(before, after)
+        self.assertEqual(after['config_entry']['extra_setting'], '250')
+        config.write_bytes(raw)
+
     def test_writers_cannot_assign_the_wrong_slot(self):
         with PrivateStore(self.f.store_root) as store, store.locked(self.lock()):
             plan = plan_binding(self.f.steam, self.f.settings, '42', self.old)
@@ -716,6 +742,43 @@ class RevertTests(MoveFixture, ONE['OnePassTests']):
         self.assertFalse(report.get('binding_written'), output)
         self.assertIn('revert target slot in use', json.dumps(report, ensure_ascii=False))
         self.assertEqual(before, self.games_config.read_bytes())
+
+    def test_registration_changed_to_another_exe_after_the_list_stops(self):
+        source = Path(self.environment['BL_ADDED_GAMES'])
+        original = update.list_caches
+
+        def switch(root, verified):
+            document = json.loads(source.read_text())
+            entry = next(item for item in document if str(item['appid']) == '42')
+            other = Path(entry['exe']).with_name('other.exe')
+            shutil.copyfile(entry['exe'], other)  # The initialized EXE stays in place.
+            entry['exe'] = str(other)
+            source.write_text(json.dumps(document))
+            return original(root, verified)
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(update, 'list_caches', side_effect=switch):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        self.assertIn('registration changed', json.dumps(report, ensure_ascii=False))
+        self.assertEqual(before, self.games_config.read_bytes())
+
+    def test_a_revert_stopped_after_a_replacement_is_not_shown_as_unchanged(self):
+        self.add_cache(self.old)
+        import preparation_binding as binding
+        original, calls = binding._atomic, []
+
+        def second_fails(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError(5, 'write refused')
+            return original(*args, **kwargs)
+        with unittest.mock.patch.object(binding, '_atomic', side_effect=second_fails):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        status = self.status_output()
+        self.assertIn('設定（3つのファイル）の書き換えが途中で止まりました', status)
+        self.assertIn('backups/', status)
+        self.assertNotIn('設定は変わっていません', status)
 
     def test_changed_game_executable_stops(self):
         import preparation_selection as selection

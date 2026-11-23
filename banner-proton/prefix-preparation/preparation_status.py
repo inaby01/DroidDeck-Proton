@@ -146,13 +146,20 @@ MOVE_TEXT = {
 
 def _interrupted_revert(context, key):
     """A revert that stopped after its note and before its binding record (design 4.7, 4.9), or None."""
-    from preparation_proton_update import history
+    from preparation_proton_update import CACHES, history
     management = context["management"]
     if not os.path.lexists(management):
         return None
     try:
         with PrivateStore(management) as store:
             items, orphans = history(store, key)
+            moved_now = {}
+            for record in orphans + [item["note"] for item in items if item["note"] is not None]:
+                try:
+                    with store.directory((CACHES, record["binding_id"])) as fd:
+                        moved_now[record["binding_id"]] = len(store._names(fd))
+                except FileNotFoundError:
+                    moved_now[record["binding_id"]] = 0
     except (OSError, ValueError, TypeError, KeyError):
         return None
     # A later completed binding (a revert run again, a move) supersedes the interrupted one.
@@ -164,8 +171,19 @@ def _interrupted_revert(context, key):
     for record in sorted(unfinished, key=lambda value: value["created_ns"], reverse=True):
         move = record.get("cache_move")
         if record["note_kind"] == "revert" and move and record["created_ns"] > latest:
-            return {"binding_id": record["binding_id"], "moved": len(move.get("moved", [])),
-                    "planned": len(move.get("planned", [])), "destination": move.get("destination")}
+            binding = next((item for item in items if item["binding_id"] == record["binding_id"]), None)
+            # Settings are unchanged only without a binding record, or when it failed before its first replacement;
+            # a running record may have replaced a file just before it stopped.
+            unchanged = binding is None or (binding["status"] == "binding-failed" and not binding["completed_files"])
+            return {"binding_id": record["binding_id"],
+                    # The folder too: a rename may have finished just before the note was updated.
+                    "moved": max(len(move["moved"]), moved_now.get(record["binding_id"], 0)),
+                    "planned": len(move["planned"]), "destination": move["destination"],
+                    "settings": "unchanged" if unchanged else "may-be-partial",
+                    "binding_status": None if binding is None else binding["status"],
+                    "backup": os.path.isdir(Path(management) / "backups" / record["binding_id"]) and
+                    not os.path.islink(Path(management) / "backups" / record["binding_id"]),
+                    "completed_files": [] if binding is None else list(binding["completed_files"])}
     return None
 
 
@@ -309,8 +327,15 @@ def _game(key, listed, title, context):
     interrupted = _interrupted_revert(context, key)
     if interrupted is not None:
         entry["interrupted_revert"] = interrupted
-        print(f"  戻すときのキャッシュの退避が途中で止まりました（{interrupted['moved']}か所を移しました。場所: 私有記録の " +
-              text(interrupted["destination"]) + "）。設定は変わっていません。個別の操作の6でもう一度戻せます。", file=output)
+        if interrupted["settings"] == "unchanged":
+            print(f"  戻すときのキャッシュの退避が途中で止まりました（{interrupted['moved']}か所を移しました。場所: 私有記録の " +
+                  text(interrupted["destination"]) + "）。設定は変わっていません。個別の操作の6でもう一度戻せます。", file=output)
+        else:
+            print(f"  戻すときに、設定（3つのファイル）の書き換えが途中で止まりました（キャッシュは{interrupted['moved']}か所を"
+                  "移しました。場所: 私有記録の " + text(interrupted["destination"]) + "）。設定が一部だけ書き換わっている"
+                  "可能性があります。" + ("書き換える前の設定のバックアップは私有記録の backups/" +
+                                          text(interrupted["binding_id"]) + " にあります。" if interrupted["backup"] else "") +
+                  "ツールではもう一度戻せません。DroidDeckの画面と同期のコマンドで割り当てを直してください。", file=output)
     try:
         if title is None:
             entry.update(record="several" if len(listed) != 1 else listed[0]["status"],

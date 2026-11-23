@@ -103,10 +103,21 @@ def bound_files(before, key, directory, tool):
     return found
 
 
+def _mapping_entry(raw, key):
+    """The target's whole ``CompatToolMapping`` entry (``name``, ``config``, ``priority``...), unpacked."""
+    node = Document(raw, value_limit=MAX_JSON).node(STEAM_PATH).value
+    mapping = node.get("CompatToolMapping") if type(node) is dict else None
+    entry = mapping.value.get(key) if mapping is not None and type(mapping.value) is dict else None
+
+    def unpack(item):
+        return {name: unpack(value) for name, value in item.value.items()} if type(item.value) is dict else item.value
+    return None if entry is None else unpack(entry)
+
+
 def target_items(files, key):
     """The target's entries in the three files that a binding writes (design 3.5 pin).
 
-    The selection entries, the ``config.vdf`` mapping name, and the target's part of
+    The selection entries, the whole ``config.vdf`` mapping entry, and the target's part of
     ``state.json``'s ``auto``, ``picked`` and ``native_choices`` (``plan_binding`` changes
     them). Other games' entries are not part of it.
     """
@@ -114,7 +125,8 @@ def target_items(files, key):
     current = current_selection(files, key)
     state = _json(files["state"], {})
     auto = state.get("auto")
-    return {**current, "auto": auto.get(key) if type(auto) is dict else None,
+    return {**current, "config_entry": _mapping_entry(files["config"], key),
+            "auto": auto.get(key) if type(auto) is dict else None,
             "picked": key in state.get("picked", []) if type(state.get("picked", [])) is list else None,
             "native_choice": key in state.get("native_choices", []) if type(state.get("native_choices", [])) is list
             else None}
@@ -450,8 +462,8 @@ def move_check(store, steam, config, key, pinned, targets=None):
         items, _ = history(store, key)
         _, placed = placed_roots(store, steam, directory)
         again = classify(fresh.before, key, directory, placed, steam, tuple(config.get("supersedes", ())), items)
-        require({k: again[k] for k in ("kind", "source", "choice")} == {k: pinned[k] for k in ("kind", "source", "choice")},
-                "move decision changed")
+        compared = ("kind", "source", "choice", "batch", "reason")
+        require({k: again[k] for k in compared} == {k: pinned[k] for k in compared}, "move decision changed")
     return check
 
 
@@ -941,7 +953,9 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
                 moved = {"done": False}
                 with PrivateStore(management) as store, store.locked(lock):
                     def ready():
-                        check_game_identity(record=record, record_sha256=digest, source=source, games=games, steam=steam,
+                        current_source, _, now = selection.registration_catalog(environment)
+                        require(current_source == source and now.get(key) == games.get(key), "registration changed")
+                        check_game_identity(record=record, record_sha256=digest, source=source, games=now, steam=steam,
                                             home=home)
                         require(stop.check()["clear_in_view"], "target process view not clear")
                         require(observe_slot_users(target_root, proc_root)["clear"], "revert target slot in use")

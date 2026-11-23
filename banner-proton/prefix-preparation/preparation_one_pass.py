@@ -843,7 +843,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 print("prefixに " + text(target_name(item)) + " を入れています。", file=output, flush=True)
                 with droiddeck_lock(settings):
                     session = PrefixDllSession(dll_plan, store, refresh_dll, dll_plan.digest, stop)
-                    noted(store, "prefix-dll", {"record_id": session.record["record_id"]})
+                    # One key per DLL, so a second DLL's ID does not replace the first one's (design 6).
+                    noted(store, "prefix-dll:" + item["dependency_id"], {"record_id": session.record["record_id"]})
                     live.update(step=report["steps"][-1], session=session)
                     result = session.apply()
                 report["steps"][-1]["record"] = result

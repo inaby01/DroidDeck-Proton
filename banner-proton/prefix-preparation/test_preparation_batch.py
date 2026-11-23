@@ -266,6 +266,29 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         outcomes = {item['kind']: item['outcome'] for item in report['items']}
         self.assertEqual(outcomes.get('resume'), 'done', output)
 
+    def test_an_interrupted_run_lists_the_games_it_never_reached(self):
+        journal = batch.Journal(self.batch_context())
+        journal.listed([{'kind': 'save-manifest'}, {'kind': 'new', 'app_id': '42'}, {'kind': 'new', 'app_id': '43'}])
+        journal.save()
+        journal.step('42', 'new', 'running')
+        with PrivateStore(self.f.store_root) as store:
+            record, _ = store.read_record(batch.RUNS, journal.run_id + '.json')
+            outcomes = batch.reconcile(store, record)
+        self.assertEqual(outcomes, {'-': 'not-started', '42': 'skipped', '43': 'not-started'})
+
+    def test_each_dll_keeps_its_own_id_in_the_progress_record(self):
+        journal = batch.Journal(self.batch_context())
+        journal.listed([{'kind': 'resume', 'app_id': '42'}])
+        journal.save()
+        with PrivateStore(self.f.store_root) as store, store.locked('a' * 64):
+            journal.ids(store, '42', 'prefix-dll:first', {'record_id': 'prefixdll-' + '1' * 32})
+            journal.ids(store, '42', 'prefix-dll:second', {'record_id': 'prefixdll-' + '2' * 32})
+        ids = journal.record['games'][0]['ids']
+        self.assertEqual(sorted(value['record_id'] for value in ids.values()),
+                         ['prefixdll-' + '1' * 32, 'prefixdll-' + '2' * 32])
+        lines = batch._partial_lines(self.batch_context(), {'kind': 'resume'}, {'ids': ids})
+        self.assertIn('「prefixのDLLの用意」の途中かその後で止まりました。', lines)
+
     def test_a_run_of_another_kind_than_confirmed_stops(self):
         ctx = self.batch_context()
         profile = self.config['game_preparation']['profiles'][0]['profile_id']
@@ -459,6 +482,18 @@ class MoveBatchTests(BatchFixture, UPDATE['MoveFixture'], ONE['OnePassTests']):
         self.assertEqual(entry['outcome'], 'skipped', output)
         self.assertTrue(entry['run_stopped'])
         self.assertIn('このゲームによらない理由で止まった', output)
+        self.assertEqual(self.selection()['kind'], 'move')
+
+    def test_the_droiddeck_settings_lock_held_elsewhere_ends_the_run(self):
+        import preparation_binding as binding
+
+        def locked(settings):
+            raise batch.Invalid('DroidDeck settings are locked')
+        with unittest.mock.patch.object(binding, 'droiddeck_lock', side_effect=locked):
+            _, report, output = self.first_screen('1\n')
+        entry = next(item for item in report['items'] if item['kind'] == 'move')
+        self.assertEqual(entry['outcome'], 'skipped', output)
+        self.assertTrue(entry['run_stopped'])
         self.assertEqual(self.selection()['kind'], 'move')
 
     def test_games_on_preparation_slots_are_preferred_for_confirmation(self):

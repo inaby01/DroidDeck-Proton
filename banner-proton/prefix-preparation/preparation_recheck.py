@@ -239,6 +239,8 @@ def _game_registration(progress, record, source, games, steam):
     progress.append("recheck-registration-pin")
     exe = safe_path(games[key]["exe"])
     target = pin_registration(source, key, exe.parent, steam)
+    # The registration read now must still name the EXE of the given catalog (it may have changed since).
+    require(target.exe == exe, "game registration EXE changed")
     # The game EXE must still be the one measured when the prefix was initialized.
     progress.append("recheck-game-registration")
     require(registration_identity(exe, games[key]["title"]) ==

@@ -195,4 +195,3 @@ def save_after_verification(store, installation):
         return {"state": save(store, installation.customization.directory, record_for_installation(installation))}
     except (OSError, Invalid, TypeError, KeyError, ValueError, UnicodeError) as error:
         return {"state": "failed", "error_class": type(error).__name__, "errno": getattr(error, "errno", None)}
-

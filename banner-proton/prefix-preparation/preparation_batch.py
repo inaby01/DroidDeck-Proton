@@ -21,6 +21,8 @@ from preparation_common import VERSION, Invalid, require, safe_path
 MODE = "batch-result"
 RUNS = "batch-runs"
 RUNS_LOCK = hashlib.sha256(b"droiddeck-batch-runs").hexdigest()  # One lock file for every run's progress record.
+# Locks held by someone else: not about the game, so the run ends instead of going on (design 6).
+LOCK_REASONS = ("preparation already locked", "DroidDeck settings are locked")
 OUTCOMES = {"done": "完了", "not-started": "未着手", "skipped": "書き込み前に中止", "partial": "一部適用・要確認",
             "running": "実行中に中断・要確認"}
 STAGE_TEXT = {
@@ -384,10 +386,18 @@ class Journal:
     def step(self, app_id, step, outcome=None, **extra):
         found = next((item for item in self.record["games"] if item["app_id"] == app_id and item["step"] == step), None)
         if found is None:
-            found = {"app_id": app_id, "step": step, "started_ns": time.time_ns(), "outcome": None}
+            found = {"app_id": app_id, "step": step, "started_ns": None, "outcome": None}
             self.record["games"].append(found)
+        if outcome == "running" and found["started_ns"] is None:
+            found["started_ns"] = time.time_ns()
         found.update(outcome=outcome, **extra)
         self.save()
+
+    def listed(self, items):
+        """Every confirmed item, not started yet, so an interrupted run shows the ones it never reached."""
+        for item in items:
+            self.record["games"].append({"app_id": item.get("app_id") or "-", "step": item["kind"], "started_ns": None,
+                                         "outcome": "not-started"})
 
 
 ID_RECORDS = {"trial_id": "game-prefixes", "record_id": "prefix-dlls", "install_id": "dependency-installs",
@@ -588,7 +598,10 @@ def _run_move(ctx, item, listing, journal):
         return "skipped", {"error": describe_error(failed.error, "batch-move-lock"), "run_stop": True}
     except (OSError, ValueError, TypeError, KeyError) as error:
         from preparation_dependency_install import describe_error
-        return ("partial" if started else "skipped"), {"error": describe_error(error, "batch-move")}
+        detail = {"error": describe_error(error, "batch-move")}
+        if not started and str(error) in LOCK_REASONS:
+            detail["run_stop"] = True  # The DroidDeck settings lock taken inside the binding writer.
+        return ("partial" if started else "skipped"), detail
 
 
 class _LockFailed(Exception):
@@ -625,7 +638,10 @@ def _run_one_pass(ctx, item, journal):
         return "done", {"report": report}
     wrote = bool(report.get("writes_may_exist")) or any(step.get("record") or step.get("result") or step.get("step") == "initialize"
                                                         for step in report.get("steps", []))
-    return ("partial" if wrote else "skipped"), {"report": report}
+    detail = {"report": report}
+    if not wrote and report.get("reason") in LOCK_REASONS:
+        detail["run_stop"] = True
+    return ("partial" if wrote else "skipped"), detail
 
 
 def _targets_now(ctx, key):
@@ -649,6 +665,7 @@ def run(ctx, listing, protected, report=None):
                              for item in listing["items"]],
                    "skipped_before": listing["skipped"], "groups": listing["groups"], "preparation_complete": False})
     name = journal.run_id + ".json"
+    journal.listed(listing["items"])
     journal.save()
     state = {"shared": None}
 
@@ -692,7 +709,7 @@ def run(ctx, listing, protected, report=None):
                 outcome, detail = _run_one_pass(ctx, item, journal)
                 result = detail["report"]
                 entry.update(outcome=outcome, status=result.get("status"), reason=result.get("reason"),
-                             stage=result.get("stage"), report=result)
+                             stage=result.get("stage"), report=result, **({"run_stop": True} if detail.get("run_stop") else {}))
         journal.step(app, item["kind"], entry["outcome"])
         write_results()
         if entry["outcome"] == "partial" or entry.pop("run_stop", False):
@@ -766,7 +783,7 @@ def _partial_lines(ctx, item, entry):
     if item["kind"] in ("move", "align"):
         steps = ["binding"]
     else:
-        steps = [step for step in STAGE_TEXT if step in ids]
+        steps = [step for step in STAGE_TEXT if any(key.split(":", 1)[0] == step for key in ids)]
         stage = (entry.get("report") or {}).get("stage")
         if stage in STAGE_TEXT and stage not in steps:
             steps.append(stage)
@@ -869,6 +886,8 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
                     outcomes = reconcile(store, record, home=ctx.home, files=files, details=details)
                     print("前回のまとめての実行が途中で終わっています（" + record["run_id"][:14] + "…）:", file=output)
                     for app, outcome in outcomes.items():
+                        if app == "-":
+                            continue  # The slot data item: nothing of a game.
                         extra = ""
                         if outcome == "partial":
                             extra = ("（設定はすべて書き換え済みで、最後の確認だけが済んでいません。"

@@ -1207,13 +1207,15 @@ same numbers, followed by two new ones.
   to register one game first. The list is then built again and confirmed a second time.
 - Running: each step plans again under its own locks. Before a game starts, its entries
   in `games.json`, `state.json` (`games_applied`, and its part of `auto`, `picked`,
-  `native_choices`) and `config.vdf` must be the listed ones; menu 1 additionally compares
+  `native_choices`) and `config.vdf` (its whole mapping entry) must be the listed ones; a
+  move's decision, including whether the batch run may do it, must be the listed one; menu 1 additionally compares
   its fixed values (except the whole-file binding digest) and stops when more actions are
   needed than confirmed, when the kind (new or resume) differs, or when a step under the
   lock would write something not confirmed; the listed entries are compared again under
   the lock. A game stopped before writing is skipped; a stop after a game started writing,
-  or a failure not about that game (opening the private store or taking a move's lock),
-  ends the run. A failure to save the slot data is reported and the run goes on.
+  or a failure not about that game (opening the private store, a private or DroidDeck
+  settings lock held elsewhere), ends the run. Every listed item is in the progress record
+  from the start, and each prefix DLL keeps its own ID. A failure to save the slot data is reported and the run goes on.
   Outcomes per game: done, not started, stopped before writing, partially applied. A
   partial game names the stage it stopped at, and the binding backup only when it exists.
 - Progress (`batch-runs/`): before a step writes, the record ID it uses (`trial_id`,
@@ -1254,7 +1256,9 @@ same numbers, followed by two new ones.
   dependencies or the bundle payload; it checks the initialization record, the game
   EXE, the prefix, the target slot (registered tool, saved data, prefix version) and that
   no process uses the target slot (executable, working directory or a path argument; the
-  launcher is a Python script), and its placement record again at writing time. Slots that
+  launcher is a Python script), and its placement record and the game's registration again
+  at writing time. The status check tells a revert that stopped before any setting changed
+  (caches moved, operation 6 again) from one that stopped while replacing the settings. Slots that
   are not targets are shown with the reason and the manual route (the DroidDeck screen and
   the sync command); dependency states are shown but never required. Only the
   `__pycache__` directories the verification accepted are moved into
