@@ -196,7 +196,8 @@ def _canonical(text):
             # Strings by the bytes Wine keeps (UTF-16 with its terminator), so "A" equals hex(1):41,00,00,00
             # but not hex(1):41,00 (Codex final recheck M).
             number = {"sz": 1, "expand_sz": 2}.get(kind) or int(kind[4:-1])
-            return ("hex(" + format(number, "x") + ")", (value + "\0").encode("utf-16-le").hex())
+            # Wine writes a character outside the basic plane as two escaped UTF-16 units (Codex final recheck M1).
+            return ("hex(" + format(number, "x") + ")", (value + "\0").encode("utf-16-le", "surrogatepass").hex())
         return ("data", (kind, value))
     if match:
         parts = [part.strip() for part in match.group(2).split(",")]
@@ -290,10 +291,13 @@ def scan_lines(lines, links_seen=frozenset()):
                 canonical = _VALUE_KEYS[folded]
                 if canonical in entry["values"]:
                     entry["duplicate"] = True
-                try:
-                    entry["values"][canonical] = _data(rest[1:])
-                except Invalid:
-                    entry["values"][canonical] = ("raw", rest[1:])  # Never equal to the template's values.
+                # Only the forms DroidDeck and Wine use for these values are decoded; anything else (a string
+                # written as hex, which may lack its terminator) stays raw and never equals them (Codex final recheck M2).
+                data = rest[1:]
+                if re.fullmatch(r'dword:[0-9a-f]{8}|"(?:[^"\\]|\\.)*"', data):
+                    entry["values"][canonical] = _data(data)
+                else:
+                    entry["values"][canonical] = ("raw", data)
             else:
                 if any(item[0] == folded for item in entry["others"]):
                     entry["duplicate"] = True

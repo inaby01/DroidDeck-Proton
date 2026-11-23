@@ -432,6 +432,18 @@ class FifthReviewTests(unittest.TestCase):
         self.assertNotEqual(kept('"S"="A"\n'), kept('"S"=hex(1):41,00\n'))
         self.assertNotEqual(kept('"S"="A"\n'), kept('"S"=hex(1):41,00,00,00,00,00\n'))
 
+    def test_a_character_outside_the_basic_plane_is_read(self):
+        text = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n"S"="\\xd83d\\xde00"\n', 1)
+        entry = scan(text)["keys"]["native-x86"]
+        self.assertEqual(len(entry["others"]), 1)
+
+    def test_a_target_string_written_as_hex_never_equals_the_template(self):
+        hexed = block().replace('"Version"="' + VERSION + '"',
+                                '"Version"=hex(1):' + ",".join(f"{b:02x}" for b in VERSION.encode("utf-16-le")), 1)
+        found = scan(hexed)
+        self.assertEqual(found["keys"]["native-x86"]["values"]["Version"][0], "raw")
+        self.assertEqual(vc.evaluate(found, NO_MFC, template(), initial(hexed), "a" * 64)["reason"], "values-differ")
+
     def test_an_empty_key_of_the_template_is_kept(self):
         tmpl = template(archive={"native-x86": {}})
         plan = vc.evaluate(scan(block()), NO_MFC, tmpl, initial(block()), "a" * 64)["keys"]
