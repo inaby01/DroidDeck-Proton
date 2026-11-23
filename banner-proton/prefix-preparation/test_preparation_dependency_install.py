@@ -1667,6 +1667,21 @@ class InheritedVcTests(InstallTests):
         self.assertEqual(result['inherited_vc_record']['state'], 'absent-after-release')
         self.assertFalse(any(call.args[0][1:3] == ('runinprefix', 'cmd.exe') for call in spawned.call_args_list))
 
+    def test_a_vc_registration_after_the_write_back_is_not_taken_as_done(self):
+        archive = {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
+        self.template.stop()
+        with patch.object(self.vc, 'read_template', return_value=VC['template'](tail_sha256=None, archive=archive)):
+            with patch.object(dep.DependencyInstallSession, '_stage', side_effect=KeyboardInterrupt), \
+                    self.assertRaises(KeyboardInterrupt):
+                self.silent_flow()
+            registry = self.install_plan().recheck.compatdata / 'pfx/system.reg'
+            with registry.open('a') as stream:
+                stream.write('[Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\{A}] 1\n'
+                             '"DisplayName"="Microsoft Visual C++ 2015-2019 Redistributable (x86) - 14.24.28127"\n')
+            session, result, _ = self.silent_flow()
+        self.template.start()
+        self.assertEqual((session.release_stopped, result['status']), ('vc-registered-without-mfc140', 'stopped-before-installer'))
+
     def test_the_template_s_original_values_are_written_back(self):
         archive = {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
         self.template.stop()

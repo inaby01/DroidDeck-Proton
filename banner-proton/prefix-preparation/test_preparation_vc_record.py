@@ -444,6 +444,12 @@ class FifthReviewTests(unittest.TestCase):
         self.assertEqual(found["keys"]["native-x86"]["values"]["Version"][0], "raw")
         self.assertEqual(vc.evaluate(found, NO_MFC, template(), initial(hexed), "a" * 64)["reason"], "values-differ")
 
+    def test_an_escape_the_parser_does_not_read_in_a_target_value_is_not_unreadable(self):
+        text = block().replace('"Version"="' + VERSION + '"', '"Version"="v14\\a"', 1)
+        found = scan(text)
+        self.assertEqual(found["keys"]["native-x86"]["values"]["Version"][0], "raw")
+        self.assertEqual(vc.evaluate(found, NO_MFC, template(), initial(text), "a" * 64)["reason"], "values-differ")
+
     def test_an_empty_key_of_the_template_is_kept(self):
         tmpl = template(archive={"native-x86": {}})
         plan = vc.evaluate(scan(block()), NO_MFC, tmpl, initial(block()), "a" * 64)["keys"]

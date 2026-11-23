@@ -294,10 +294,11 @@ def scan_lines(lines, links_seen=frozenset()):
                 # Only the forms DroidDeck and Wine use for these values are decoded; anything else (a string
                 # written as hex, which may lack its terminator) stays raw and never equals them (Codex final recheck M2).
                 data = rest[1:]
-                if re.fullmatch(r'dword:[0-9a-f]{8}|"(?:[^"\\]|\\.)*"', data):
-                    entry["values"][canonical] = _data(data)
-                else:
-                    entry["values"][canonical] = ("raw", data)
+                try:
+                    entry["values"][canonical] = (_data(data) if re.fullmatch(r'dword:[0-9a-f]{8}|"(?:[^"\\]|\\.)*"', data)
+                                                  else ("raw", data))
+                except Invalid:
+                    entry["values"][canonical] = ("raw", data)  # An escape the parser does not read (Fable L).
             else:
                 if any(item[0] == folded for item in entry["others"]):
                     entry["duplicate"] = True

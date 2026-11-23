@@ -1021,7 +1021,9 @@ class DependencyInstallSession:
             return self._release_stop(vc.failed("registry-unreadable:" + type(error).__name__))
         previous = vc.unfinished(history)
         done = vc.completed(history) if previous is None else None
-        if done is not None and vc.verify(done["inherited_vc_record"]["keys"], scan) is None:
+        if done is not None and vc.verify(done["inherited_vc_record"]["keys"], scan) is None and \
+                not scan["uninstall"]["unreadable"] and not scan["uninstall"]["vc14"]:
+            # The same VC++ registration checks as a resume (Codex final recheck L2); otherwise the usual decision runs.
             # Already released and still as the release left it: nothing to do (Codex final recheck M).
             item = done["inherited_vc_record"]
             self.record["inherited_vc_record"] = {"state": "absent-after-release", "values": 0, "keys": item["keys"],
