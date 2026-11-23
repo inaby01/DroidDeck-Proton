@@ -1095,7 +1095,7 @@ folder. `mfc-local` stays reserved and blocked.
   stops.
 - Menu 12: the confirmation lists each DLL (name, asset hash, destination); the fixed
   values gain `dlls` (recipe digest and measured asset per DLL); a missing or different
-  asset stops before anything is written. Since the 0.31.0 follow-up, a resumed game whose
+  asset stops before anything is written. Since 0.31.1, a resumed game whose
   DLL is already placed no longer needs the asset file (only a DLL still to place does);
   the measured asset stays part of the confirmed values. On resume, a profile that changed
   since the initialization (other than an accepted later revision) stops before any step.
@@ -1274,3 +1274,13 @@ same numbers, followed by two new ones.
   readiness keys are only what is checked; a normal binding can only assign the bundle
   slot and a revert never can. The bundle slot and the supplementary-record callback are
   required arguments of the writer.
+
+## Prefix DLL assets of prepared games (0.31.1)
+
+After the 0.31.0 device check: a game whose prefix DLLs are already placed no longer needs
+the asset files in the folder (a ready game was listed under "not done" when `mfc42.dll`
+was absent). An initialized game needs a DLL's asset only when that DLL still has to be
+placed; every missing asset is reported at once; and when a DLL is not placed for another
+reason (a running game, a changed layout), that reason is shown instead of the asset. A
+new prefix still checks every DLL asset before anything is written, and the measured
+assets stay part of the confirmed values.

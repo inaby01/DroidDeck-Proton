@@ -465,6 +465,42 @@ class DllStatusTests(StatusMixin, ONE['PrefixDllOnePassTests']):
         _, menu, _, _ = self.run_menu('1\n1\n1\n')
         self.agrees(entry, menu)
 
+    def test_a_dll_to_place_with_its_asset_gone_stops_before_writing_in_both(self):
+        self.initialize()
+        (self.f.fixture.source.root / 'mfc42.dll').unlink()
+        _, report, output = self.status()
+        entry = self.entry(report)
+        self.assertEqual((entry['next']['stage'], entry['next']['reason']),
+                         ('one-pass-precheck', 'dll-asset:mfc42-prefix:asset-missing'), output)
+        _, menu, _, _ = self.run_menu('1\n1\n1\n')
+        self.agrees(entry, menu)
+        self.assertEqual((self.dll_records(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
+
+    def test_the_dll_step_under_the_lock_still_refuses_a_missing_asset(self):
+        self.initialize()
+        (self.f.fixture.source.root / 'mfc42.dll').unlink()
+        proceed = {'next': 'continue', 'actions': ['prefix-dll:mfc42-prefix', 'softdenchi-silent', 'binding'], 'steps': []}
+        with patch.object(ONE['one_pass'], 'evaluate_resume', return_value=proceed):
+            _, menu, _, _ = self.run_menu('1\n1\n1\n')
+        self.assertEqual(menu['stage'], 'prefix-dll', menu)
+        self.assertIn('asset:asset-missing', menu['reason'])
+        self.assertEqual((self.dll_records(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
+
+    def test_every_missing_dll_asset_is_reported_at_once(self):
+        recipes = self.config['game_preparation']['recipes']
+        first = next(item for item in recipes if item['dependency_id'] == 'mfc42-prefix')
+        recipes.append({**first, 'dependency_id': 'second-prefix',
+                        'asset': {**first['asset'], 'asset_id': 'second-fixture', 'filename': 'second.dll'}})
+        self.config['game_preparation']['profiles'][0]['dependencies'].append('second-prefix')
+        (self.f.fixture.source.root / 'second.dll').write_bytes((self.f.fixture.source.root / 'mfc42.dll').read_bytes())
+        self.initialize()
+        for name in ('mfc42.dll', 'second.dll'):
+            (self.f.fixture.source.root / name).unlink()
+        _, report, output = self.status()
+        entry = self.entry(report)
+        self.assertEqual(entry['next']['reason'], 'dll-asset:mfc42-prefix:asset-missing,dll-asset:second-prefix:asset-missing',
+                         output)
+
     def test_entry_1_new_and_resumed_pass_while_asset_timestamps_change_on_every_read(self):
         with FOLDER['touching_asset_folder'](self.f.fixture.source.root) as touched:
             _, report, output, _ = self.run_menu('1\n1\n1\n1\n')

@@ -725,6 +725,15 @@ class PrefixDllOnePassTests(OnePassTests):
         self.assertIn('uninspected:target-process-view-not-clear', report['reason'])
         self.assertEqual((self.dll_records(), (self.wow64() / 'mfc42.dll').exists()), ([], False))
 
+    def test_a_running_game_is_the_reason_shown_even_without_the_asset(self):
+        self.initialize()
+        (self.f.fixture.source.root / 'mfc42.dll').unlink()
+        with patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):
+            _, report, _, _ = self.run_detail('12\n1\n1\n')
+        self.assertEqual(report['stage'], 'prefix-dll', report)
+        self.assertIn('uninspected:target-process-view-not-clear', report['reason'])
+        self.assertNotIn('dll-asset', report['reason'])
+
     def test_reason_never_carries_the_os_error_text(self):
         self.initialize()
         with patch.object(prefix_dll, '_pe_of', side_effect=PermissionError(13, 'denied', '/private/secret/path')):

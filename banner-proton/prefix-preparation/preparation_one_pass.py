@@ -375,6 +375,7 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
         # Bytes the earlier steps of this run write, per path: each later step's space check counts them,
         # as its plan in the run would see the space after those writes.
         consumed = []
+        missing_items, missing = [], []  # DLLs to place whose asset file is missing or differs (all are shown).
         for item in [recipes[dep] for dep in profile["dependencies"] if recipes[dep]["handler"] == PREFIX_DLL]:
             stage.append("prefix-dll")
             plan = plan_prefix_dll(record=record, record_sha256=record_digest, item=item, source=source, games=games,
@@ -382,11 +383,14 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
             steps.append({"step": "prefix-dll", "evaluated": True, "plan": plan.summary()})
             if plan.action == "skip":
                 continue  # Already in the prefix: the asset file is not needed.
-            missing = sorted(blocker.removeprefix("asset:") for blocker in plan.blockers if blocker.startswith("asset:"))
-            if missing:
-                return stopped(*_dll_asset_stop([item], ["dll-asset:" + item["dependency_id"] + ":" + reason
-                                                         for reason in missing]))
-            blockers = list(plan.blockers)
+            asset = sorted(blocker.removeprefix("asset:") for blocker in plan.blockers if blocker.startswith("asset:"))
+            if asset and plan.action != "stop":
+                # Only a DLL this step would place needs its asset; reported after every DLL is looked at.
+                missing_items.append(item)
+                missing.extend("dll-asset:" + item["dependency_id"] + ":" + reason for reason in asset)
+                continue
+            # A DLL that is not placed for another reason (a running game, a changed layout...) shows that reason.
+            blockers = [blocker for blocker in plan.blockers if not blocker.startswith("asset:")]
             if not blockers:
                 joint = _capacity(consumed + list(dll_needs(plan.recheck, item["asset"])))
                 steps[-1]["capacity_after_earlier_steps"] = joint
@@ -397,6 +401,8 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
             consumed.append((plan.recheck.compatdata, item["asset"]["expected_size"] or 0))
             pending.add(item["dependency_id"])
             actions.append("prefix-dll:" + item["dependency_id"])
+        if missing:
+            return stopped(*_dll_asset_stop(missing_items, missing))
         if uses_softdenchi:
             stage.append("softdenchi-state")
             base = plan_recheck(record=record, record_sha256=record_digest, source=source, games=games, records=RECORDS,
