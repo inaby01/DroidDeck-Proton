@@ -705,6 +705,20 @@ class TextTests(unittest.TestCase):
             self.assertIn(reason, batch.SKIP_TEXT)
 
 
+class LogCopyTests(unittest.TestCase):
+    def test_a_failure_while_offering_copies_does_not_stop_a_finished_run(self):
+        import io
+        import types
+        view = {'install_id': 'depinstall-' + 'a' * 32, 'app_id': '42', 'state': 'final'}
+        report = {'items': [{'app_id': '42', 'report': {'steps': [{'installer_log': view, 'record': {'status': 'partial'}}]}}]}
+        ctx = types.SimpleNamespace(output=io.StringIO())
+        with unittest.mock.patch.object(batch, '_save_shared_now', side_effect=OSError(5, 'refused')):
+            batch._offer_log_copies(ctx, [], report, {'items': [{'app_id': '42', 'title': 'Example'}]})
+        self.assertEqual(report['installer_log_copies_error'], 'OSError')
+        self.assertNotIn('status', report)
+        self.assertIn('結果は保存済みです', ctx.output.getvalue())
+
+
 class NewDeviceTests(unittest.TestCase):
     def test_a_run_creates_the_private_folders(self):
         import io

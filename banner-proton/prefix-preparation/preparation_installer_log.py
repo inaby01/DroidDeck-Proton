@@ -451,7 +451,7 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder):
 COPY_LOCK = hashlib.sha256(b"droiddeck-installer-logs").hexdigest()  # One lock file for every shared copy.
 
 
-def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, home, stream, output, text):
+def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, home, stream, output, text, labels=None):
     """Ask, per eligible log, whether to copy it next to the shared result (design 3.7). Returns the copies made.
 
     ``saved`` must be the shared path of this result; a result kept privately is never accompanied by a copy.
@@ -463,6 +463,8 @@ def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, ho
         return done
     for view in candidates:
         install_id = view["install_id"]
+        if labels and labels.get(install_id):
+            print("ゲーム: " + text(labels[install_id]), file=output)
         print("導入のログ（導入のときの標準エラー全体、" + str(view.get("bytes", 0)) + "バイト）を、次のフォルダーに " +
               "installer-" + install_id + ".log として写せます: " + text(str(shared_folder)), file=output)
         print("端末のパス・ゲームのフォルダー名を含みます。共有のフォルダーに置いたものは、保存・複製された分を回収できません。",
@@ -512,11 +514,17 @@ def logs_of(store_root, app_id):
     return found
 
 
-def rewrite_result(path, report):
-    """Replace the saved result atomically to note the copies made; a failure leaves the earlier result."""
+def rewrite_result(path, copies):
+    """Add the copies made to a saved result, keeping everything it holds (atomic; a failure leaves it as it was)."""
     try:
         path = Path(path)
-        raw = (json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            saved = json.loads(stream.read(2 * 1024 * 1024))
+        require(type(saved) is dict, "saved result is not an object")
+        saved["installer_log_copies"] = copies
+        # The same form as the saved result (preparation_selection.save_selection_report).
+        raw = (json.dumps(saved, ensure_ascii=True, indent=2) + "\n").encode()
         temporary = path.parent / ("." + path.name + "." + secrets.token_hex(8) + ".tmp")
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
@@ -531,5 +539,5 @@ def rewrite_result(path, report):
             except FileNotFoundError:
                 pass
         return True
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, Invalid):
         return False

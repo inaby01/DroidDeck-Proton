@@ -1179,6 +1179,7 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                                                              steam, settings, home)
     management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
     protected, session, started, stage, record = [steam, settings], None, False, "selection-config", None
+    report = None
     try:
         selection.validate_selection_config(config)
         require(config.get("initialization_trial") is True and "dependency_installation" in config, "dependency installation not enabled")
@@ -1230,27 +1231,33 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                             session.start_installer()
                             print("インストーラの画面で操作してください。完了を待っています"
                                   f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
-                            _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
-                            if session.record["installer"]["status"] == "exited-processes-remain":
-                                _offer_session_proxy_stop(session, stream, output, selection._text,
-                                                          next_step=restart_then_menu9(config))
-                            from preparation_installer_log import report_view
-                            log_view = report_view(session.finalize_log())
-                            if log_view is not None:
-                                report["steps"] = [{"step": "softdenchi-interactive", "installer_log": log_view,
-                                                    "record": {"status": session.record["status"]}}]
-                                if log_view["state"] == "final" and log_view.get("writers_remaining"):
-                                    print(f"導入のログに、まだ書き手が残っています（{log_view['writers_remaining']}件）。"
-                                          "プロセスには何もしていません。", file=output)
+                            try:
+                                _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
+                                if session.record["installer"]["status"] == "exited-processes-remain":
+                                    _offer_session_proxy_stop(session, stream, output, selection._text,
+                                                              next_step=restart_then_menu9(config))
+                            finally:
+                                # Also when the wait or the stop raised (design: installer log 3.5).
+                                from preparation_installer_log import report_view
+                                log_view = report_view(session.finalize_log())
+                                if log_view is not None:
+                                    report["steps"] = [{"step": "softdenchi-interactive", "installer_log": log_view,
+                                                        "record": {"status": session.record["status"]}}]
+                                    if log_view["state"] == "final" and log_view.get("writers_remaining"):
+                                        print(f"導入のログに、まだ書き手が残っています（{log_view['writers_remaining']}件）。"
+                                              "プロセスには何もしていません。", file=output)
                         else:
                             session.decline_installer()
             report.update(installation=dict(session.record), writes=[
                 {"scope": "managed-trial-prefix-by-wine-processes"}, {"scope": "private-cache-input-journal-and-locks"},
                 {"scope": "cooperative-settings-lock-only"}])
     except (OSError, ValueError, TypeError, KeyError) as error:
+        steps = report.get("steps") if isinstance(report, dict) else None  # The installer log view, if any.
         report = {"mode": "managed-dependency-installation-result", "scope": SCOPE, "tool_version": VERSION, "stage": stage,
                   **describe_error(error, stage), "preparation_complete": False,
                   "writes": [] if not started else [{"scope": "partial-managed-installation-preserve"}]}
+        if steps:
+            report["steps"] = steps
         if session is not None:
             report["installation"] = dict(session.record)
         print("検査停止: " + selection._text(report["check"]) + " / " + selection._text(report["reason"] or report["error_class"]),

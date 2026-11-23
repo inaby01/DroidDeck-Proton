@@ -427,6 +427,21 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertNotIn('導入のログ（導入のときの標準エラー全体', output)
         self.assertTrue(step['plan']['installer_log'])
 
+    def test_a_failure_after_the_installer_still_fixes_and_reports_the_log(self):
+        self.config['diagnostics'] = {'installer_log': True}
+        real = dep._wait_loop
+
+        def then_fail(wait, *args, **kwargs):
+            outcome = real(wait, *args, **kwargs)
+            if args and args[2] == 'installer':
+                raise OSError(5, 'stop check failed')
+            return outcome
+        with patch.object(dep, '_wait_loop', side_effect=then_fail):
+            _, report, _, _ = self.run_detail('12\n1\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        step = next(item for item in report['steps'] if item['step'] == 'softdenchi-silent')
+        self.assertEqual(step['installer_log']['state'], 'final', step)
+
     def test_a_partial_install_offers_its_log_next_to_the_result(self):
         files = dict(list(DEP['FILES'].items())[:1])
         self.use_installer(DEP['installer'](files=files, exit_code=91,

@@ -962,7 +962,7 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
         print("実行しています。操作が終わるまで、ゲームを起動しないでください。", file=output, flush=True)
         run(ctx, listing, protected, report)
         show_outcomes(ctx, report, listing)
-        _offer_log_copies(ctx, protected, report)
+        _offer_log_copies(ctx, protected, report, listing)
     except (OSError, ValueError, TypeError, KeyError) as error:
         report.update(status="stopped", **describe_error(error, "batch-run"))
         print("停止: " + _text(str(report.get("reason") or report.get("error_class"))), file=output)
@@ -988,23 +988,35 @@ def _show_placement(ctx, placement):
         print(MANIFEST_TEXT[manifest["state"]], file=output)
 
 
-def _offer_log_copies(ctx, protected, report):
-    """Per attempt, after this result is saved to the shared folder (design: installer log 3.7)."""
+def _offer_log_copies(ctx, protected, report, listing):
+    """Per attempt, after this result is saved to the shared folder (design: installer log 3.7).
+
+    A failure here is reported and never turns a finished run into a stopped one.
+    """
     from preparation_installer_log import offer_shared_copies
     from preparation_one_pass import log_views
-    views, statuses = [], {}
+    titles = {item.get("app_id"): item.get("title") for item in listing.get("items", []) if item.get("app_id")}
+    views, statuses, labels = [], {}, {}
     for entry in report.get("items", []):
         found, status = log_views(entry.get("report") or {})
         views.extend(found)
         statuses.update(status)
+        for view in found:
+            labels[view["install_id"]] = f"{titles.get(entry.get('app_id'), '')} [ID {entry.get('app_id')}]"
     if not views:
         return
-    saved = _save_shared_now(ctx, protected, report)
-    if saved is None:
-        print("結果を共有のフォルダーに保存できなかったので、導入のログは写しません（私有の場所にあります）。", file=ctx.output)
+    try:
+        saved = _save_shared_now(ctx, protected, report)
+        if saved is None:
+            print("結果を共有のフォルダーに保存できなかったので、導入のログは写しません（私有の場所にあります）。",
+                  file=ctx.output)
+            return
+        copies = offer_shared_copies(views, statuses, saved=saved, shared_folder=ctx.directory, store_root=ctx.management,
+                                     home=ctx.home, stream=ctx.stream, output=ctx.output, text=_text, labels=labels)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        print("導入のログを写す処理で止まりました（" + type(error).__name__ + "）。結果は保存済みです。", file=ctx.output)
+        report["installer_log_copies_error"] = type(error).__name__
         return
-    copies = offer_shared_copies(views, statuses, saved=saved, shared_folder=ctx.directory, store_root=ctx.management,
-                                 home=ctx.home, stream=ctx.stream, output=ctx.output, text=_text)
     if copies:
         report["installer_log_copies"] = copies
 

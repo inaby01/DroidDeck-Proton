@@ -121,7 +121,7 @@ def log_views(report):
     return views, statuses
 
 
-def offer_log_copies(report, saved, directory, home, stream, output, text):
+def offer_log_copies(report, saved, directory, home, stream, output, text, private=None):
     """After the result is saved: offer each eligible log next to it (design: installer log 3.7)."""
     from preparation_installer_log import offer_shared_copies
     views, statuses = log_views(report)
@@ -133,7 +133,9 @@ def offer_log_copies(report, saved, directory, home, stream, output, text):
     if copies:
         from preparation_installer_log import rewrite_result
         report["installer_log_copies"] = copies
-        rewrite_result(saved, report)
+        for path in (saved, private):  # The shared result, and its private master when it was exported.
+            if path is not None:
+                rewrite_result(path, copies)
     return copies
 
 
@@ -638,10 +640,12 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                     session.start_installer()
                     print("インストーラーの画面で操作してください。完了を待っています"
                           f"（最初の{INSTALLER_QUIET_WAIT // 60}分は確認なしで待ちます）。", file=output, flush=True)
-                    _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
-                    if session.record["installer"]["status"] == "exited-processes-remain":
-                        _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
-                    _record_log(session, report["steps"][-1], output)
+                    try:
+                        _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
+                        if session.record["installer"]["status"] == "exited-processes-remain":
+                            _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
+                    finally:
+                        _record_log(session, report["steps"][-1], output)
         result = dict(session.record)
         report["steps"][-1]["record"] = result
         live.clear()
@@ -960,10 +964,13 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                         report["steps"].append({"step": "softdenchi-silent", "plan": dplan.summary()})
                         live.update(step=report["steps"][-1], session=session)
                         session.start_silent_installer()
-                        _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
-                        if session.record["installer"]["status"] == "exited-processes-remain":
-                            _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
-                        _record_log(session, report["steps"][-1], output)
+                        try:
+                            _wait_loop(session.wait_installer, stream, output, "installer", INSTALLER_QUIET_WAIT)
+                            if session.record["installer"]["status"] == "exited-processes-remain":
+                                _offer_session_proxy_stop(session, stream, output, text, preapproved=True, next_step=None)
+                        finally:
+                            # Also when the wait or the stop raised: the log is fixed if its conditions hold.
+                            _record_log(session, report["steps"][-1], output)
                     result = dict(session.record)
                     report["steps"][-1]["record"] = result
                     live.clear()
@@ -1023,10 +1030,10 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
     if mode != "interactive":
         return (0 if mode == "plan" else 2), report
     try:
-        saved, _ = selection.save_selection_result(directory, home, report, protected)
+        saved, private = selection.save_selection_result(directory, home, report, protected)
     except (OSError, ValueError):
         print("結果JSONを保存できませんでした。私有記録と作成物は保持しています。", file=output)
         return 1, None
     print("結果を保存しました: " + text(str(saved)), file=output)
-    offer_log_copies(report, saved, directory, home, stream, output, text)
+    offer_log_copies(report, saved, directory, home, stream, output, text, private)
     return 2, str(saved)

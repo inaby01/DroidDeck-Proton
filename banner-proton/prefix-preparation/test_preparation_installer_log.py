@@ -172,6 +172,26 @@ class CopyTests(unittest.TestCase):
         self.assertEqual((done[0]["copied"], done[0]["reason"]), (False, "not-copied:PermissionError"))
         self.assertEqual(list(self.shared.iterdir()), [])
 
+    def test_the_game_is_named_in_the_prompt(self):
+        view = {"install_id": INSTALL_ID, "app_id": "42", "state": "final", "bytes": 21}
+        output = io.StringIO()
+        log.offer_shared_copies([view], {INSTALL_ID: "partial"}, saved=self.shared / "plan-1.json", shared_folder=self.shared,
+                                store_root=self.store_root, home=self.home, stream=io.StringIO("q\n"), output=output,
+                                text=str, labels={INSTALL_ID: "Example [ID 42]"})
+        self.assertIn("ゲーム: Example [ID 42]", output.getvalue())
+
+    def test_noting_the_copies_keeps_what_the_saved_result_holds(self):
+        path = self.shared / "plan-1.json"
+        path.write_text(json.dumps({"mode": "x", "writes": [{"scope": "report-only", "filename": "plan-1.json"}],
+                                    "report_storage": {"authoritative": "private"}, "title": "日本語"}))
+        self.assertTrue(log.rewrite_result(path, [{"install_id": INSTALL_ID, "copied": True}]))
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved["writes"], [{"scope": "report-only", "filename": "plan-1.json"}])
+        self.assertEqual(saved["report_storage"], {"authoritative": "private"})
+        self.assertEqual((saved["title"], saved["installer_log_copies"][0]["copied"]), ("日本語", True))
+        self.assertNotIn("日本語", path.read_text())  # The same ASCII form as the saved result.
+        self.assertEqual(sorted(p.name for p in self.shared.iterdir()), ["plan-1.json"])
+
     def test_a_changed_log_is_not_copied(self):
         (self.folder / log.FINAL).write_bytes(b"changed after it was fixed\n")
         done, _ = self.offer("1\n")
