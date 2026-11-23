@@ -98,6 +98,7 @@ def wine_lines(stream):
         if pending is not None:
             line = pending + line.lstrip()
             pending = None
+            require(len(line) <= MAX_LOGICAL_LINE, "registry line too long")
         if _hex_value(line) and line.rstrip().endswith("\\"):
             pending = line.rstrip()[:-1]
             require(len(pending) <= MAX_LOGICAL_LINE, "registry line too long")
@@ -106,16 +107,55 @@ def wine_lines(stream):
     require(pending is None, "unterminated registry continuation")
 
 
+def _header_key(line):
+    end = 1
+    while end < len(line) and line[end] != "]":
+        end += 2 if line[end] == "\\" else 1
+    require(end < len(line), "unterminated registry key")
+    return _unescape(line[1:end]).casefold()
+
+
+def physical_links(stream):
+    """Keys followed by a physical line starting with ``#link``, whatever the lines around it.
+
+    Conservative on purpose (Codex final recheck H): however a value line before it ends, a
+    ``#link`` line marks the key of the nearest header above it, so a link is never missed.
+    """
+    links, current = set(), None
+    for raw in stream:
+        if raw.startswith(b"["):
+            current = _header_key(raw.decode("utf-8").rstrip("\r\n"))
+        elif raw.startswith(b"#link") and current is not None:
+            links.add(current)
+    return links
+
+
+def _canonical(text):
+    """A value as Wine stores it, so equal values written differently compare equal (Codex final recheck M)."""
+    lowered = text.strip().lower()
+    match = re.match(r"dword:([0-9a-f]*)", lowered)
+    if match:
+        return ("dword", int(match.group(1) or "0", 16) & 0xFFFFFFFF)  # strtoul reads the leading digits.
+    match = re.fullmatch(r"hex(?:\(([0-9a-f]{1,8})\))?:(.*)", lowered, re.DOTALL)
+    if match:
+        parts = [part.strip() for part in match.group(2).split(",")]
+        if parts and parts[-1] == "":
+            parts.pop()
+        if all(re.fullmatch(r"[0-9a-f]{1,2}", part) for part in parts):
+            return ("hex(" + (match.group(1) or "3") + ")", bytes(int(part, 16) for part in parts).hex())
+        return ("raw", lowered)
+    return ("data", _data(text))
+
+
 def _other_hash(text):
     """Other values of a key, compared before and after Wine rewrote the file (Codex final recheck M4)."""
     try:
-        return value_hash(_data(text))
+        return value_hash(_canonical(text))  # Binary data is compared by its bytes, not only its length.
     except Invalid:
-        # Formats the parser does not decode (hex(b): and others): Wine writes their digits in lower case.
-        return value_hash(("raw", text.lower() if text[:3].lower() in ("hex", "dwo") else text))
+        return value_hash(("raw", text))
 
 
-def scan_lines(lines):
+def scan_lines(lines, links_seen=frozenset()):
     """Interpret registry text lines for the six keys, their ancestors and the Uninstall entries.
 
     Only the six keys' values are decoded and kept; other values of those keys are kept as
@@ -154,6 +194,13 @@ def scan_lines(lines):
                 prefix = "\\".join(parts[:index])
                 if prefix in ANCESTORS or prefix in _BY_PATH:
                     present.add(prefix)
+            if key in links_seen:
+                # Marked by the physical scan: a link of the key itself, an ancestor or a sub-key.
+                if key in ANCESTORS:
+                    links.add(key)
+                for path, ident in _BY_PATH.items():
+                    if key == path or key.startswith(path + "\\"):
+                        keys[ident]["link"] = True
             if key in _BY_PATH:
                 current_kind = "target"
                 keys[_BY_PATH[key]]["occurrences"] += 1
@@ -215,7 +262,10 @@ def scan_file(path):
     with regular_open(safe_path(path), MAX_REGISTRY) as stream:
         before = os.fstat(stream.fileno())
         require(stream.readline(64).startswith(b"WINE REGISTRY Version 2"), "registry header missing")
-        result = scan_lines(wine_lines(stream))
+        links = physical_links(stream)
+        stream.seek(0)
+        stream.readline(64)
+        result = scan_lines(wine_lines(stream), links)
         unchanged(before, os.fstat(stream.fileno()))
     return result
 
@@ -248,8 +298,9 @@ def read_template(registry, archive_size, expected_tail_sha256):
     require(digest == expected_tail_sha256, "template tail changed")
     archive = data[:archive_size]
     require(archive.startswith(b"WINE REGISTRY Version 2"), "registry header missing")
-    archive_scan = scan_lines(wine_lines(io.BytesIO(archive.split(b"\n", 1)[1] if b"\n" in archive else b"")))
-    tail_scan = scan_lines(wine_lines(io.BytesIO(tail)))
+    body = archive.split(b"\n", 1)[1] if b"\n" in archive else b""
+    archive_scan = scan_lines(wine_lines(io.BytesIO(body)), physical_links(io.BytesIO(body)))
+    tail_scan = scan_lines(wine_lines(io.BytesIO(tail)), physical_links(io.BytesIO(tail)))
     keys, versions = {}, set()
     for ident, entry in tail_scan["keys"].items():
         if entry["occurrences"] == 0:
@@ -509,6 +560,13 @@ def validate_record(value):
         require(value["retryable"] == (reason.split(":", 1)[0] in RETRYABLE_REASONS), "retryable flag differs from reason")
     require(value["state"] not in ("releasing", "released") or value.get("keys"), "release without its keys")
     require(value["state"] != "not-evaluated" or set(value) == {"state"}, "not-evaluated carries no data")
+    by_state = {"absent": {"state", "values", "resumed_from", "version"},
+                "absent-after-release": {"state", "values", "resumed_from", "version"},
+                "kept-vc-present": {"state", "values", "resumed_from", "version"},
+                "releasing": {"state", "values", "version", "keys", "resumed_from"}}
+    if value["state"] in by_state:
+        # No Wine ran in these states: no exit code or observation (Codex final recheck L1).
+        require(set(value) <= by_state[value["state"]], "fields do not fit the state")
     require(value.get("values") is None or (type(value["values"]) is int and 0 <= value["values"] <= 36), "invalid count")
     require(value.get("version") is None or (type(value["version"]) is str and len(value["version"]) <= 40), "invalid version")
     if value.get("keys") is not None:

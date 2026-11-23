@@ -300,6 +300,26 @@ class FinalReviewTests(unittest.TestCase):
         self.assertEqual(vc.kept_hash(scan(dword)["keys"]["native-x86"]),
                          vc.kept_hash(scan(dword.replace("0000000A", "0000000a"))["keys"]["native-x86"]))
 
+    def test_a_link_line_after_any_value_line_is_never_missed(self):
+        bad_hex = '"Other"=hex:01,1ff,02,\\\n#link\n'  # Wine stops reading the value and then reads #link.
+        text = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n' + bad_hex, 1)
+        found = scan(text)
+        self.assertTrue(found["keys"]["native-x86"]["link"])
+        self.assertEqual(vc.evaluate(found, NO_MFC, template(), initial(block()), "a" * 64)["reason"], "registry-shape")
+
+    def test_binary_values_are_compared_by_their_bytes_and_written_forms_by_value(self):
+        def kept(extra):
+            return vc.kept_hash(scan(block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n' + extra, 1))
+                                ["keys"]["native-x86"])
+        self.assertNotEqual(kept('"B"=hex:01,02\n'), kept('"B"=hex:01,03\n'))
+        self.assertEqual(kept('"D"=dword:0A\n'), kept('"D"=dword:0000000a\n'))
+        self.assertEqual(kept('"Q"=hex(b):a,0,0,0,0,0,0,0\n'), kept('"Q"=hex(b):0a,00,00,00,00,00,00,00\n'))
+
+    def test_a_joined_line_keeps_the_length_limit(self):
+        half = "00," * 200_000
+        with self.assertRaises(Invalid):
+            scan(f"[{esc(vc.KEYS['native-x86'])}] 1\n" + '"B"=hex:' + half + "\\\n" + half + "00\n")
+
     def test_a_qword_beside_the_inherited_values_is_kept(self):
         qword = '"Other"=hex(b):01,00,00,00,00,00,00,00\n'
         self.assertEqual(vc.evaluate(scan(f"[{esc(vc.KEYS['native-x86'])}] 1\n" + qword), NO_MFC, Invalid("x"), None,
@@ -352,7 +372,10 @@ class RecordTests(unittest.TestCase):
                     {"state": "released", "keys": {"elsewhere": {}}}, {"state": "releasing"}, {"state": "released"},
                     {"state": "failed", "reason": "wait-timeout"}, {"state": "failed", "reason": "wait-timeout", "retryable": False},
                     {"state": "absent", "retryable": True}, {"state": "not-evaluated", "values": 0},
-                    {"state": "absent", "wineserver_observed": 1}, {"state": "absent", "exit_code": True}):
+                    {"state": "absent", "wineserver_observed": 1}, {"state": "absent", "exit_code": True},
+                    {"state": "absent", "wineserver_observed": True}, {"state": "kept-vc-present", "exit_code": 0},
+                    {"state": "releasing", "keys": {"native-x86": {"values": {"Bld": "a" * 64}, "delete_key": True,
+                                                                  "kept": "b" * 64}}, "exit_code": 0}):
             with self.assertRaises(Invalid):
                 vc.validate_record(bad)
         with self.assertRaises(Invalid):
