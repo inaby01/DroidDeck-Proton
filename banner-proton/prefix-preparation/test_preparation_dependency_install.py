@@ -1738,6 +1738,62 @@ class InheritedVcTests(InstallTests):
         self.assertIn('inherited-vc-record-investigation-required', self.install_plan().blockers)
 
 
+    def test_a_change_right_before_wine_stops_without_running_it(self):
+        real = dep.DependencyInstallSession._launch
+        registry = self.install_plan().recheck.compatdata / 'pfx/system.reg'
+
+        def changed(session):
+            if sys._getframe(1).f_code.co_name == '_run_release':
+                registry.write_text(registry.read_text().replace(VC['VERSION'], 'v14.24.28127.00', 1))
+            return real(session)
+        with patch.object(dep.DependencyInstallSession, '_launch', changed):
+            session, result, spawned = self.silent_flow()
+        self.assertEqual((session.release_stopped, result['inherited_vc_record']['retryable']), ('changed-before-release', True))
+        self.assertFalse(any(call.args[0][1:3] == ('runinprefix', 'cmd.exe') for call in spawned.call_args_list))
+
+    def test_an_error_in_the_stop_observation_is_a_stop_with_a_reason(self):
+        real = ProcessStopCheck.check
+
+        def broken(check):
+            if sys._getframe(1).f_code.co_name == '_run_release':
+                raise OSError(5, 'I/O error')
+            return real(check)
+        with patch.object(ProcessStopCheck, 'check', broken):
+            session, result, _ = self.silent_flow()
+        self.assertEqual((session.release_stopped, result['status']), ('persistence-unconfirmed', 'stopped-before-installer'))
+
+    def test_an_unexpected_error_in_the_release_is_a_stop_with_a_reason(self):
+        with patch.object(self.vc, 'resume', side_effect=KeyError('x')), \
+                patch.object(self.vc, 'evaluate', side_effect=TypeError('x')):
+            session, result, _ = self.silent_flow()
+        self.assertEqual((session.release_stopped, result['status']), ('registry-unreadable:TypeError', 'stopped-before-installer'))
+
+    def test_a_changed_plan_stops_the_interactive_installer_before_anything_is_released(self):
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep.subprocess, 'Popen', wraps=subprocess.Popen) as spawned:
+            session = self.install_session(store).start_gui_check()
+            session.wait_gui_check(10)
+            session.confirm_display(True)
+            session.refresh = lambda: type('Changed', (), {'digest': 'other'})()
+            with self.assertRaises(Invalid):
+                session.start_installer()
+        self.assertEqual(session.record['status'], 'failed')
+        self.assertFalse(any(call.args[0][1:3] == ('runinprefix', 'cmd.exe') for call in spawned.call_args_list))
+        self.assertEqual(len(self.vc.fingerprint(self.registry())), 6)
+
+    def test_a_debug_log_folder_problem_never_stops_the_installer(self):
+        self.config['diagnostics'] = {'installer_log': True}
+        real = self.vc._windows_dir
+
+        def ambiguous(compatdata, name):
+            if name == 'temp':
+                raise Invalid('ambiguous case-insensitive path')
+            return real(compatdata, name)
+        with patch.object(self.vc, '_windows_dir', ambiguous):
+            _, result, _ = self.silent_flow()
+        self.assertEqual((result['status'], result['installer_debuglog']['state']), ('present-verified', 'failed:Invalid'))
+
+
 for _name in dir(InstallTests):
     if _name.startswith('test_') and _name not in vars(InheritedVcTests):
         setattr(InheritedVcTests, _name, None)

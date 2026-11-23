@@ -68,7 +68,7 @@ SCOPE = "managed-prefix-dependency-installation"
 RECORDS = "dependency-installs"
 RESERVE = 1024**3
 STOP_GRACE = 60
-RELEASE_WAIT = 30  # Child (cmd.exe) of the inherited VC record release (design: inherited VC record 4).
+RELEASE_WAIT = 120  # Child (cmd.exe) of the inherited VC record release (design: inherited VC record 4).
 DEBUGLOG_ARGUMENT = re.compile(r"/debuglogC:\\windows\\temp\\droiddeck-setup-depinstall-[0-9a-f]{32}\.log")
 DEBUGLOG_STATE = re.compile(r"requested|collected|absent|name-taken|failed:[A-Za-z0-9_]{1,64}")
 MFC_KINDS = ("absent", "native", "wine-builtin", "wine-placeholder", "other")
@@ -990,16 +990,27 @@ class DependencyInstallSession:
         self.record["inherited_vc_record"] = decision
         self.record["status"] = "stopped-before-installer"
         self.release_stopped = decision["reason"]
-        self._save()
+        try:
+            self._save()
+        except (OSError, Invalid, ValueError):
+            pass  # Still a stop before the installer; an unsaved "releasing" record is resumed next time.
         return decision["reason"]
 
     def _release_inherited_vc(self):
         """Design: inherited VC record. None to continue with the installer, else the stop reason (saved).
 
         Reads only, except one Wine run of reg.exe that deletes the inherited values (and keys that
-        become empty). Never signals; a timeout only stops waiting.
+        become empty). Never signals; a timeout only stops waiting. Any error becomes a stop with a
+        reason (Fable code review L3), never an escape that skips the stop handling.
         """
         import preparation_vc_record as vc
+        try:
+            return self._release_inherited_vc_steps(vc)
+        except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError) as error:
+            return self._release_stop({**(self.record.get("inherited_vc_record") or {}),
+                                       **vc.failed("registry-unreadable:" + type(error).__name__)})
+
+    def _release_inherited_vc_steps(self, vc):
         p = self.plan.recheck
         registry = p.compatdata / "pfx/system.reg"
         try:
@@ -1011,6 +1022,8 @@ class DependencyInstallSession:
         previous = vc.unfinished(history)
         if previous is not None:
             original = previous["inherited_vc_record"]
+            if not original.get("keys"):
+                return self._release_stop(vc.failed("investigation-required"))  # Nothing to compare with.
             decision = vc.resume(scan, mfc, original["keys"])
             decision.update(resumed_from=previous["install_id"])
             if "version" in original and original["version"] is not None:
@@ -1039,7 +1052,7 @@ class DependencyInstallSession:
         record = {**decision, "state": "releasing", "keys": keys}
         self.record["inherited_vc_record"] = record
         self._save()
-        outcome = self._run_release(work)
+        outcome = self._run_release(work, lambda: vc.same_state(scan, vc.scan_file(registry)))
         record = {**record, **outcome}
         if record.get("reason") is None:
             try:
@@ -1059,7 +1072,7 @@ class DependencyInstallSession:
             record.update(state="failed")
         return self._release_stop(record)
 
-    def _run_release(self, work):
+    def _run_release(self, work, unchanged_since_decision):
         """One Wine run of reg.exe; returns exit_code, observation flags and a reason when it stopped."""
         import preparation_vc_record as vc
         result = {"exit_code": None, "wineserver_observed": False, "wineserver_gone_before_read": False}
@@ -1071,6 +1084,9 @@ class DependencyInstallSession:
             self._clear()
             launch = self._launch()
             require_no_bytecode_cache(launch)
+            # The last read right before Wine (design 4, Fable code review L2): what was decided on is still there.
+            if not unchanged_since_decision():
+                return {**result, **vc.failed("changed-before-release")}
             child = subprocess.Popen((launch.argv[0], "runinprefix", *vc.command(work)), cwd=self.plan.recheck.work,
                                      env=launch.environment, shell=False, close_fds=True, start_new_session=True,
                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL if output is None else output,
@@ -1097,11 +1113,14 @@ class DependencyInstallSession:
             time.sleep(0.25)
         result["exit_code"] = child.returncode
         deadline = time.monotonic() + STOP_GRACE
-        observation = self.stop.check()
-        while not observation["clear_in_view"] and time.monotonic() < deadline:
-            look()
-            time.sleep(0.5)
+        try:
             observation = self.stop.check()
+            while not observation["clear_in_view"] and time.monotonic() < deadline:
+                look()
+                time.sleep(0.5)
+                observation = self.stop.check()
+        except (OSError, ValueError, TypeError, KeyError):
+            return {**result, **vc.failed("persistence-unconfirmed")}
         if not observation["clear_in_view"]:
             reason = "persistence-unconfirmed" if observation["unknown_count"] and not observation["active_count"] else "wait-timeout"
             return {**result, **vc.failed(reason)}
@@ -1130,8 +1149,8 @@ class DependencyInstallSession:
                         state = "name-taken"
                 finally:
                     os.close(fd)
-        except OSError:
-            state = "failed:OSError"
+        except (OSError, Invalid, ValueError) as error:
+            state = "failed:" + type(error).__name__
         self.record["installer_debuglog"] = {"argument": argument, "state": state}
         return () if state != "requested" else (argument,)
 
@@ -1179,6 +1198,12 @@ class DependencyInstallSession:
             pass
 
     def _start_installer(self, head):
+        try:
+            # Before anything is written, as before 0.32.0 (Fable code review L1).
+            require(self.refresh().digest == self.plan.digest, "dependency installation plan changed")
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            self._fail("installer-start", error)
+            raise
         if self._release_inherited_vc() is not None:
             return self  # Stopped before the installer; the caller reads release_stopped (Codex M5).
         try:
@@ -1448,9 +1473,9 @@ def _print_plan(plan, output, text):
     print("手順: 1) Wine内蔵winverの画面を表示 → 閉じる  2) 表示を確認後、正規インストーラを起動（ライセンス同意は画面であなたが操作）", file=output)
     print("      3) 終了後に停止を確認し、ファイル・登録・サービス・COMをWineを起動せず読み取り検査", file=output)
     print("書込範囲: このprefix内（Program Files、windows\\system32・syswow64・ucharge、レジストリ）。VC++2019前提資材も入り得ます。", file=output)
+    print("          私有キャッシュ・私有入力コピー・導入記録・lock・結果JSON。ゲーム・割り当て設定・他prefixは変更しません。", file=output)
     from preparation_vc_record import RELEASE_TEXT
     print(RELEASE_TEXT, file=output)
-    print("          私有キャッシュ・私有入力コピー・導入記録・lock・結果JSON。ゲーム・割り当て設定・他prefixは変更しません。", file=output)
     print("ゲームの認証はしません。インストーラの通信は遮断していません。他namespaceの停止保証はありません。強制終了はしません。", file=output)
 
 

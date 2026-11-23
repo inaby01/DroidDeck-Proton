@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import stat
 
 from preparation_common import Invalid, regular_open, require, safe_path, unchanged
 from preparation_dependency_state import (
@@ -56,7 +57,7 @@ FINAL_REASONS = ("investigation-required", "no-initial-fingerprint", "initial-fi
                  "template-changed", "keys-in-archive", "registry-shape", "values-differ", "vc-registered-without-mfc140",
                  "uninstall-unreadable")
 RETRYABLE_REASONS = ("wait-timeout", "wine-start", "values-remain", "keys-remain", "removed-too-much",
-                     "persistence-unconfirmed", "registry-unreadable")
+                     "persistence-unconfirmed", "registry-unreadable", "template-unreadable", "changed-before-release")
 REG = "C:\\windows\\system32\\reg.exe"
 REASON = re.compile(r"[a-z0-9-]{1,64}(?::[A-Za-z0-9_]{1,64})?")
 
@@ -238,17 +239,24 @@ def mfc140(compatdata):
             continue
         try:
             names = [entry.name for entry in os.scandir(fd) if entry.name.casefold() == "mfc140.dll"]
-            require(len(names) <= 1, "ambiguous mfc140.dll")
             if not names:
                 result[directory] = "absent"
+                continue
+            if len(names) > 1:
+                result[directory] = "other"  # Any entry of that name counts as present (design 3.2, Fable L4).
                 continue
             try:
                 file_fd = os.open(names[0], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
             except OSError:
                 result[directory] = "other"  # A link or special entry still counts as present (design 3.2).
                 continue
-            with os.fdopen(file_fd, "rb") as stream:
-                head = stream.read(0x80)
+            try:
+                if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                    result[directory] = "other"
+                    continue
+                head = os.read(file_fd, 0x80)
+            finally:
+                os.close(file_fd)
             stub = head[0x40:0x80]
             result[directory] = ("wine-builtin" if b"Wine builtin DLL" in stub else
                                  "wine-placeholder" if b"Wine placeholder DLL" in stub else
@@ -281,6 +289,9 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256):
         return failed("uninstall-unreadable", values=count)
     if scan["uninstall"]["vc14"]:
         return failed("vc-registered-without-mfc140", values=count)
+    if isinstance(template, OSError):
+        # A read error may pass; a mismatch does not (Fable code review L6).
+        return failed("template-unreadable:" + type(template).__name__, values=count)
     if isinstance(template, Exception) or template is None:
         return failed("template-mismatch", values=count)
     if template["archive_has_keys"]:
@@ -360,6 +371,15 @@ def command(plan):
             tail.extend(part)
     require(tail, "nothing to release")
     return ("cmd.exe", "/d", "/c", *tail)
+
+
+def same_state(before, after):
+    """What the decision was made on is still there: values, kept data, links and duplicates (design 4)."""
+    def shape(found):
+        return (fingerprint(found), found["ancestor_links"], found["runtimes_present"],
+                {ident: (kept_hash(entry), entry["exists"], entry["link"], entry["duplicate"], entry["occurrences"])
+                 for ident, entry in found["keys"].items()})
+    return shape(before) == shape(after)
 
 
 def verify(plan, scan):
@@ -494,4 +514,6 @@ def text_reason(reason):
         "removed-too-much": "残すはずのキーや値が変わっています",
         "persistence-unconfirmed": "Wineがレジストリを書き出したことを確かめられません",
         "registry-unreadable": "prefixのレジストリを読めません",
+        "template-unreadable": "準備用Protonのひな形を読めませんでした",
+        "changed-before-release": "外す直前にVC++の記録が変わりました",
     }.get(head, reason or "")

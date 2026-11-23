@@ -2,6 +2,7 @@
 """The inherited VC++ runtime record: reading, deciding, releasing and resuming (synthetic registries only)."""
 
 import hashlib
+import os
 import runpy
 import tempfile
 import unittest
@@ -229,6 +230,29 @@ class GuardDetailTests(unittest.TestCase):
             wow = Path(root) / "pfx/drive_c/windows/syswow64"
             wow.mkdir(parents=True)
             (wow / "mfc140.dll").symlink_to("/nonexistent")
+            self.assertEqual(vc.mfc140(Path(root))["syswow64"], "other")
+
+    def test_a_template_read_error_can_be_retried_but_a_mismatch_cannot(self):
+        found = vc.evaluate(scan(block()), NO_MFC, PermissionError(13, "denied"), initial(block()), "a" * 64)
+        self.assertEqual((found["reason"], found["retryable"]), ("template-unreadable:PermissionError", True))
+        found = vc.evaluate(scan(block()), NO_MFC, Invalid("template tail changed"), initial(block()), "a" * 64)
+        self.assertEqual((found["reason"], found["retryable"]), ("template-mismatch", False))
+
+    def test_same_state_notices_any_change_of_what_was_decided_on(self):
+        before = scan(block())
+        self.assertTrue(vc.same_state(before, scan(block())))
+        self.assertFalse(vc.same_state(before, scan(block(version="v14.24.28127.00"))))
+        self.assertFalse(vc.same_state(before, scan(block() + "[" + esc(vc.KEYS["native-x86"]) + "\\\\Child] 1\n")))
+
+    def test_mfc140_duplicates_and_directories_count_as_present_without_leaking(self):
+        with tempfile.TemporaryDirectory() as root:
+            wow = Path(root) / "pfx/drive_c/windows/syswow64"
+            (wow / "mfc140.dll").mkdir(parents=True)
+            before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+            self.assertEqual(vc.mfc140(Path(root))["syswow64"], "other")
+            if before is not None:
+                self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+            (wow / "MFC140.DLL").write_bytes(b"MZ")
             self.assertEqual(vc.mfc140(Path(root))["syswow64"], "other")
 
     def test_resume_refuses_when_more_than_planned_is_gone_or_changed(self):
