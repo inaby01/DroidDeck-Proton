@@ -1057,7 +1057,7 @@ class DependencyInstallSession:
         if record.get("reason") is None:
             try:
                 after = vc.scan_file(registry)
-                reason = vc.verify(work, after)
+                reason = vc.verify(keys, after)  # The whole original plan, also after a resume (Codex final M3).
             except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError) as error:
                 reason = "registry-unreadable:" + type(error).__name__
             if reason is None:

@@ -61,7 +61,8 @@ if sys.argv[1:5] == ['runinprefix', 'cmd.exe', '/d', '/c'] and any(arg.endswith(
         key = command[2].split(BS, 1)[1].lower()
         if '/v' in command:
             value = command[command.index('/v') + 1]
-            if value in fail:
+            if value in fail or any(':' in item and item.split(':')[0] in key and item.split(':')[1] == value
+                                    for item in fail):
                 return 1
             for header, lines in sections:
                 if name_of(header) == key:
@@ -1792,6 +1793,21 @@ class InheritedVcTests(InstallTests):
         with patch.object(self.vc, '_windows_dir', ambiguous):
             _, result, _ = self.silent_flow()
         self.assertEqual((result['status'], result['installer_debuglog']['state']), ('present-verified', 'failed:Invalid'))
+
+
+    def test_a_resumed_release_is_checked_against_the_whole_original_plan(self):
+        (self.control / 'reg-fail').write_text('wow6432node:Installed')  # Only the 32-bit view keeps values.
+        self.silent_flow()
+        real, seen = self.vc.verify, []
+
+        def spy(plan, scan):
+            seen.append(sorted(plan))
+            return real(plan, scan)
+        (self.control / 'reg-fail').unlink()
+        with patch.object(self.vc, 'verify', spy):
+            _, result, _ = self.silent_flow()
+        self.assertEqual(result['inherited_vc_record']['state'], 'released')
+        self.assertEqual(seen, [sorted(self.vc.KEYS)])
 
 
 for _name in dir(InstallTests):

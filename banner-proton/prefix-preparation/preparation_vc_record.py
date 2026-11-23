@@ -81,15 +81,18 @@ def scan_lines(lines):
     keys = {ident: _empty_key() for ident in KEYS}
     present, links, uninstall = set(), set(), {"vc14": 0, "unreadable": 0}
     headers = 0
-    current, current_kind = None, None
+    current, current_kind, current_owner = None, None, None
     for line in lines:
         if not line:
             continue
         if line[0] == "#":
-            if line.strip() == "#link" and current_kind in ("target", "ancestor"):
+            # Wine marks a link by the first five characters (server/registry.c), whatever follows (Codex final H).
+            if line.startswith("#link") and current_kind in ("target", "ancestor", "subkey"):
                 links.add(current)
                 if current_kind == "target":
                     keys[_BY_PATH[current]]["link"] = True
+                elif current_kind == "subkey":
+                    keys[current_owner]["link"] = True  # reg delete of the key would act through it.
             continue
         if line[0] == ";":
             continue
@@ -116,6 +119,7 @@ def scan_lines(lines):
                 for path, ident in _BY_PATH.items():
                     if key.startswith(path + "\\"):
                         keys[ident]["subkeys"].add(key[len(path) + 1:])
+                        current_kind, current_owner = "subkey", ident
                 for root in UNINSTALL_ROOTS:
                     if key.startswith(root + "\\") and "\\" not in key[len(root) + 1:]:
                         current_kind = "uninstall"
@@ -134,11 +138,15 @@ def scan_lines(lines):
                 canonical = _VALUE_KEYS[folded]
                 if canonical in entry["values"]:
                     entry["duplicate"] = True
-                entry["values"][canonical] = _data(rest[1:])
+                try:
+                    entry["values"][canonical] = _data(rest[1:])
+                except Invalid:
+                    entry["values"][canonical] = ("raw", rest[1:])  # Never equal to the template's values.
             else:
                 if any(item[0] == folded for item in entry["others"]):
                     entry["duplicate"] = True
-                entry["others"].append((folded, value_hash(_data(rest[1:]))))
+                # Hashed as written: any type Wine saves (hex(b): for QWORD too) is kept (Codex final M4).
+                entry["others"].append((folded, value_hash(("raw", rest[1:]))))
         elif current_kind == "uninstall" and name.casefold() == "displayname":
             try:
                 kind, text = _data(rest[1:])
@@ -320,6 +328,11 @@ def resume(scan, mfc, previous):
     """Continue a release a previous attempt began (design 4 resume). ``previous`` is its record's keys."""
     if any(kind != "absent" for kind in mfc.values()):
         return {"state": "kept-vc-present", "values": sum(len(entry["values"]) for entry in scan["keys"].values())}
+    # Condition 2 holds for a resume as well (design 4, Codex final M1).
+    if scan["uninstall"]["unreadable"]:
+        return failed("uninstall-unreadable")
+    if scan["uninstall"]["vc14"]:
+        return failed("vc-registered-without-mfc140")
     if scan["ancestor_links"] or any(entry["occurrences"] > 1 or entry["duplicate"] or entry["link"]
                                      for entry in scan["keys"].values()):
         return failed("investigation-required")
@@ -386,6 +399,8 @@ def verify(plan, scan):
     """The re-read after the Wine run (design 4): returns None when it passed, else a retryable reason."""
     if not scan["runtimes_present"]["native"] or not scan["runtimes_present"]["wow"]:
         return "removed-too-much"
+    if any(entry["values"] for entry in scan["keys"].values()):
+        return "values-remain"
     for ident, item in plan.items():
         entry = scan["keys"][ident]
         if entry["values"]:
@@ -469,7 +484,7 @@ def unfinished(history):
     ``history``: the installation records of the same trial_id, oldest first.
     """
     evaluated = [record for record in history if record.get("inherited_vc_record", {}).get("state") not in
-                 (None, "not-evaluated")]
+                 (None, "not-evaluated") and not _undecided(record["inherited_vc_record"])]
     if not evaluated:
         return None
     last = evaluated[-1]
@@ -477,6 +492,12 @@ def unfinished(history):
     if item["state"] == "releasing" or (item["state"] == "failed" and item.get("keys")):
         return last
     return None
+
+
+def _undecided(item):
+    """A stop that read nothing reliable (a read error before any decision): it hides no earlier release (Codex final M2)."""
+    return item["state"] == "failed" and item.get("retryable") is True and not item.get("keys") and \
+        (item.get("reason") or "").split(":", 1)[0] in ("registry-unreadable", "template-unreadable")
 
 
 def final_stop(history):

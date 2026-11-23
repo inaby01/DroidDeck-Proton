@@ -270,6 +270,48 @@ class GuardDetailTests(unittest.TestCase):
         self.assertEqual(vc.resume(scan(linked), NO_MFC, original)["reason"], "investigation-required")
 
 
+class FinalReviewTests(unittest.TestCase):
+    """Codex final review: link marks with a note, sub-key links, resume checks, QWORD values."""
+
+    def test_a_link_mark_with_anything_after_it_and_a_sub_key_link_stop(self):
+        noted = block() + "[Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC] 1\n#link to elsewhere\n"
+        found = scan(noted)
+        self.assertEqual(found["ancestor_links"], ["software\\microsoft\\visualstudio\\14.0\\vc"])
+        self.assertEqual(vc.evaluate(found, NO_MFC, template(), initial(block()), "a" * 64)["reason"], "registry-shape")
+        child = block() + "[" + esc(vc.KEYS["wow-x86"]) + "\\\\Child] 1\n#link\n"
+        found = scan(child)
+        self.assertTrue(found["keys"]["wow-x86"]["link"])
+        self.assertEqual(vc.evaluate(found, NO_MFC, template(), initial(block()), "a" * 64)["reason"], "registry-shape")
+
+    def test_a_qword_beside_the_inherited_values_is_kept(self):
+        qword = '"Other"=hex(b):01,00,00,00,00,00,00,00\n'
+        self.assertEqual(vc.evaluate(scan(f"[{esc(vc.KEYS['native-x86'])}] 1\n" + qword), NO_MFC, Invalid("x"), None,
+                                     None)["state"], "absent")
+        text = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n' + qword, 1)
+        decision = vc.evaluate(scan(text), NO_MFC, template(), initial(text), "a" * 64)
+        self.assertEqual((decision["state"], decision["keys"]["native-x86"]["delete_key"]), ("release", False))
+
+    def test_resume_checks_vc_registrations_too(self):
+        original = vc.evaluate(scan(block()), NO_MFC, template(), initial(block()), "a" * 64)["keys"]
+        root = "Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\"
+        added = block() + f'[{root}{{A}}] 1\n"DisplayName"="Microsoft Visual C++ 2015-2019 Redistributable (x86) - 14.24"\n'
+        self.assertEqual(vc.resume(scan(added), NO_MFC, original)["reason"], "vc-registered-without-mfc140")
+
+    def test_verify_looks_at_the_whole_original_plan(self):
+        text = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n"Other"="x"\n', 1)
+        original = vc.evaluate(scan(text), NO_MFC, template(), initial(text), "a" * 64)["keys"]
+        parents = ("[Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes] 1\n"
+                   "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes] 1\n")
+        self.assertEqual(vc.verify(original, scan(parents)), "removed-too-much")  # The kept key handled earlier is gone.
+
+    def test_a_read_error_before_any_decision_does_not_hide_an_unfinished_release(self):
+        keys = {"native-x86": {"values": {"Version": "a" * 64}, "delete_key": True, "kept": "b" * 64}}
+        releasing = {"install_id": "depinstall-" + "1" * 32, "inherited_vc_record": {"state": "releasing", "keys": keys}}
+        unreadable = {"install_id": "depinstall-" + "2" * 32,
+                      "inherited_vc_record": vc.failed("registry-unreadable:OSError")}
+        self.assertIs(vc.unfinished([releasing, unreadable]), releasing)
+
+
 class RecordTests(unittest.TestCase):
     def test_unfinished_is_the_newest_evaluated_release_only(self):
         keys = {"native-x86": {"values": {"Version": "a" * 64}, "delete_key": True, "kept": "b" * 64}}
