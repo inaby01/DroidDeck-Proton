@@ -144,42 +144,30 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
     require(inventory is None or records == "game-prefixes", "probe trials read their archive themselves")
     if records == "trials":
         validate_trial_record(record)
+        require(record["exit_code"] == 0 and record.get("settings_identity_unchanged") is True,
+                "prior fixed-command exit and unchanged settings required")
+        require(record["phase"] == "post-checks", "completed command phase required")
+        require(record["status"] == "initialized-unverified" or record["status"] == "failed" and
+                record.get("error", {}).get("error_class") == "TreeMismatch" and record["phase"] == "post-checks",
+                "only initialized or tree-mismatch trial can be rechecked")
+        key = record["app_id"]
+        require(key in games, "trial registration missing")
     else:
-        from preparation_game_prefix import ID_PREFIX
-        from preparation_game_prefix import SCOPE as GAME_SCOPE
-        validate_trial_record(record, GAME_SCOPE, ID_PREFIX)
-    require(record["exit_code"] == 0 and record.get("settings_identity_unchanged") is True,
-            "prior fixed-command exit and unchanged settings required")
-    require(record["phase"] == "post-checks", "completed command phase required")
-    require(record["status"] == "initialized-unverified" or records == "trials" and record["status"] == "failed" and
-            record.get("error", {}).get("error_class") == "TreeMismatch" and record["phase"] == "post-checks",
-            "only initialized or tree-mismatch trial can be rechecked")
-    key = record["app_id"]
-    require(key in games, "trial registration missing")
+        key = _game_record(record, games)
     steam, settings, home = map(safe_path, (steam, settings, home))
     store_root = safe_path(home / ".local/state/droiddeck-prefix-preparation/tool-store", home)
     probe_store = safe_path(store_root.parent / "probe-store", home)
     with PrivateStore(store_root) as store:
         require(store.read_record(records, record["trial_id"] + ".json")[1] == record_sha256, "trial record changed")
-    progress.append("recheck-registration-pin")
-    exe = safe_path(games[key]["exe"])
-    target = pin_registration(source, key, exe.parent, steam)
     proof = None
     if records == "trials":
+        progress.append("recheck-registration-pin")
+        exe = safe_path(games[key]["exe"])
+        target = pin_registration(source, key, exe.parent, steam)
         progress.append("recheck-probe-registration")
         proof = inspect_existing_probe_registration(exe, key, source, steam, probe_store)
     else:
-        # The game EXE must still be the one measured when the prefix was initialized.
-        from preparation_assets import exe_identity
-        from preparation_game_prefix import registration_identity
-        progress.append("recheck-game-registration")
-        require(registration_identity(exe, games[key]["title"]) ==
-                {name: record["profile"][name] for name in ("exe_path_sha256", "title_sha256")},
-                "game registration path or title changed since initialization")
-        progress.append("recheck-game-executable")
-        identity = exe_identity(exe)
-        require({"sha256": identity["sha256"], "size": identity["size"]} ==
-                {key_: record["profile"]["exe_" + key_] for key_ in ("sha256", "size")}, "game executable changed")
+        target, exe = _game_registration(progress, record, source, games, steam)
     progress.append("recheck-build-review")
     payload = config["payload"]
     require(payload.get("tool_slot") == "preparation", "reviewed preparation slot required")
@@ -211,13 +199,7 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
     policy = reviewed_payload_permissions(inventory, steam, review)
     if policy is not None:
         policy.guard()
-    progress.append("recheck-prefix")
-    compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
-    _private_existing(compatdata, steam)
-    _aliases(steam, key)
-    version = _prefix(compatdata)
-    if records != "trials":
-        _initialized_prefix(compatdata, record, version)
+    compatdata, version = _game_prefix(progress, steam, key, None if records == "trials" else record)
     progress.append("recheck-private-paths")
     work = safe_path(home / ".local/share/droiddeck-preparation-work" / key / "work", home)
     private_home = safe_path(work.parent / "home", home)
@@ -236,50 +218,71 @@ def _plan_recheck(progress, *, record, record_sha256, config, directory, rendere
                       runtime, target, review, settings, work, private_home, compatdata, version, records, tool_writes)
 
 
+def _game_record(record, games):
+    """A completed game-prefix initialization record whose registration still exists. Returns the app ID."""
+    from preparation_game_prefix import ID_PREFIX
+    from preparation_game_prefix import SCOPE as GAME_SCOPE
+    validate_trial_record(record, GAME_SCOPE, ID_PREFIX)
+    require(record["exit_code"] == 0 and record.get("settings_identity_unchanged") is True,
+            "prior fixed-command exit and unchanged settings required")
+    require(record["phase"] == "post-checks", "completed command phase required")
+    require(record["status"] == "initialized-unverified", "only initialized or tree-mismatch trial can be rechecked")
+    require(record["app_id"] in games, "trial registration missing")
+    return record["app_id"]
+
+
+def _game_registration(progress, record, source, games, steam):
+    """Registration pin, and the registration and game EXE measured at initialization (game prefixes)."""
+    from preparation_assets import exe_identity
+    from preparation_game_prefix import registration_identity
+    key = record["app_id"]
+    progress.append("recheck-registration-pin")
+    exe = safe_path(games[key]["exe"])
+    target = pin_registration(source, key, exe.parent, steam)
+    # The game EXE must still be the one measured when the prefix was initialized.
+    progress.append("recheck-game-registration")
+    require(registration_identity(exe, games[key]["title"]) ==
+            {name: record["profile"][name] for name in ("exe_path_sha256", "title_sha256")},
+            "game registration path or title changed since initialization")
+    progress.append("recheck-game-executable")
+    identity = exe_identity(exe)
+    require({"sha256": identity["sha256"], "size": identity["size"]} ==
+            {key_: record["profile"]["exe_" + key_] for key_ in ("sha256", "size")}, "game executable changed")
+    return target, exe
+
+
+def _game_prefix(progress, steam, key, record):
+    """The prefix: private directory, no aliases, its version, and (with ``record``) the initialized layout."""
+    progress.append("recheck-prefix")
+    compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
+    _private_existing(compatdata, steam)
+    _aliases(steam, key)
+    version = _prefix(compatdata)
+    if record is not None:
+        _initialized_prefix(compatdata, record, version)
+    return compatdata, version
+
+
 def check_game_identity(*, record, record_sha256, source, games, steam, home):
     """The payload-independent part of a registered-game recheck (design: Proton update 4.8).
 
-    Same checks, in the same order and with the same check names, as ``plan_recheck`` for
-    ``game-prefixes``: the initialization record (completed, unchanged), the registration
-    and the game EXE measured at initialization, and the prefix (private directory, no
-    aliases, unchanged version, the initialized directories). It reads no payload and does
-    not verify any preparation slot, so a revert works while the bundle slot is broken.
+    The same checks as ``plan_recheck`` for ``game-prefixes`` (shared functions, same check
+    names): the initialization record (completed, unchanged), the registration and the game
+    EXE measured at initialization, and the prefix (private directory, no aliases, unchanged
+    version, the initialized directories). It reads no payload and does not verify any
+    preparation slot, so a revert works while the bundle slot is broken.
     Returns {"target", "compatdata", "prefix_version", "exe"}.
     """
     progress = ["recheck-trial-record"]
     try:
-        from preparation_assets import exe_identity
-        from preparation_game_prefix import ID_PREFIX, registration_identity
-        from preparation_game_prefix import SCOPE as GAME_SCOPE
-        validate_trial_record(record, GAME_SCOPE, ID_PREFIX)
-        require(record["exit_code"] == 0 and record.get("settings_identity_unchanged") is True,
-                "prior fixed-command exit and unchanged settings required")
-        require(record["phase"] == "post-checks", "completed command phase required")
-        require(record["status"] == "initialized-unverified", "only initialized or tree-mismatch trial can be rechecked")
-        key = record["app_id"]
-        require(key in games, "trial registration missing")
+        key = _game_record(record, games)
         steam, home = safe_path(steam), safe_path(home)
         store_root = safe_path(home / ".local/state/droiddeck-prefix-preparation/tool-store", home)
         with PrivateStore(store_root) as store:
             require(store.read_record("game-prefixes", record["trial_id"] + ".json")[1] == record_sha256,
                     "trial record changed")
-        progress.append("recheck-registration-pin")
-        exe = safe_path(games[key]["exe"])
-        target = pin_registration(source, key, exe.parent, steam)
-        progress.append("recheck-game-registration")
-        require(registration_identity(exe, games[key]["title"]) ==
-                {name: record["profile"][name] for name in ("exe_path_sha256", "title_sha256")},
-                "game registration path or title changed since initialization")
-        progress.append("recheck-game-executable")
-        identity = exe_identity(exe)
-        require({"sha256": identity["sha256"], "size": identity["size"]} ==
-                {key_: record["profile"]["exe_" + key_] for key_ in ("sha256", "size")}, "game executable changed")
-        progress.append("recheck-prefix")
-        compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
-        _private_existing(compatdata, steam)
-        _aliases(steam, key)
-        version = _prefix(compatdata)
-        _initialized_prefix(compatdata, record, version)
+        target, exe = _game_registration(progress, record, source, games, steam)
+        compatdata, version = _game_prefix(progress, steam, key, record)
         return {"target": target, "compatdata": compatdata, "prefix_version": version, "exe": exe}
     except (OSError, ValueError, TypeError, KeyError) as error:
         if not hasattr(error, "preparation_check"):

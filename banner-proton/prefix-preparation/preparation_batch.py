@@ -20,6 +20,7 @@ from preparation_common import VERSION, Invalid, require, safe_path
 
 MODE = "batch-result"
 RUNS = "batch-runs"
+RUNS_LOCK = hashlib.sha256(b"droiddeck-batch-runs").hexdigest()  # One lock file for every run's progress record.
 OUTCOMES = {"done": "完了", "not-started": "未着手", "skipped": "書き込み前に中止", "partial": "一部適用・要確認",
             "running": "実行中に中断・要確認"}
 STAGE_TEXT = {
@@ -39,6 +40,28 @@ SKIP_TEXT = {
     "screen-chose-another-proton": "DroidDeckの画面で別のProtonを選択中です",
     "bound-needs-more": "割り当て済みのゲームで、移す以外のことが要ります（個別の操作の1で確かめてください）",
     "several-records": "このゲームの初期化の記録が複数あります",
+    # Why a game assigned elsewhere is not moved (design 3.3, the same text as the status check).
+    "not-a-preparation-slot": "準備用Proton以外に割り当てられています（ツールは移しません）",
+    "slot-not-placed-by-this-tool": "ツールが置いた記録のない準備用Protonに割り当てられています（DroidDeckの画面と同期のコマンドで移せます）",
+    "slot-folder-missing-or-unregistered": "割り当て先の準備用Protonのフォルダーがないか、登録を読めません（DroidDeckの画面と同期のコマンドで移せます）",
+    "slot-tool-id-differs": "割り当て先の準備用Protonの名前が、フォルダーの登録と違います（DroidDeckの画面と同期のコマンドで移せます）",
+    "binding-running-record": "割り当ての書き換えが途中で止まった記録があります（個別の操作の2で確かめてください）",
+    "binding-failed-after-writing": "割り当ての書き換えが途中で失敗した記録があります（個別の操作の2で確かめてください）",
+    "no-verified-binding": "割り当てが完了した記録がありません",
+    "not-assigned-to-a-placed-slot": "ツールが置いた準備用Protonに割り当てられていません（ツールは移しません）",
+}
+MANIFEST_SKIP_TEXT = {
+    "mismatch": "同じ名前で別の中身の照合情報が保存されています",
+    "broken": "保存済みの照合情報を読めません",
+    "rules-differ": "保存済みの照合情報は照合規則の版が違います",
+    "unknown": "保存済みの照合情報と比べられません",
+}
+OUTCOME_TEXT = {
+    "confirmed-target-items-changed": "確認したときから、このゲームの割り当ての設定が変わりました",
+    "manifest-save-failed": "照合情報を保存できませんでした。このProtonは置けていますが、戻す先には使えません",
+    "manifest-mismatch": "同じ名前で別の中身の照合情報があるため、書き換えていません",
+    "manifest-broken": "保存済みの照合情報を読めないため、書き換えていません",
+    "manifest-rules-differ": "保存済みの照合情報は照合規則の版が違うため、書き換えていません",
 }
 
 
@@ -91,6 +114,7 @@ def build(ctx):
         placed_roots,
         target_items,
     )
+    from preparation_slot_manifest import build as build_manifest
     from preparation_slot_manifest import state as manifest_state
     from preparation_status import _slot
     from preparation_store import PrivateStore
@@ -116,8 +140,14 @@ def build(ctx):
     source, _, games = selection.registration_catalog(ctx.environment)
     result["source"] = source
     if os.path.lexists(ctx.management):
-        with PrivateStore(ctx.management) as store:
-            result["manifest"], _ = manifest_state(store, bundle)
+        try:
+            expected = build_manifest(bundle, bundle.replace(" ", "-", 1), result["inventory"],
+                                      result["customization"].overlays,
+                                      result["inventory"].captured["version"].decode("utf-8").strip())
+            with PrivateStore(ctx.management) as store:
+                result["manifest"], _ = manifest_state(store, bundle, expected)
+        except (OSError, Invalid, TypeError, KeyError, ValueError, UnicodeError):
+            result["manifest"] = "unknown"
     else:
         result["manifest"] = "missing"
     if result["manifest"] == "missing":
@@ -171,9 +201,10 @@ def build(ctx):
             if decision["kind"] == "other" and verified:
                 result["skipped"].append({**entry, "reason": decision["reason"]})
                 continue
-            _, plan = ctx.one_pass(select=(key, None), mode="plan")
+            _, plan = ctx.one_pass(select=(key, None), mode="plan", inventory=result["inventory"])
             if "fixed" not in plan:
-                result["skipped"].append({**entry, "reason": plan.get("reason") or plan.get("error_class") or "stopped"})
+                result["skipped"].append({**entry, "reason": plan.get("reason") or plan.get("error_class") or "stopped",
+                                          "next_step": plan.get("next_step")})
                 continue
             meaningful = [action for action in plan["actions"] if action != "binding" or decision["kind"] != "bound"]
             if decision["kind"] == "bound" and not meaningful:
@@ -193,9 +224,10 @@ def build(ctx):
         if len(automatic) != 1:
             result["skipped"].append({**entry, "reason": "profile-not-automatic"})
             continue
-        _, plan = ctx.one_pass(select=(key, automatic[0]), mode="plan")
+        _, plan = ctx.one_pass(select=(key, automatic[0]), mode="plan", inventory=result["inventory"])
         if "fixed" not in plan:
-            result["skipped"].append({**entry, "reason": plan.get("reason") or plan.get("error_class") or "stopped"})
+            result["skipped"].append({**entry, "reason": plan.get("reason") or plan.get("error_class") or "stopped",
+                                      "next_step": plan.get("next_step")})
             continue
         try:
             measured = exe_identity(safe_path(game["exe"]))["sha256"]
@@ -226,11 +258,16 @@ def build(ctx):
     return result
 
 
-def _skip_text(reason):
+def _skip_text(reason, next_step=None):
     if reason.startswith("move-blocked:"):
         return ("移すと途中で止まる状態です（" + reason.removeprefix("move-blocked:") + "）。"
                 "個別の操作の2（状態の確認）で確かめてください")
-    return SKIP_TEXT.get(reason, reason)
+    if reason.startswith("unreadable:"):
+        return "記録や設定を読めません（" + reason.removeprefix("unreadable:") + "）。個別の操作の2（状態の確認）で確かめてください"
+    if reason in SKIP_TEXT:
+        return SKIP_TEXT[reason]
+    # A stop of menu 1's own checks: its reason and, when it has one, the same next step as the status check.
+    return "止まる理由があります（" + reason + "）" + ("。" + next_step if next_step else "。個別の操作の2（状態の確認）で確かめてください")
 
 
 def show(ctx, listing):
@@ -249,6 +286,8 @@ def show(ctx, listing):
         error = slot.get("error") or {}
         print("置いてある準備用Protonが配布物と一致しません（" + _text(str(error.get("reason") or error.get("error_class"))) +
               "）。", file=output)
+        print("配布物は照合できました。同じ名前で置いてある準備用Protonの中身が違います。ツールは置いてあるProtonを書き換えないため、"
+              "このバンドルでは準備も移すこともしません。違いは個別の操作の2（状態の確認）で確かめられます。", file=output)
         return False
     print(file=output)
     items = listing["items"]
@@ -266,7 +305,12 @@ def show(ctx, listing):
                   f" へ{verb}（今: " + _text(item["decision"]["source"]) + "）", file=output)
             print("     切り替えたあとの最初の起動は、prefixの更新で長くなることがあります。", file=output)
         elif item["kind"] == "resume":
-            print(f"  {number}) " + _text(item["title"]) + f" [ID {item['app_id']}] の準備を続きから進める", file=output)
+            from preparation_game_prefix import validate_game_config
+            from preparation_one_pass import action_text
+            _, recipes = validate_game_config(config["game_preparation"])
+            doing = "・".join(action_text(action, recipes) for action in item["plan"]["actions"]) or "照合だけ"
+            print(f"  {number}) " + _text(item["title"]) + f" [ID {item['app_id']}] の準備を続きから進める（" +
+                  _text(doing) + "）", file=output)
         else:
             profile = next(p for p in config["game_preparation"]["profiles"] if p["profile_id"] == item["plan"]["profile_id"])
             print(f"  {number}) " + _text(item["title"]) + f" [ID {item['app_id']}] を新しく準備する（" +
@@ -288,11 +332,16 @@ def show(ctx, listing):
         print("  導入後にSdProxyが残った場合は、詳細メニューの8と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。",
               file=output)
     skipped, groups = listing["skipped"], listing["groups"]
-    if skipped or groups:
+    manifest = MANIFEST_SKIP_TEXT.get(listing.get("manifest"))
+    if skipped or groups or manifest:
         print(file=output)
         print("しないこと", file=output)
+        if manifest:
+            print("  - このProtonの照合情報の保存: " + manifest + "（書き換えません）。このProtonへは、あとでツールでは戻せません"
+                  "（DroidDeckの画面と同期のコマンドで戻せます）。", file=output)
         for item in skipped:
-            print("  - " + _text(item["title"]) + f" [ID {item['app_id']}]: " + _text(_skip_text(item["reason"])), file=output)
+            print("  - " + _text(item["title"]) + f" [ID {item['app_id']}]: " +
+                  _text(_skip_text(item["reason"], item.get("next_step"))), file=output)
         others = groups.get("no-record-prefix-exists", [])
         if others:
             print(f"  - ツールの記録がなく、prefixがあるゲーム（{len(others)}本）: " +
@@ -320,8 +369,7 @@ class Journal:
 
     def save(self):
         from preparation_store import PrivateStore
-        with PrivateStore(self.ctx.management, create=True) as store, \
-                store.locked(hashlib.sha256(self.run_id.encode()).hexdigest()):
+        with PrivateStore(self.ctx.management, create=True) as store, store.locked(RUNS_LOCK):
             self.hash = store.write_record(RUNS, self.run_id + ".json", self.record, self.hash)
 
     def ids(self, store, app_id, step, ids):
@@ -430,8 +478,7 @@ def close_runs(ctx, records):
     """Mark interrupted runs as reviewed once a new run starts (the operator has seen them)."""
     from preparation_store import PrivateStore
     for record in records:
-        with PrivateStore(ctx.management) as store, \
-                store.locked(hashlib.sha256(record["run_id"].encode()).hexdigest()):
+        with PrivateStore(ctx.management) as store, store.locked(RUNS_LOCK):
             current, digest = store.read_record(RUNS, record["run_id"] + ".json")
             current["status"] = "reviewed"
             store.write_record(RUNS, record["run_id"] + ".json", current, digest)
@@ -477,6 +524,14 @@ def _write_private(ctx, protected, name, report):
 
 
 def _save_manifest(ctx, listing):
+    """Save the bundle slot's verification data; a failure is reported and the run goes on (design 4.7)."""
+    try:
+        return _save_manifest_locked(ctx, listing), None
+    except (OSError, Invalid, TypeError, KeyError, ValueError, UnicodeError) as error:
+        return "failed", {"error_class": type(error).__name__, "errno": getattr(error, "errno", None)}
+
+
+def _save_manifest_locked(ctx, listing):
     from preparation_payload import verify_fex_runtime_tree
     from preparation_slot_manifest import build as build_manifest
     from preparation_slot_manifest import save
@@ -520,7 +575,7 @@ def _run_move(ctx, item, listing, journal):
         if blockers:
             return "skipped", {"blockers": blockers}
         lock = hashlib.sha256(str(plan.base.compatdata).encode()).hexdigest()
-        with PrivateStore(ctx.management) as store, store.locked(lock):
+        with _NotAboutGame(lambda: PrivateStore(ctx.management)) as store, _NotAboutGame(lambda: store.locked(lock)):
             def before(run_id):
                 nonlocal started
                 journal.ids(store, key, "binding", {"binding_id": run_id})
@@ -528,9 +583,36 @@ def _run_move(ctx, item, listing, journal):
             result = apply_move(store, plan, refresh, stop, key=key, decision=decision, config=ctx.config,
                                 steam=ctx.steam, targets=item["targets"], before=before)
         return ("done" if result["status"] == "binding-verified" else "partial"), {"binding": result}
+    except _LockFailed as failed:
+        from preparation_dependency_install import describe_error
+        return "skipped", {"error": describe_error(failed.error, "batch-move-lock"), "run_stop": True}
     except (OSError, ValueError, TypeError, KeyError) as error:
         from preparation_dependency_install import describe_error
         return ("partial" if started else "skipped"), {"error": describe_error(error, "batch-move")}
+
+
+class _LockFailed(Exception):
+    def __init__(self, error):
+        super().__init__(str(error))
+        self.error = error
+
+
+class _NotAboutGame:
+    """Opening the private store or taking a move's lock: a failure there is not about this game,
+    so the run ends instead of going on to the next game (design 6)."""
+
+    def __init__(self, factory):
+        self.factory, self.held = factory, None
+
+    def __enter__(self):
+        try:
+            self.held = self.factory()
+            return self.held.__enter__()
+        except (OSError, ValueError) as error:
+            raise _LockFailed(error) from error
+
+    def __exit__(self, *details):
+        return self.held.__exit__(*details)
 
 
 def _run_one_pass(ctx, item, journal):
@@ -591,8 +673,11 @@ def run(ctx, listing, protected, report=None):
         app = item.get("app_id") or "-"
         journal.step(app, item["kind"], "running")
         if item["kind"] == "save-manifest":
-            saved = _save_manifest(ctx, listing)
+            saved, error = _save_manifest(ctx, listing)
             entry.update(outcome="done" if saved in ("created", "same") else "skipped", state=saved)
+            if saved not in ("created", "same"):
+                entry.update(reason="manifest-save-failed" if saved == "failed" else "manifest-" + saved,
+                             **({"error": error} if error else {}))
         else:
             try:
                 same = _targets_now(ctx, item["app_id"]) == item["targets"]
@@ -610,8 +695,11 @@ def run(ctx, listing, protected, report=None):
                              stage=result.get("stage"), report=result)
         journal.step(app, item["kind"], entry["outcome"])
         write_results()
-        if entry["outcome"] == "partial":
-            stopped = True  # A stop after writing ends the run (design 6).
+        if entry["outcome"] == "partial" or entry.pop("run_stop", False):
+            stopped = True  # A stop after writing, or one not about this game, ends the run (design 6).
+            if entry["outcome"] != "partial":
+                entry["run_stopped"] = True
+                write_results()
     journal.record["status"] = "finished"
     journal.save()
     return report
@@ -645,8 +733,11 @@ def show_outcomes(ctx, report, listing):
         label = {"place": "Protonを置く", "save-manifest": "照合情報の保存"}.get(item["kind"]) or \
             (_text(item["title"]) + f" [ID {item['app_id']}]")
         reason = entry.get("reason") or (entry.get("error") or {}).get("reason") or \
-            ",".join(entry.get("blockers", []))
+            (entry.get("error") or {}).get("error_class") or ",".join(entry.get("blockers", []))
+        reason = OUTCOME_TEXT.get(reason, reason)
         print("  " + label + ": " + OUTCOMES[entry["outcome"]] + (f"（{_text(str(reason))}）" if reason else ""), file=output)
+        if entry.get("run_stopped"):
+            print("    このゲームによらない理由で止まったため、このあとのゲームは実行していません。", file=output)
         if entry["outcome"] in ("partial", "running"):
             for line in _partial_lines(ctx, item, entry):
                 print("    " + line, file=output)
@@ -740,9 +831,11 @@ def place_automatically(ctx, preferred=()):
                 store.locked(hashlib.sha256(str(compatdata).encode()).hexdigest()):
             require(_same_plan(refresh(), plan), "static placement plan changed")
             result = apply_static_placement(plan, refresh, store, plan.digest)
-        return {"confirmation": key, "skipped_candidates": skipped, "excluded": [list(item) for item in excluded],
-                "result": result}
-    raise Invalid("no registered game can confirm the placement")
+        return {"confirmation": key, "title": games[key]["title"], "skipped_candidates": skipped,
+                "excluded": [list(item) for item in excluded], "result": result}
+    error = Invalid("no registered game can confirm the placement")
+    error.skipped_candidates, error.excluded = skipped, [list(item) for item in excluded]
+    raise error
 
 
 def interactive_batch(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
@@ -809,6 +902,7 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
         if listing["items"] and listing["items"][0]["kind"] == "place":
             print("新しいProtonを置いています。", file=output, flush=True)
             report["placement"] = place_automatically(ctx, _assigned_to_slots(ctx))
+            _show_placement(ctx, report["placement"])
             print("新しいProtonを置きました。移すゲーム・新しく準備するゲームを確かめています。", file=output, flush=True)
             listing = build(ctx)
             if not show(ctx, listing):
@@ -823,7 +917,26 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
     except (OSError, ValueError, TypeError, KeyError) as error:
         report.update(status="stopped", **describe_error(error, "batch-run"))
         print("停止: " + _text(str(report.get("reason") or report.get("error_class"))), file=output)
+        if hasattr(error, "skipped_candidates"):
+            report.update(skipped_candidates=error.skipped_candidates, excluded_candidates=error.excluded)
+            print("新しいProtonを置く確認に使える登録済みのゲームがありません。何も置いていません。", file=output)
+            for item in error.skipped_candidates:
+                print("  使えなかった登録: ID " + _text(item["app_id"]) + "（" + _text(item["reason"]) + "）", file=output)
+            print("DroidDeckにゲームを1本登録し（起動はしません）、もう一度 prepare.sh を実行してください。", file=output)
     return _finish(ctx, protected, report)
+
+
+def _show_placement(ctx, placement):
+    """Which registration confirmed the placement and the state of the slot data (design 3.6, 4.7)."""
+    from preparation_static_placement import MANIFEST_TEXT
+    output = ctx.output
+    print("置く確認に使った登録: " + _text(placement["title"]) + f" [ID {placement['confirmation']}]（読み取るだけで、起動しません）",
+          file=output)
+    for item in placement["skipped_candidates"]:
+        print("  使えなかった登録: ID " + _text(item["app_id"]) + "（" + _text(item["reason"]) + "）", file=output)
+    manifest = (placement.get("result") or {}).get("slot_manifest") or {}
+    if manifest.get("state") in MANIFEST_TEXT:
+        print(MANIFEST_TEXT[manifest["state"]], file=output)
 
 
 def _assigned_to_slots(ctx):

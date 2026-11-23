@@ -1194,17 +1194,26 @@ same numbers, followed by two new ones.
   To read the licence on screen, the list points to detailed menu 8 (after menu 10 for a
   new game). Moves and alignments are planned read-only with the run's own move plan; a
   move that plan would stop is listed under "not done" with its blockers, and the status
-  check shows the same dependencies and blockers.
+  check shows the same dependencies and blockers. "Not done" reasons are shown in words
+  (the status check uses the same text) with menu 1's next step when it has one; a resumed
+  game lists what it will do; saved slot data that differs, cannot be read or was saved
+  under other rule versions is listed under "not done" (never rewritten). The payload is
+  read once for the whole list.
 - Without the bundle slot only the placement is listed. It is done with an automatically
   chosen confirmation registration (registrations assigned to a preparation slot first,
-  then by number); only a registration-specific failure tries the next one. The list is
-  then built again and confirmed a second time.
+  then by number); only a registration-specific failure tries the next one. The screen
+  names the registration used and the state of the slot data; when no registration can
+  confirm, the skipped registrations and their reasons are shown and saved with the advice
+  to register one game first. The list is then built again and confirmed a second time.
 - Running: each step plans again under its own locks. Before a game starts, its entries
   in `games.json`, `state.json` (`games_applied`, and its part of `auto`, `picked`,
   `native_choices`) and `config.vdf` must be the listed ones; menu 1 additionally compares
   its fixed values (except the whole-file binding digest) and stops when more actions are
-  needed than confirmed; the listed entries are compared again under the lock. A game
-  stopped before writing is skipped; a stop after a game started writing ends the run.
+  needed than confirmed, when the kind (new or resume) differs, or when a step under the
+  lock would write something not confirmed; the listed entries are compared again under
+  the lock. A game stopped before writing is skipped; a stop after a game started writing,
+  or a failure not about that game (opening the private store or taking a move's lock),
+  ends the run. A failure to save the slot data is reported and the run goes on.
   Outcomes per game: done, not started, stopped before writing, partially applied. A
   partial game names the stage it stopped at, and the binding backup only when it exists.
 - Progress (`batch-runs/`): before a step writes, the record ID it uses (`trial_id`,
@@ -1229,22 +1238,29 @@ same numbers, followed by two new ones.
   DroidDeck screen choice of the bundle slot whose other two files still name the old slot
   is aligned without rewriting `games.json`; the reverse direction is never written.
   Games returned from this slot, or with a missing supplementary record, are moved only
-  one by one.
+  one by one. Games whose records or settings cannot be read are listed with the reason
+  instead of being left out.
 - Supplementary records (`binding-notes/`): written before the binding record, with the
   slots involved, the per-file before/after hashes and, for operation 6, the cache move.
   Binding records keep their 0.30.0 shape, so earlier tools still read the store.
 - Slot verification data (`slot-manifests/`, up to 32 MiB, written once per slot name and
   never replaced): the payload inventory, the expected generated files and the rule
   versions, saved when this tool verifies the bundle slot (placement, reuse, the batch
-  run). A different or unreadable record makes the slot unusable for operation 6.
+  run). A different or unreadable record makes the slot unusable for operation 6. The same
+  contents saved under other rule versions are reported as such ("rules-differ"), not as
+  another slot; a later version decides how to save them again.
 - Operation 6 assigns a game currently on the bundle slot to another slot with saved data
   that still verifies. It does not need the bundle slot to be intact and does not check
   dependencies or the bundle payload; it checks the initialization record, the game
   EXE, the prefix, the target slot (registered tool, saved data, prefix version) and that
   no process uses the target slot (executable, working directory or a path argument; the
-  launcher is a Python script). The target slot's `__pycache__` directories are moved into
+  launcher is a Python script), and its placement record again at writing time. Slots that
+  are not targets are shown with the reason and the manual route (the DroidDeck screen and
+  the sync command); dependency states are shown but never required. Only the
+  `__pycache__` directories the verification accepted are moved into
   the private store (`slot-caches/<binding_id>/`, non-replacing renames, never deleted)
   before the files are written, so the next launch rebuilds them from verified sources;
   their contents are not compared. The binding writer has a separate `revert` kind whose
   readiness keys are only what is checked; a normal binding can only assign the bundle
-  slot and a revert never can.
+  slot and a revert never can. The bundle slot and the supplementary-record callback are
+  required arguments of the writer.

@@ -14,6 +14,7 @@ from preparation_customization import plan_customizations
 from preparation_payload import (
     FEX_RUNTIME_CONTRACT,
     FEX_RUNTIME_DIRECTORY,
+    PayloadInventory,
     inspect_archive,
     inspect_archive_from_folder,
     runtime_writes,
@@ -97,12 +98,17 @@ def _tree_variants(directory, inventory, archive_name, mode, helper, renderer, l
 
 def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runtime_audit,
                       registrations, registration_id, exe_root, steam, renderer, parent_environment=None, tool_slot="legacy",
-                      archive_from_folder=False):
+                      archive_from_folder=False, inventory=None):
+    """``inventory``: the payload already read once from the asset folder (read-only lists only)."""
     require(mode in ("off", "observe", "cleanup"), "unsupported installation mode")
     steam = safe_path(steam)
     target = checked("target-registration-exe", pin_registration, registrations, registration_id, exe_root, steam)
-    read_archive = inspect_archive_from_folder if archive_from_folder else inspect_archive
-    inventory = checked("payload-archive", read_archive, archive, sha512, archive_root, capture=CAPTURE)
+    if inventory is None:
+        read_archive = inspect_archive_from_folder if archive_from_folder else inspect_archive
+        inventory = checked("payload-archive", read_archive, archive, sha512, archive_root, capture=CAPTURE)
+    else:
+        require(isinstance(inventory, PayloadInventory) and archive_from_folder and inventory.archive_sha512 == sha512 and
+                inventory.root == archive_root, "payload inventory differs")
     require(inventory.external_links == 0, "external payload links require separate policy")
     runtime = checked("runtime-context", plan_runtime_environment, runtime_root, runtime_audit, parent_environment)
     helper = runtime.root / "usr/local/bin/steam-compatibility"

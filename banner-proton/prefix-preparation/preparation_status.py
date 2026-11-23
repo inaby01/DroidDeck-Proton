@@ -186,6 +186,17 @@ def _move_view(context, key, bundle):
         return None
 
 
+def _binding_verified(context, key):
+    """Whether this tool's binding of the game completed once (read-only; unreadable counts as no)."""
+    from preparation_proton_update import history
+    try:
+        with PrivateStore(context["management"]) as store:
+            items, _ = history(store, key)
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    return any(item["status"] == "binding-verified" for item in items)
+
+
 def _describe_steps(steps):
     for step in steps:
         if step["step"] == "binding-plan":
@@ -304,19 +315,19 @@ def _game(key, listed, title, context):
         if title is None:
             entry.update(record="several" if len(listed) != 1 else listed[0]["status"],
                          next={"next": "not-listed", "reason": "registration-missing"})
-            print("  DroidDeckの登録が見つからないため、1（新しいゲームを準備）の一覧に出ません。", file=output)
+            print("  DroidDeckの登録が見つからないため、個別の操作の1（新しいゲームを準備）の一覧に出ません。", file=output)
             return entry
         # The same checks and stage names as menu 1 when the game is selected (profile-selection).
         if len(listed) != 1:
             entry.update(record="several", next={"next": "stop", "stage": "profile-selection",
                                                   "reason": "several game prefix records for this registration"})
-            print("  初期化の記録: 同じIDの記録が複数あります。1（新しいゲームを準備）はこのゲームで止まります。", file=output)
+            print("  初期化の記録: 同じIDの記録が複数あります。個別の操作の1（新しいゲームを準備）はこのゲームで止まります。", file=output)
             return entry
         item = listed[0]
         entry["record"] = item["status"]
         if item["status"] != "initialized-unverified":
             entry["next"] = {"next": "stop", "stage": "resume-state", "reason": "initialization-" + item["status"]}
-            print("  初期化の記録: 完了していません（" + text(item["status"]) + "）。1（新しいゲームを準備）はこのゲームで止まります"
+            print("  初期化の記録: 完了していません（" + text(item["status"]) + "）。個別の操作の1（新しいゲームを準備）はこのゲームで止まります"
                   "（作成物は削除せずに残しています）。", file=output)
             return entry
         print("  初期化の記録: 初期化済み / prefix: " + text(str(steam / "steamapps/compatdata" / key)), file=output)
@@ -325,7 +336,7 @@ def _game(key, listed, title, context):
         profile = context["profiles"].get(record["profile"]["profile_id"])
         if profile is None:
             entry["next"] = {"next": "stop", "stage": "profile-selection", "reason": "game profile changed since initialization"}
-            print("  作品プロファイル: このバンドルにありません。1（新しいゲームを準備）はこのゲームで止まります。", file=output)
+            print("  作品プロファイル: このバンドルにありません。個別の操作の1（新しいゲームを準備）はこのゲームで止まります。", file=output)
             return entry
         entry["profile_id"] = profile["profile_id"]
         print("  作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）", file=output)
@@ -380,7 +391,10 @@ def _game(key, listed, title, context):
                     return entry
         if found["kind"] == "other":
             entry["next"] = {"next": "out-of-scope"}
-            print("  このバンドルの対象外です（別のProtonに割り当て済み）。依存と次にすることは表示しません。", file=output)
+            from preparation_batch import SKIP_TEXT
+            why = SKIP_TEXT.get((entry.get("move") or {}).get("reason"))
+            print("  このバンドルの対象外です（別のProtonに割り当て済み" + ("。" + why if why else "") + "）。"
+                  "依存と次にすることは表示しません。", file=output)
             return entry
         stage = "status-evaluation"
         compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
@@ -402,12 +416,17 @@ def _game(key, listed, title, context):
         if evaluation["next"] == "ready":
             print("  次にすること: 起動できます（依存はすべて検証済みで、準備用Protonに割り当て済み）。", file=output)
         elif evaluation["next"] == "continue":
-            print("  次にすること: prepare.sh の1（すべて実行）で続きから進めます（" + "・".join(text(action_text(action, recipes))
-                                                       for action in evaluation["actions"]) + "）。", file=output)
+            doing = "・".join(text(action_text(action, recipes)) for action in evaluation["actions"])
+            if _binding_verified(context, key) and [action for action in evaluation["actions"] if action != "binding"]:
+                # The batch run leaves a bound game that needs more than a move to individual operation 1 (design 3.2).
+                print("  次にすること: 個別の操作の1（新しいゲームを準備）で続きから進めます（" + doing + "）。"
+                      "割り当て済みのゲームなので、prepare.sh の1（すべて実行）では行いません。", file=output)
+            else:
+                print("  次にすること: prepare.sh の1（すべて実行）で続きから進めます（" + doing + "）。", file=output)
         elif any(mark in evaluation["reason"] for mark in UNCLEAR):
             print("  確認できません（動作中または変化中）。ゲームとWineを終了してから、もう一度状態の確認を実行してください。", file=output)
         else:
-            print("  次にすること: 1（新しいゲームを準備）はここで止まります（" + text(evaluation["stage"] + " / " + evaluation["reason"]) + "）。", file=output)
+            print("  次にすること: 個別の操作の1（新しいゲームを準備）はここで止まります（" + text(evaluation["stage"] + " / " + evaluation["reason"]) + "）。", file=output)
             if evaluation.get("next_step"):
                 print("  " + evaluation["next_step"], file=output)
     except (OSError, ValueError, TypeError, KeyError) as error:

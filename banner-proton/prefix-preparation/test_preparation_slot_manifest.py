@@ -119,6 +119,20 @@ class SlotManifestTests(unittest.TestCase):
         self.assertFalse(manifest.usable(record))
         self.assertFalse(manifest.usable(None))
 
+    def test_the_same_contents_under_other_rule_versions_are_not_a_different_slot(self):
+        record = manifest.build(SLOT, "t", inventory(), overlays(), "v")
+        self.assertEqual(self.save(record), "created")
+        path = self.root / manifest.DIRECTORY / manifest.record_name(SLOT)
+        before = path.read_bytes()
+        later = dict(manifest.build(SLOT, "t", inventory(), overlays(), "v"), contracts=dict(record["contracts"], pycache="2"))
+        with self.store() as store:
+            self.assertEqual(manifest.state(store, SLOT, later)[0], "rules-differ")
+        self.assertEqual(self.save(later), "rules-differ")  # Not rewritten; a later version decides how to re-save.
+        self.assertEqual(path.read_bytes(), before)
+        other = dict(later, version_value="w")
+        with self.store() as store:
+            self.assertEqual(manifest.state(store, SLOT, other)[0], "mismatch")
+
     def test_write_requires_lock(self):
         record = manifest.build(SLOT, "t", inventory(), overlays(), "v")
         with self.store() as store, self.assertRaises(Invalid):

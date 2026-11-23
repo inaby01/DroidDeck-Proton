@@ -443,7 +443,7 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
 
 def interactive_one_pass(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
                          steam=None, settings=None, home=None, runtime_root=Path("/"), recipe=None, silent_launch=None,
-                         select=None, mode="interactive", expected=None, journal=None, targets=None):
+                         select=None, mode="interactive", expected=None, journal=None, targets=None, inventory=None):
     """Menu 1 (one-pass preparation). The batch run (design: Proton update 3.5, 6) uses the same code.
 
     ``select=(app_id, profile_id or None)`` skips the game and profile questions. ``mode="plan"``
@@ -456,6 +456,9 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
     record ID is chosen and before that step writes anything (design: Proton update 6).
     ``targets`` (the batch run's confirmed items of this game in the three files) is compared
     under the private lock, before every step writes and before the binding (design 3.5).
+    ``inventory`` (``mode="plan"`` only) is the payload the batch list read once (design 3.1).
+    In ``mode="run"`` the kind (new or resume) must be the confirmed one, and each step that
+    would write must be one of the confirmed actions.
     """
 
     def check_targets():
@@ -515,7 +518,14 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         return games
 
     def base_plan(record, digest):
-        return plan_recheck(record=record, record_sha256=digest, source=source, games=catalog(), records=RECORDS, **common)
+        return plan_recheck(record=record, record_sha256=digest, source=source, games=catalog(), records=RECORDS,
+                            inventory=inventory, **common)
+
+    def confirmed(action):
+        """In a batch run, a step writes only when the batch screen confirmed it (design 3.5)."""
+        if mode == "run" and action not in expected["actions"]:
+            raise Stopped("batch-confirmation", "more-actions-than-confirmed:" + action,
+                          "確認したときの内容から変わりました。何も変更していません。もう一度 prepare.sh を実行してください。")
 
     def from_base(base, asset, binding_digest):
         return fixed_values(registration=_registration(catalog(), key), profile=_profile(profile, recipes, softdenchi),
@@ -574,7 +584,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         return result
 
     require(mode in ("interactive", "plan", "run") and (mode == "interactive" or select is not None) and
-            (mode != "run" or expected is not None), "invalid one-pass mode")
+            (mode != "run" or expected is not None) and (inventory is None or mode == "plan"), "invalid one-pass mode")
+    real_output = output  # Restored on every stop: the run mode swaps the confirmation text out.
     try:
         softdenchi = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
         selection.validate_selection_config(config)
@@ -671,7 +682,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             raise Stopped(*found)
 
         def refresh_init():
-            return plan_game_prefix(source=source, games=catalog(), key=key, profile_id=profile_id, **common)
+            return plan_game_prefix(source=source, games=catalog(), key=key, profile_id=profile_id, inventory=inventory,
+                                    **common)
 
         stage = "one-pass-plan"
         print("配布物・準備用tool・登録EXE・prefix・設定をWineを起動せず照合しています。", file=output, flush=True)
@@ -722,10 +734,11 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             return 0, {"app_id": key, "label": label, "profile_id": profile_id, "fixed": fixed, "actions": actions,
                        "uses_softdenchi": uses_softdenchi, "asset": asset, "proton": proton["directory"],
                        "exe_path_ascii": init_plan.exe_path_ascii if init_plan is not None else True}
-        real_output = output
         if mode == "run":
             stage = "batch-confirmation"
             changed = changed_items(expected["fixed"], fixed, ("binding",))
+            if label != expected.get("label"):
+                changed.append("kind")
             more = sorted(set(actions) - set(expected["actions"]))
             if changed or more:
                 report["fixed_value_changes"] = [{"stage": stage, "items": changed, "more_actions": more}]
@@ -823,6 +836,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 report["steps"].append({"step": "prefix-dll", "plan": dll_plan.summary()})
                 if dll_plan.action == "skip":
                     continue
+                confirmed("prefix-dll:" + item["dependency_id"])
                 if dll_plan.blockers:
                     raise Stopped(stage, "prefix-dll-blocked:" + ",".join(dll_plan.blockers),
                                   PREFIX_DLL_BLOCKED.format(target_name(item)))
@@ -861,6 +875,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 if action == "stop":
                     raise Stopped(stage, reason, SOFTDENCHI_STATE_STOP)
                 if action == "install":
+                    confirmed("softdenchi-silent")
                     stage = "softdenchi-silent"
 
                     def refresh_silent():
@@ -911,6 +926,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             elif action == "stop":
                 raise Stopped(stage, reason, BINDING_STOP)
             else:
+                confirmed("binding")
                 result = apply_game_binding(bplan, store, lambda: plan_game_binding(
                     record=record, record_sha256=record_digest, source=source, games=catalog(), stop_check=stop,
                     recipe=softdenchi, **common), bplan.digest, stop, softdenchi,
@@ -923,11 +939,13 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         report["status"] = "ready-to-launch"
         print("準備が終わりました。DroidDeckからこのゲームを起動し、ソフト電池の認証を行ってください。", file=output)
     except Stopped as stopped:
+        output = real_output
         report.update(status="stopped", stage=stopped.check, reason=stopped.reason, next_step=stopped.next_step)
         print("停止: " + text(stopped.check) + " / " + text(stopped.reason), file=output)
         if stopped.next_step:
             print(stopped.next_step, file=output)
     except (OSError, ValueError, TypeError, KeyError) as error:
+        output = real_output
         report.update(status="stopped", stage=stage, **describe_error(error, stage),
                       writes_may_exist=started)
         if live:

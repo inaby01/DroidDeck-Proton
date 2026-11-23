@@ -56,8 +56,12 @@ def build(directory, tool_id, inventory, overlays, version_value):
 
 
 def _identity(record):
-    """What must match for two records of the same slot to be the same (not the times or writer)."""
-    return {key: record[key] for key in ("schema_version", "kind", "directory", "tool_id", "version_value", "contracts",
+    """What must match for two records of the same slot to be the same slot contents.
+
+    Not the times, the writer or the verification rule versions: the same contents saved
+    under other rules are "rules-differ", not a different slot.
+    """
+    return {key: record[key] for key in ("schema_version", "kind", "directory", "tool_id", "version_value",
                                          "inventory", "overlays")}
 
 
@@ -83,9 +87,11 @@ def validate(record, directory):
 
 
 def state(store, directory, expected=None):
-    """(state, record): "missing", "same", "mismatch" or "broken" (design 4.7).
+    """(state, record): "missing", "same", "mismatch", "rules-differ" or "broken" (design 4.7).
 
-    Without ``expected`` an intact record is "same" (usable as saved). Read-only.
+    Without ``expected`` an intact record is "same" (usable as saved; ``usable`` checks the
+    rule versions). With ``expected``, the same contents saved under other verification rule
+    versions are "rules-differ". Read-only.
     """
     try:
         found = store.read_large(DIRECTORY, record_name(directory), LIMIT)
@@ -100,6 +106,8 @@ def state(store, directory, expected=None):
         return "broken", None
     if expected is not None and _identity(record) != _identity(expected):
         return "mismatch", record
+    if expected is not None and record["contracts"] != expected["contracts"]:
+        return "rules-differ", record
     return "same", record
 
 
@@ -111,8 +119,9 @@ def usable(record):
 def save(store, directory, record):
     """Write ``record`` once under the held store lock. Returns the resulting state.
 
-    "created" when written now, "same" when an identical record exists, "mismatch" or
-    "broken" when an existing record differs or cannot be read (never overwritten).
+    "created" when written now, "same" when an identical record exists, "mismatch",
+    "rules-differ" or "broken" when an existing record differs or cannot be read (never
+    overwritten; how a later version re-saves under new rules is left to that version).
     """
     validate(record, directory)
     found, _ = state(store, directory, record)
@@ -180,7 +189,7 @@ def record_for_installation(installation):
 def save_after_verification(store, installation):
     """Save the record after the bundle slot was verified; never fails the caller (design 4.7).
 
-    Returns {"state": "created" | "same" | "mismatch" | "broken" | "failed", ...} for the result JSON.
+    Returns {"state": "created" | "same" | "mismatch" | "rules-differ" | "broken" | "failed", ...}.
     """
     try:
         return {"state": save(store, installation.customization.directory, record_for_installation(installation))}

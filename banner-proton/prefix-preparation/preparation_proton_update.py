@@ -26,6 +26,9 @@ from preparation_vdf import Document
 
 NOTES = "binding-notes"
 NOTE_KINDS = ("apply", "move", "revert")
+CACHES = "slot-caches"
+PYCACHE = "__pycache__"
+MAX_CACHES = 4096
 FIRST_NOTES_VERSION = (0, 31, 0)
 PREFIX_VERSION = re.compile(rb"^CURRENT_PREFIX_VERSION=\"([0-9.-]{1,32})\"$", re.MULTILINE)
 
@@ -165,8 +168,30 @@ def validate_note(record):
     for item in files.values():
         fields(item, ("present_before", "before_sha256", "after_sha256", "changed"))
         require(type(item["present_before"]) is bool and type(item["changed"]) is bool, "invalid note file")
-    require(record["cache_move"] is None or type(record["cache_move"]) is dict, "invalid cache move")
+        require(_sha256(item["after_sha256"]) and (item["before_sha256"] is None if not item["present_before"]
+                                                   else _sha256(item["before_sha256"])), "invalid note file hash")
+    move = record["cache_move"]
+    require(move is None or record["note_kind"] == "revert", "only a revert moves caches")
+    if move is not None:
+        fields(move, ("planned", "moved", "destination"))
+        require(move["destination"] == CACHES + "/" + record["binding_id"], "invalid cache move destination")
+        require(type(move["planned"]) is list and len(move["planned"]) <= MAX_CACHES and type(move["moved"]) is list and
+                len(move["moved"]) <= len(move["planned"]), "invalid cache move")
+        for item in move["planned"]:
+            fields(item, ("relative", "device", "inode", "files"))
+            _cache_parts(item["relative"])
+            require(type(item["device"]) is int and type(item["inode"]) is int and type(item["files"]) is dict and
+                    all(type(name) is str and _sha256(digest) for name, digest in item["files"].items()),
+                    "invalid planned cache")
+        for number, item in enumerate(move["moved"], 1):
+            fields(item, ("relative", "name"))
+            require(item["relative"] == move["planned"][number - 1]["relative"] and item["name"] == f"c{number:04d}",
+                    "invalid moved cache")
     return record
+
+
+def _sha256(value):
+    return type(value) is str and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
 def write_note(store, record):
@@ -338,7 +363,11 @@ def classify(before, key, bundle_directory, placed, steam, superseded, items):
 
 
 def placed_roots(store, steam, bundle_directory):
-    """Roots of the other preparation slots this tool placed (for the 4.4 (c) layout check)."""
+    """Roots of the other preparation slots this tool placed (for the 4.4 (c) layout check).
+
+    Same conditions as a move source (4.2, 4.7): placed by this tool, the folder exists and
+    its registration (``registered_tool``) names the slot's tool ID.
+    """
     from preparation_common import safe_path
     placed, _ = placed_slots(store)
     roots = []
@@ -347,9 +376,10 @@ def placed_roots(store, steam, bundle_directory):
             continue
         try:
             root = safe_path(safe_path(steam) / "compatibilitytools.d" / directory, safe_path(steam))
-        except Invalid:
+            tool, _ = registered_tool(steam, directory)
+        except (OSError, Invalid, TypeError, KeyError, ValueError):
             continue
-        if root.is_dir():
+        if tool == tool_id_of(directory) and root.is_dir():
             roots.append(root)
     return tuple(roots), placed
 
@@ -370,24 +400,43 @@ def bundle_directory(config):
     return slot_name(SLOT_PREFIX + config["payload"]["root"].removeprefix("DroidDeck-Proton "))
 
 
+def unreadable_reason(error):
+    """A short reason for a game left out of a list (our own messages only; no local paths)."""
+    return str(error) if isinstance(error, Invalid) else type(error).__name__
+
+
 def move_candidates(store, steam, settings, config, records):
-    """Games that ``move`` or ``align`` would apply to, with their classification (read-only)."""
+    """Games that ``move`` or ``align`` would apply to, with their classification (read-only).
+
+    Returns (found, roots, unreadable): ``unreadable`` lists the games that could not be
+    judged ({"app_id", "reason"}), so they are shown instead of silently left out.
+    """
     from preparation_binding import plan_binding
     directory = bundle_directory(config)
     roots, placed = placed_roots(store, steam, directory)
     superseded = tuple(config.get("supersedes", ()))
-    found = []
+    found, unreadable = [], []
     for record in records:
         key = record["app_id"]
         try:
             items, _ = history(store, key)
             plan = plan_binding(steam, settings, key, directory)
             decision = classify(plan.before, key, directory, placed, steam, superseded, items)
-        except (OSError, Invalid, TypeError, KeyError, ValueError):
+        except (OSError, Invalid, TypeError, KeyError, ValueError) as error:
+            unreadable.append({"app_id": key, "reason": unreadable_reason(error)})
             continue
         if decision["kind"] in ("move", "align"):
             found.append((record, decision))
-    return found, roots
+    return found, roots, unreadable
+
+
+UNREADABLE_TEXT = "記録や設定を読めなかったため一覧に出していないゲーム: "
+
+
+def print_unreadable(unreadable, output, text):
+    """One line per game left out of a list, with the reason (A12)."""
+    for item in unreadable:
+        print("  " + UNREADABLE_TEXT + "ID " + text(item["app_id"]) + "（" + text(item["reason"]) + "）", file=output)
 
 
 def move_check(store, steam, config, key, pinned, targets=None):
@@ -480,12 +529,15 @@ def interactive_move(directory, renderer, config, *, input_stream=None, output_s
                 if item.get("status") == "initialized-unverified":
                     record, digest = store.read_record(RECORDS, item["trial_id"] + ".json")
                     records.append((record, digest))
-            candidates, roots = move_candidates(store, steam, settings, config, [record for record, _ in records])
+            candidates, roots, unreadable = move_candidates(store, steam, settings, config,
+                                                            [record for record, _ in records])
         if not candidates:
             print("このProtonへ移せるゲームはありません。", file=output)
+            print_unreadable(unreadable, output, selection._text)
             report = {"mode": "move-result", "tool_version": VERSION, "status": "nothing-to-move", "writes": [],
-                      "preparation_complete": False}
+                      "unreadable_games": unreadable, "preparation_complete": False}
         else:
+            print_unreadable(unreadable, output, selection._text)
             source, _, games = selection.registration_catalog(environment)
             for number, (record, decision) in enumerate(candidates, 1):
                 title = games.get(record["app_id"], {}).get("title", "（登録が見つかりません）")
@@ -515,7 +567,8 @@ def interactive_move(directory, renderer, config, *, input_stream=None, output_s
                 print("  依存: " + selection._text(item["dependency_id"] + " / " + item["state"] + layout +
                                                   (" / " + item["reason"] if item.get("reason") else "")), file=output)
             report = {"mode": "move-result", "tool_version": VERSION, "decision": decision, "plan": summary,
-                      "blockers": blockers, "binding_written": False, "preparation_complete": False}
+                      "blockers": blockers, "unreadable_games": unreadable, "binding_written": False,
+                      "preparation_complete": False}
             if blockers:
                 for blocker in blockers:
                     print("停止理由: " + selection._text(blocker), file=output)
@@ -560,9 +613,38 @@ def interactive_move(directory, renderer, config, *, input_stream=None, output_s
 
 # ---- individual operation 6: assign a game back to another preparation slot ----------------
 
-CACHES = "slot-caches"
-PYCACHE = "__pycache__"
 REVERT_NOTE = "新しいProtonから前のProtonへ戻す向きは、実機ではまだ確かめていません。"
+REFUSED_TEXT = {
+    "slot-manifest-missing": "照合情報がありません（このProtonを同梱した0.31.0以降のバンドルを一度実行すると作られます）",
+    "slot-manifest-broken": "照合情報を読めません（書き換えません。個別の操作の2で確かめてください）",
+    "slot-manifest-mismatch": "同じ名前で別の中身の照合情報があります",
+    "slot-manifest-rules-differ": "照合情報の照合規則の版が、このツールと違います",
+    "slot-differs-from-saved-data": "今のslotの中身が、保存した照合情報と違います",
+}
+REFUSED_GUIDE = "このProtonへは、DroidDeckの画面と同期のコマンドで戻せます。"
+
+
+def print_refused(refused, output, text):
+    """Slots that are not revert targets, with the reason and the manual route (design 4.8)."""
+    for name, reason in sorted(refused.items()):
+        print("  " + text(name) + ": " + REFUSED_TEXT.get(reason, text(reason)) + "。" + REFUSED_GUIDE, file=output)
+
+
+def revert_dependencies(record, config, compatdata, exe, stop, saved, target_root, previous_slots):
+    """Dependency states against the revert target, shown but never required (design 4.8)."""
+    from preparation_game_prefix import _dependency_states, validate_game_config
+    from preparation_slot_manifest import inventory_of
+    from preparation_softdenchi_recipe import softdenchi_recipe
+    try:
+        profiles, recipes = validate_game_config(config.get("game_preparation"))
+        profile = profiles.get(record["profile"]["profile_id"])
+        require(profile is not None, "game profile not in this bundle")
+        states = _dependency_states(profile, recipes, compatdata, softdenchi_recipe(), stop,
+                                    exe, (inventory_of(saved), target_root), previous_slots)
+        return [{key: item[key] for key in ("dependency_id", "state", "reason", "layout") if key in item}
+                for item in states], None
+    except (OSError, Invalid, TypeError, KeyError, ValueError) as error:
+        return [], unreadable_reason(error)
 
 
 def revert_targets(store, steam, bundle):
@@ -602,24 +684,64 @@ def marked_slot(items, bundle, candidates):
     return max(found, key=lambda record: record["created_ns"])["previous_directory"] if found else None
 
 
-def list_caches(root):
-    """``__pycache__`` directories of a verified slot: relative path, identity, file hashes (4.7)."""
+def _cache_parts(relative):
+    """Path components of an accepted cache directory, relative to the slot root."""
+    parts = relative.split("/") if type(relative) is str else []
+    require(parts and parts[-1] == PYCACHE and not {"", ".", ".."} & set(parts), "invalid cache path")
+    return parts
+
+
+def _open_parent(root_fd, parts):
+    """A descriptor of the cache's parent directory, walked without following links."""
     import os
+    parent = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            following = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            os.close(parent)
+            parent = following
+    except BaseException:
+        os.close(parent)
+        raise
+    return parent
+
+
+def _cache_files(directory_fd):
+    import os
+    hashes = {}
+    for name in sorted(os.listdir(directory_fd)):
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        with os.fdopen(descriptor, "rb") as stream:
+            hashes[name] = hashlib.sha256(stream.read(16 * 1024 * 1024)).hexdigest()
+    return hashes
+
+
+def list_caches(root, verified):
+    """The ``__pycache__`` directories the verification accepted: relative path, identity, file hashes.
+
+    Only the directories ``verify_fex_runtime_tree`` reported as ``python_caches`` (design
+    4.7 step 1); a ``__pycache__`` of the payload itself is not a cache and is never moved.
+    """
+    import os
+    accepted = sorted((verified.get("python_caches") or {}).get("directories") or {})
+    require(len(accepted) <= MAX_CACHES, "too many cache directories")
     caches = []
-    for current, directories, files in os.walk(root, followlinks=False):
-        directories.sort()
-        if os.path.basename(current) != PYCACHE:
-            continue
-        directories[:] = []
-        info = os.stat(current, follow_symlinks=False)
-        hashes = {}
-        for name in sorted(files):
-            path = os.path.join(current, name)
-            with open(path, "rb") as stream:
-                hashes[name] = hashlib.sha256(stream.read(16 * 1024 * 1024)).hexdigest()
-        caches.append({"relative": os.path.relpath(current, root), "device": info.st_dev, "inode": info.st_ino,
-                       "files": hashes})
-    require(len(caches) <= 4096, "too many cache directories")
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for relative in accepted:
+            parent = _open_parent(root_fd, _cache_parts(relative))
+            try:
+                fd = os.open(PYCACHE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                try:
+                    info = os.fstat(fd)
+                    caches.append({"relative": relative, "device": info.st_dev, "inode": info.st_ino,
+                                   "files": _cache_files(fd)})
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(parent)
+    finally:
+        os.close(root_fd)
     return caches
 
 
@@ -638,14 +760,8 @@ def move_caches(store, root, plan_caches, binding_id, record, record_hash):
     try:
         with store.directory((CACHES, binding_id), create=True) as destination:
             for number, item in enumerate(plan_caches, 1):
-                parts = item["relative"].split("/")
-                require(parts[-1] == PYCACHE and ".." not in parts and "" not in parts, "invalid cache path")
-                parent = os.dup(root_fd)
+                parent = _open_parent(root_fd, _cache_parts(item["relative"]))
                 try:
-                    for part in parts[:-1]:
-                        following = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                        os.close(parent)
-                        parent = following
                     info = os.stat(PYCACHE, dir_fd=parent, follow_symlinks=False)
                     require((info.st_dev, info.st_ino) == (item["device"], item["inode"]), "cache directory changed")
                     name = f"c{number:04d}"
@@ -654,13 +770,7 @@ def move_caches(store, root, plan_caches, binding_id, record, record_hash):
                     try:
                         info = os.fstat(moved_fd)
                         require((info.st_dev, info.st_ino) == (item["device"], item["inode"]), "moved cache differs")
-                        names = sorted(os.listdir(moved_fd))
-                        require(names == sorted(item["files"]), "moved cache files differ")
-                        for file_name in names:
-                            descriptor = os.open(file_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=moved_fd)
-                            with os.fdopen(descriptor, "rb") as stream:
-                                digest = hashlib.sha256(stream.read(16 * 1024 * 1024)).hexdigest()
-                            require(digest == item["files"][file_name], "moved cache file differs")
+                        require(_cache_files(moved_fd) == item["files"], "moved cache files differ")
                     finally:
                         os.close(moved_fd)
                     os.fsync(parent)
@@ -712,7 +822,7 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
         bundle_tool = tool_id_of(bundle)
         source, _, games = selection.registration_catalog(environment)
         with PrivateStore(management) as store:
-            bound = []
+            bound, unreadable = [], []
             for item in store.inventory()["game_prefixes"]:
                 if item.get("status") != "initialized-unverified":
                     continue
@@ -722,20 +832,25 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
                     items, _ = history(store, key)
                     # Read without the bundle slot's registration: a broken bundle slot must not hide the game.
                     current = current_selection(current_files(steam, settings), key)
-                except (OSError, Invalid, TypeError, KeyError, ValueError):
+                except (OSError, Invalid, TypeError, KeyError, ValueError) as error:
+                    unreadable.append({"app_id": key, "reason": unreadable_reason(error)})
                     continue
                 if points_to(current["games"], bundle, bundle_tool) and points_to(current["applied"], bundle, bundle_tool) \
                         and current["config"] == bundle_tool and history_state(items)[0]:
                     bound.append((record, digest, items))
             targets, refused = revert_targets(store, steam, bundle) if bound else ([], {})
+            placed_at_list = placed_slots(store)[0]
+            other_roots = {name: placed_roots(store, steam, name)[0] for name, _ in targets}
         if not bound or not targets:
             print("このProtonから戻せるゲームはありません。" if not bound else
                   "戻す先にできる準備用Protonがありません（DroidDeckの画面と同期のコマンドで戻せます）。", file=output)
-            for name, reason in sorted(refused.items()):
-                print("  " + selection._text(name) + ": " + reason, file=output)
+            print_unreadable(unreadable, output, selection._text)
+            print_refused(refused, output, selection._text)
             report = {"mode": "revert-result", "tool_version": VERSION, "status": "nothing-to-revert",
-                      "refused_targets": refused, "writes": [], "preparation_complete": False}
+                      "refused_targets": refused, "unreadable_games": unreadable, "writes": [],
+                      "preparation_complete": False}
         else:
+            print_unreadable(unreadable, output, selection._text)
             for number, (record, _, _) in enumerate(bound, 1):
                 title = games.get(record["app_id"], {}).get("title", "（登録が見つかりません）")
                 print(f"{number}. {selection._text(title)} [ID {record['app_id']}] 今: " + selection._text(bundle), file=output)
@@ -754,6 +869,9 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
             for number, name in enumerate(ordered, 1):
                 print(f"{number}. " + selection._text(name) + ("（このProtonへ移す前のProton）" if name == mark else ""),
                       file=output)
+            if refused:
+                print("戻す先にできないProton:", file=output)
+                print_refused(refused, output, selection._text)
             answer = stream.readline(32).strip()
             if answer == "q" or not answer:
                 print("取り消しました。", file=output)
@@ -781,15 +899,25 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
             if not users["clear"]:
                 blockers.append("target-slot-in-use")
             verified = verify_fex_runtime_tree(target_root, inventory_of(saved), saved["overlays"])
-            caches = list_caches(target_root)
+            caches = list_caches(target_root, verified)
             plan = plan_binding(steam, settings, key, target_dir)
+            dependencies, dependencies_unreadable = revert_dependencies(
+                record, config, compatdata, identity["exe"], stop, saved, target_root, other_roots[target_dir])
             report = {"mode": "revert-result", "tool_version": VERSION, "app_id": key, "from": bundle, "to": target_dir,
                       "marked": mark == target_dir, "caches_to_move": len(caches), "blockers": blockers,
+                      "dependencies": dependencies, "dependencies_unreadable": dependencies_unreadable,
+                      "refused_targets": refused, "unreadable_games": unreadable,
                       "slot_runtime_writes": runtime_writes(verified), "binding_written": False,
                       "preparation_complete": False, "process_observation": {"slot_users": users}}
             print("戻す先: " + selection._text(target_dir), file=output)
             print("戻す先のProtonは、置いたときに保存した中身の一覧と照合しました（配布物とは照合していません）。", file=output)
-            print("依存（DLL・ソフト電池）の判定は求めません（prefixの中は変えません）。", file=output)
+            for item in dependencies:
+                print("  依存: " + selection._text(" / ".join(str(item[key]) for key in ("dependency_id", "state", "layout",
+                                                                                        "reason") if item.get(key))),
+                      file=output)
+            if dependencies_unreadable:
+                print("  依存: 判定できません（" + selection._text(dependencies_unreadable) + "）", file=output)
+            print("依存（DLL・ソフト電池）の判定は、戻す条件にしません（prefixの中は変えません）。", file=output)
             if blockers:
                 for blocker in blockers:
                     print("停止理由: " + selection._text(blocker), file=output)
@@ -819,6 +947,8 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
                         require(observe_slot_users(target_root, proc_root)["clear"], "revert target slot in use")
                         found, current = manifest_state(store, target_dir)
                         require(found == "same" and current == saved, "slot data changed")
+                        require(placed_slots(store)[0].get(target_dir, False) == placed_at_list[target_dir],
+                                "revert target placement record changed")
                         _, hashes = registered_tool(steam, target_dir)
                         require(hashes == tool_hashes, "slot tool changed")
                         result = verify_fex_runtime_tree(target_root, inventory_of(saved), saved["overlays"])
@@ -831,7 +961,8 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
                         require(points_to(current["games"], bundle, bundle_tool) and
                                 points_to(current["applied"], bundle, bundle_tool) and current["config"] == bundle_tool,
                                 "assignment changed")
-                        require(list_caches(target_root) == caches, "revert target caches changed")
+                        again = verify_fex_runtime_tree(target_root, inventory_of(saved), saved["overlays"])
+                        require(list_caches(target_root, again) == caches, "revert target caches changed")
 
                     def on_binding_id(run_id):
                         entry = note(run_id, key, "revert", target_dir, bundle, plan,

@@ -252,7 +252,7 @@ class GamePrefixTests(DEP['InstallTests']):
         lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
         with PrivateStore(self.f.store_root) as store, store.locked(lock), self.assertRaisesRegex(Invalid, 'game binding blocked'):
             game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,
-                                    ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+                                    ProcessStopCheck(self.game_compat, self.f.proc), self.recipe, on_binding_id=lambda run_id: None)
         self.assertEqual(before, self.protected())
 
     def test_binding_with_every_dependency_verified_writes_only_this_game(self):
@@ -266,9 +266,9 @@ class GamePrefixTests(DEP['InstallTests']):
         with PrivateStore(self.f.store_root) as store, store.locked(lock):
             with self.assertRaises(Invalid):
                 game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), '0' * 64,
-                                        ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+                                        ProcessStopCheck(self.game_compat, self.f.proc), self.recipe, on_binding_id=lambda run_id: None)
             result = game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,
-                                             ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+                                             ProcessStopCheck(self.game_compat, self.f.proc), self.recipe, on_binding_id=lambda run_id: None)
         self.assertEqual(result['status'], 'binding-verified')
         games_after = json.loads(self.games_config.read_text())
         self.assertEqual(games_after['games']['42'], {'valve': False, 'dir': plan.base.customization.directory})
@@ -320,12 +320,12 @@ class GamePrefixTests(DEP['InstallTests']):
         dll.write_bytes(DLL + b'changed')
         with PrivateStore(self.f.store_root) as store, store.locked(lock), self.assertRaises(Invalid):
             game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,
-                                    ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+                                    ProcessStopCheck(self.game_compat, self.f.proc), self.recipe, on_binding_id=lambda run_id: None)
         self.assertEqual(before, self.protected())
         dll.write_bytes(DLL)
         with PrivateStore(self.f.store_root) as store, store.locked(lock):
             result = game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,
-                                             ProcessStopCheck(self.game_compat, self.f.proc), self.recipe)
+                                             ProcessStopCheck(self.game_compat, self.f.proc), self.recipe, on_binding_id=lambda run_id: None)
         self.assertEqual(result['status'], 'binding-verified')
         self.assertEqual(dll.read_bytes(), DLL)
         dll.unlink()
@@ -367,7 +367,7 @@ class GamePrefixTests(DEP['InstallTests']):
         with PrivateStore(self.f.store_root) as store, store.locked(lock), \
                 self.assertRaisesRegex(Invalid, 'dependency postconditions changed'):
             game.apply_game_binding(plan, store, lambda: plan, plan.digest, ProcessStopCheck(self.game_compat, self.f.proc),
-                                    self.recipe)
+                                    self.recipe, on_binding_id=lambda run_id: None)
         self.assertEqual(before, self.protected())
 
         class Busy:
@@ -413,7 +413,7 @@ class GamePrefixTests(DEP['InstallTests']):
         with PrivateStore(self.f.store_root) as store, store.locked(lock), \
                 self.assertRaisesRegex(Invalid, 'tool runtime writes changed'):
             game.apply_game_binding(plan, store, lambda: plan, plan.digest, ProcessStopCheck(self.game_compat, self.f.proc),
-                                    self.recipe)
+                                    self.recipe, on_binding_id=lambda run_id: None)
         self.assertEqual(before, self.protected())
         self.assertNotEqual(self.binding_plan(record, digest).digest, plan.digest)
         (self.f.exe.parent / 'mfc42.dll').unlink()
@@ -598,7 +598,7 @@ class GamePrefixTests(DEP['InstallTests']):
         lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
         with PrivateStore(self.f.store_root) as store, store.locked(lock), \
                 self.assertRaisesRegex(Invalid, 'dependency postconditions changed'):
-            game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest, stop, self.recipe)
+            game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest, stop, self.recipe, on_binding_id=lambda run_id: None)
         self.assertEqual(stop.calls, 2)
         self.assertEqual(before, self.protected())
 

@@ -58,8 +58,10 @@ class BindingTests(unittest.TestCase):
 
     def apply(self, plan=None, ready=None):
         with PrivateStore(self.store_root, create=True) as store, store.locked(self.lock_key):
-            return binding.apply_binding(plan or self.plan(), self.steam, self.settings, store,
-                                         ready or (lambda: {"target": True, "dependencies": True, "payload": True, "stopped": True}))
+            plan = plan or self.plan()
+            return binding.apply_binding(plan, self.steam, self.settings, store,
+                                         ready or (lambda: {"target": True, "dependencies": True, "payload": True, "stopped": True}),
+                                         bundle_directory=plan.directory, on_binding_id=lambda run_id: None)
 
     def record(self):
         paths = sorted((self.store_root / "bindings").glob("binding-*.json"))
@@ -266,7 +268,8 @@ class BindingTests(unittest.TestCase):
         calls = []
         def ready():
             calls.append(1)
-            return {"target": True, "dependencies": True, "payload": True, "stopped": len(calls) < 3}
+            # Before the lock, before the binding ID, after the supplementary record, then before each file.
+            return {"target": True, "dependencies": True, "payload": True, "stopped": len(calls) < 4}
         before = self.games.read_bytes()
         with self.assertRaises(Invalid):
             self.apply(ready=ready)
@@ -357,7 +360,8 @@ except Invalid:
     def test_wrong_preparation_lock_cannot_bind(self):
         with PrivateStore(self.store_root, create=True) as store, store.locked("0" * 64), self.assertRaises(Invalid):
             binding.apply_binding(self.plan(), self.steam, self.settings, store,
-                                  lambda: {"target": True, "dependencies": True, "payload": True, "stopped": True})
+                                  lambda: {"target": True, "dependencies": True, "payload": True, "stopped": True},
+                                  bundle_directory=self.directory, on_binding_id=lambda run_id: None)
 
     def test_missing_registration_wrapper_or_unexpected_commandline_is_rejected(self):
         manifest = self.tool / "toolmanifest.vdf"

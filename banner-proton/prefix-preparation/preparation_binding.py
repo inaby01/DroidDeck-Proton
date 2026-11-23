@@ -400,18 +400,19 @@ READY_KEYS = {"normal": ("target", "dependencies", "payload", "stopped"),
               "revert": ("target", "stopped", "slot_record")}
 
 
-def apply_binding(plan, steam, settings, store, ready, *, kind="normal", bundle_directory=None, under_lock=None,
-                  on_binding_id=None):
+def apply_binding(plan, steam, settings, store, ready, *, bundle_directory, on_binding_id, kind="normal",
+                  under_lock=None):
     """Internal only: caller holds tool/prefix locks and supplies real readiness checks.
 
     ``kind="normal"`` (ready: target registration, dependency postconditions, trusted payload,
     stopped processes) may only assign the bundle's own slot; ``kind="revert"`` (ready:
     target, stopped, revert slot record) may only assign another slot. ``bundle_directory``
-    names the bundle slot for both checks (required for a revert). ``under_lock(fresh)``
+    names the bundle slot for both checks (always required). ``under_lock(fresh)``
     runs once right after the DroidDeck lock is taken and the plan is rebuilt, to compare
     the confirmed target items (design 3.5); ``on_binding_id(run_id)`` runs once after the
     binding ID is chosen and before the binding record, backups or settings are written
-    (supplementary records, a revert's cache move; design 4.3, 4.7). No CLI readiness
+    (supplementary records, a revert's cache move; design 4.3, 4.7); it is required, so a
+    0.31.0 binding record never lacks its supplementary record. No CLI readiness
     flags, automatic rollback or full-sync invocation are available.
     """
     steam, settings = safe_path(steam), safe_path(settings)
@@ -420,9 +421,10 @@ def apply_binding(plan, steam, settings, store, ready, *, kind="normal", bundle_
             "binding requires the target preparation lock")
     require(callable(ready), "trusted readiness callback required")
     require(kind in READY_KEYS, "unknown binding kind")
+    require(type(bundle_directory) is str and callable(on_binding_id), "bundle slot and supplementary record required")
     if kind == "revert":
-        require(bundle_directory is not None and plan.directory != bundle_directory, "a revert cannot assign the bundle slot")
-    elif bundle_directory is not None:
+        require(plan.directory != bundle_directory, "a revert cannot assign the bundle slot")
+    else:
         require(plan.directory == bundle_directory, "a binding can only assign the bundle slot")
     def check_ready():
         checks = ready()
@@ -449,9 +451,8 @@ def apply_binding(plan, steam, settings, store, ready, *, kind="normal", bundle_
 
         guard()
         run_id = "binding-" + secrets.token_hex(16)
-        if on_binding_id is not None:
-            on_binding_id(run_id)
-            guard()
+        on_binding_id(run_id)
+        guard()
         result = {"schema_version": 1, "tool_version": VERSION, "binding_id": run_id,
                   "app_id": plan.registration_id, "input_digest": plan.digest, "status": "binding-running",
                   "completed_files": [], "preparation_complete": False}

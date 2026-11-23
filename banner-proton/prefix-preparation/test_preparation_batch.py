@@ -260,9 +260,76 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         _, _, output = self.first_screen('q\n')
         self.assertIn('[ID 42]', output)
         self.assertNotIn('[ID 42] を新しく準備する', output)
+        self.assertIn('の準備を続きから進める（', output)  # What it will do, as in the status check.
+        self.assertIn('準備用Protonに割り当てる', output)
         _, report, output = self.first_screen('1\n')
         outcomes = {item['kind']: item['outcome'] for item in report['items']}
         self.assertEqual(outcomes.get('resume'), 'done', output)
+
+    def test_a_run_of_another_kind_than_confirmed_stops(self):
+        ctx = self.batch_context()
+        profile = self.config['game_preparation']['profiles'][0]['profile_id']
+        _, plan, _, _ = self.run_menu('', lambda text: (0, ctx.one_pass(select=('42', profile), mode='plan')[1], ''))
+        expected = dict(plan, label='続きから')
+        _, report, _, _ = self.run_menu('', lambda text: (0, ctx.one_pass(select=('42', profile), mode='run',
+                                                                          expected=expected)[1], ''))
+        self.assertEqual((report['stage'], report['reason']), ('batch-confirmation', 'confirmed-values-changed:kind'))
+        self.assertFalse(self.game_compat.exists())
+
+    def test_a_stop_while_the_details_are_swapped_out_is_still_shown(self):
+        import io
+
+        import preparation_one_pass as one_pass
+        self.initialize()
+        ctx = self.batch_context()
+        _, plan, _, _ = self.run_menu('', lambda text: (0, ctx.one_pass(select=('42', None), mode='plan')[1], ''))
+        shown = io.StringIO()
+        with unittest.mock.patch.object(one_pass, 'action_text', side_effect=ValueError('display failed')):
+            _, report, _, _ = self.run_menu('', lambda text: (0, ctx.one_pass(select=('42', None), mode='run',
+                                                                              expected=plan, output=shown)[1], ''))
+        self.assertEqual(report['status'], 'stopped')
+        self.assertIn('検査停止', shown.getvalue())
+
+    def test_a_failed_slot_data_save_is_reported_and_the_run_goes_on(self):
+        self.forget_manifest()
+        with unittest.mock.patch.object(batch, '_save_manifest_locked', side_effect=OSError(28, 'no space')):
+            _, report, output = self.first_screen('1\n')
+        entries = {item['kind']: item for item in report['items']}
+        self.assertEqual((entries['save-manifest']['outcome'], entries['save-manifest']['reason']),
+                         ('skipped', 'manifest-save-failed'))
+        self.assertEqual(entries['save-manifest']['error']['error_class'], 'OSError')
+        self.assertEqual(entries['new']['outcome'], 'done', output)
+        self.assertIn('戻す先には使えません', output)
+
+    def test_slot_data_of_other_contents_is_listed_under_not_done(self):
+        path = self.f.store_root / manifest.DIRECTORY / manifest.record_name(update.bundle_directory(self.config))
+        path.write_bytes(path.read_bytes().replace(b'"version_value":"', b'"version_value":"changed '))
+        _, _, output = self.first_screen('q\n')
+        self.assertIn('このProtonの照合情報の保存: ' + batch.MANIFEST_SKIP_TEXT['mismatch'], output)
+        self.assertNotIn('このProtonの照合情報を保存する', output)
+
+    def test_the_list_reads_the_payload_once(self):
+        import preparation_installation as installation
+        import preparation_recheck as recheck
+        calls = []
+
+        def counting(real):
+            def read(*args, **kwargs):
+                calls.append(1)
+                return real(*args, **kwargs)
+            return read
+        with unittest.mock.patch.object(recheck, 'inspect_archive_from_folder',
+                                        side_effect=counting(recheck.inspect_archive_from_folder)), \
+                unittest.mock.patch.object(installation, 'inspect_archive_from_folder',
+                                           side_effect=counting(installation.inspect_archive_from_folder)):
+            _, _, output = self.first_screen('q\n')
+        self.assertIn('[ID 42] を新しく準備する', output)
+        self.assertEqual(len(calls), 1)
+
+    def batch_context(self):
+        return batch.Context(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
+                             input_stream=None, output_stream=None, environment=self.environment, steam=self.f.steam,
+                             settings=self.f.settings, home=self.home, runtime_root=self.f.root)
 
     def test_the_journal_holds_each_id_before_its_record_is_written(self):
         order = []
@@ -377,6 +444,23 @@ class MoveBatchTests(BatchFixture, UPDATE['MoveFixture'], ONE['OnePassTests']):
         self.assertEqual(before, self.games_config.read_bytes())
         self.assertEqual(self.selection()['kind'], 'bound')
 
+    def test_a_lock_held_elsewhere_ends_the_run(self):
+        # A real lock held by another run also blocks the progress record, so the run stops before any game;
+        # this is the race where only the game's lock is taken in between.
+        original, game = PrivateStore.locked, self.lock()
+
+        def locked(store, key):
+            if key == game:
+                raise batch.Invalid('preparation already locked')
+            return original(store, key)
+        with unittest.mock.patch.object(PrivateStore, 'locked', locked):
+            _, report, output = self.first_screen('1\n')
+        entry = next(item for item in report['items'] if item['kind'] == 'move')
+        self.assertEqual(entry['outcome'], 'skipped', output)
+        self.assertTrue(entry['run_stopped'])
+        self.assertIn('このゲームによらない理由で止まった', output)
+        self.assertEqual(self.selection()['kind'], 'move')
+
     def test_games_on_preparation_slots_are_preferred_for_confirmation(self):
         self.assertIn('42', batch._assigned_to_slots(batch.Context(
             self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config, input_stream=None,
@@ -404,6 +488,7 @@ class PlacementBatchTests(BatchFixture, ONE['OnePassTests']):
         _, report, output = self.first_screen('1\nq\n')
         self.assertTrue(slot.is_dir(), output)
         self.assertEqual(report['placement']['confirmation'], '42')
+        self.assertIn('置く確認に使った登録: Example [ID 42]', output)
         self.assertIn('[ID 42] を新しく準備する', output.split('新しいProtonを置きました', 1)[1])
         self.assertIn('取り消しました（新しいProtonは置いたままです）', output)
         self.assertFalse(self.game_compat.exists())
@@ -436,6 +521,19 @@ class PlacementBatchTests(BatchFixture, ONE['OnePassTests']):
         self.assertEqual([item['app_id'] for item in result['skipped_candidates']], ['43'])
         self.assertTrue(slot.is_dir())
 
+    def test_when_no_candidate_can_confirm_the_reasons_and_the_remedy_are_shown(self):
+        import preparation_target as target
+        slot = self.f.steam / 'compatibilitytools.d' / update.bundle_directory(self.config)
+        shutil.rmtree(slot)
+        with unittest.mock.patch.object(target, 'pin_registration', side_effect=batch.Invalid('registration EXE missing')):
+            _, report, output = self.first_screen('1\n')
+        self.assertEqual(report['status'], 'stopped')
+        self.assertEqual([(item['app_id'], item['reason']) for item in report['skipped_candidates']],
+                         [('42', 'registration EXE missing')])
+        self.assertIn('使えなかった登録: ID 42（registration EXE missing）', output)
+        self.assertIn('DroidDeckにゲームを1本登録し', output)
+        self.assertFalse(slot.exists())
+
     def test_a_check_common_to_every_candidate_stops_once(self):
         import preparation_static_placement as placement
         slot = self.f.steam / 'compatibilitytools.d' / update.bundle_directory(self.config)
@@ -458,6 +556,17 @@ for _class in (NewGameBatchTests, MoveBatchTests, PlacementBatchTests):
         if _name.startswith('test_') and _name not in _class.__dict__:
             setattr(_class, _name, None)
 del _class, _name
+
+
+class TextTests(unittest.TestCase):
+    def test_reasons_are_shown_in_words(self):
+        self.assertIn('DroidDeckの画面と同期のコマンドで移せます', batch._skip_text('slot-folder-missing-or-unregistered'))
+        self.assertTrue(batch._skip_text('unreadable:OSError').startswith('記録や設定を読めません（OSError）'))
+        self.assertIn('もう一度', batch._skip_text('binding-partially-applied', 'もう一度確かめてください'))
+        for reason in ('not-a-preparation-slot', 'slot-not-placed-by-this-tool', 'slot-tool-id-differs',
+                       'binding-running-record', 'binding-failed-after-writing', 'no-verified-binding',
+                       'not-assigned-to-a-placed-slot'):
+            self.assertIn(reason, batch.SKIP_TEXT)
 
 
 class NewDeviceTests(unittest.TestCase):

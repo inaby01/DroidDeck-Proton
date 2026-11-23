@@ -227,8 +227,8 @@ class GamePrefixPlan:
 
 
 def plan_game_prefix(*, config, directory, renderer, source, games, key, profile_id, steam, settings, home, environment,
-                     runtime_root):
-    """Read-only plan for one registered game without a prefix."""
+                     runtime_root, inventory=None):
+    """Read-only plan for one registered game without a prefix (``inventory``: payload read once, for lists)."""
     profiles, recipes = validate_game_config(config.get("game_preparation"))
     require(profile_id in profiles, "unknown game profile")
     profile = profiles[profile_id]
@@ -244,7 +244,7 @@ def plan_game_prefix(*, config, directory, renderer, source, games, key, profile
     installation = plan_installation(archive=_archive(directory, payload), sha512=payload["sha512"], archive_root=payload["root"],
         mode=payload["mode"], runtime_root=runtime_root, runtime_audit=config["runtime_reference"], registrations=source,
         registration_id=key, exe_root=exe.parent, steam=steam, renderer=renderer, parent_environment=environment,
-        tool_slot="preparation", archive_from_folder=True)
+        tool_slot="preparation", archive_from_folder=True, inventory=inventory)
     trial._live_runtime(installation)
     report = installation.summary()
     require(report["action"] == "reuse-verified-tree", "verified installed preparation tool required")
@@ -554,7 +554,7 @@ def profile_revision_change(profile, recorded):
             "current_revision": profile["revision"], "current_digest": current}
 
 
-def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=None, *, under_lock=None, on_binding_id=None):
+def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=None, *, on_binding_id, under_lock=None):
     """Operator-confirmed target-only binding through the guarded internal writer.
 
     The readiness callback rechecks the registration, the FEX-contract tool tree, the

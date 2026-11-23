@@ -39,6 +39,48 @@ class ProtonUpdateUnitTests(unittest.TestCase):
         self.assertFalse(update.points_to({'valve': True, 'dir': slot}, slot, tool))
         self.assertFalse(update.points_to(None, slot, tool))
 
+    def test_only_the_caches_the_verification_accepted_are_listed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(dir='/tmp') as root:
+            root = Path(root)
+            for name in ('shipped/__pycache__', 'lib/__pycache__'):
+                (root / name).mkdir(parents=True)
+                (root / name / 'module.cpython-314.pyc').write_bytes(b'x')
+            self.assertEqual(update.list_caches(root, {'python_caches': None}), [])
+            found = update.list_caches(root, {'python_caches': {'directories': {'lib/__pycache__': {}}}})
+            self.assertEqual([item['relative'] for item in found], ['lib/__pycache__'])
+            self.assertEqual(list(found[0]['files']), ['module.cpython-314.pyc'])
+            with self.assertRaises(Invalid):
+                update.list_caches(root, {'python_caches': {'directories': {'lib/../shipped/__pycache__': {}}}})
+
+    def test_supplementary_records_are_checked_to_the_cache_move(self):
+        import types
+        slot, previous = 'SoftDenchi-Prep-Proton b', 'SoftDenchi-Prep-Proton a'
+        plan = types.SimpleNamespace(before={name: b'old' for name in update.FILES},
+                                     after={name: b'new' for name in update.FILES})
+        binding_id = 'binding-' + '0' * 32
+        planned = [{'relative': '__pycache__', 'device': 1, 'inode': 2, 'files': {'a.pyc': '0' * 64}}]
+        good = update.note(binding_id, '42', 'revert', slot, previous, plan,
+                           cache_move={'planned': planned, 'moved': [{'relative': '__pycache__', 'name': 'c0001'}],
+                                       'destination': update.CACHES + '/' + binding_id})
+        update.validate_note(good)
+        bad = [
+            lambda r: r['cache_move'].update(destination='slot-caches/other'),
+            lambda r: r['cache_move'].update(moved=[{'relative': 'other/__pycache__', 'name': 'c0001'}]),
+            lambda r: r['cache_move'].update(moved=[{'relative': '__pycache__', 'name': 'c0002'}]),
+            lambda r: r['cache_move']['planned'][0].update(relative='../__pycache__'),
+            lambda r: r['cache_move']['planned'][0].update(files={'a.pyc': 7}),
+            lambda r: r['cache_move'].pop('planned'),
+            lambda r: r['files']['games'].update(after_sha256=None),
+            lambda r: r['files']['games'].update(present_before=False),
+            lambda r: r.update(note_kind='move'),
+        ]
+        for change in bad:
+            record = json.loads(json.dumps(good))
+            change(record)
+            with self.subTest(record=record), self.assertRaises((Invalid, KeyError, TypeError, ValueError)):
+                update.validate_note(record)
+
     def test_prefix_version_from_the_real_proton_script(self):
         script = next(path for path in (HERE.parent / 'proton', HERE.parent.parent / 'proton') if path.is_file())
         raw = script.read_bytes()
@@ -140,7 +182,8 @@ class MoveFixture:
 
             def on_binding_id(run_id):
                 update.write_note(store, update.note(run_id, '42', 'apply', name, None, plan))
-            apply_binding(plan, self.f.steam, self.f.settings, store, ready, on_binding_id=on_binding_id)
+            apply_binding(plan, self.f.steam, self.f.settings, store, ready, bundle_directory=name,
+                          on_binding_id=on_binding_id)
         link = self.game_compat / 'pfx/drive_c/windows/syswow64/cmd.exe'
         link.unlink()
         link.symlink_to(self.tools / name / 'files/lib/wine/i386-windows/cmd.exe')
@@ -217,8 +260,21 @@ class MoveTests(MoveFixture, ONE['OnePassTests']):
         self.assertEqual(report['status'], 'nothing-to-move')
 
     def test_unregistered_old_slot_is_not_offered(self):
+        with PrivateStore(self.f.store_root) as store:
+            self.assertIn(self.tools / self.old, update.placed_roots(store, self.f.steam, self.bundle)[0])
         (self.tools / self.old / 'droiddeck-proton-wrap').unlink()
         self.assertEqual(self.selection()['reason'], 'slot-folder-missing-or-unregistered')
+        with PrivateStore(self.f.store_root) as store:  # Nor accepted by the layout check (4.4, same conditions).
+            self.assertNotIn(self.tools / self.old, update.placed_roots(store, self.f.steam, self.bundle)[0])
+
+    def test_unreadable_binding_record_is_listed_with_its_reason(self):
+        path = self.f.store_root / 'bindings' / ('binding-' + 'f' * 32 + '.json')
+        path.write_bytes(b'{')
+        path.chmod(0o600)
+        _, report, output = self.move_menu('')
+        self.assertIn('移せるゲームはありません', output)
+        self.assertIn(update.UNREADABLE_TEXT + 'ID 42', output)
+        self.assertEqual([item['app_id'] for item in report['unreadable_games']], ['42'])
 
     def test_align_keeps_the_screen_choice_and_games_json(self):
         # The DroidDeck screen chose the bundle slot; config.vdf and games_applied still name the old slot (4.6).
@@ -333,13 +389,21 @@ class MoveTests(MoveFixture, ONE['OnePassTests']):
             plan = plan_binding(self.f.steam, self.f.settings, '42', self.old)
             ready = lambda: {'target': True, 'dependencies': True, 'payload': True, 'stopped': True}
             with self.assertRaisesRegex(Invalid, 'only assign the bundle slot'):
-                apply_binding(plan, self.f.steam, self.f.settings, store, ready, bundle_directory=self.bundle)
+                apply_binding(plan, self.f.steam, self.f.settings, store, ready, bundle_directory=self.bundle,
+                              on_binding_id=lambda run_id: None)
             back = plan_binding(self.f.steam, self.f.settings, '42', self.bundle)
             with self.assertRaisesRegex(Invalid, 'cannot assign the bundle slot'):
                 apply_binding(back, self.f.steam, self.f.settings, store, lambda: {'target': True, 'stopped': True,
-                              'slot_record': True}, kind='revert', bundle_directory=self.bundle)
+                              'slot_record': True}, kind='revert', bundle_directory=self.bundle,
+                              on_binding_id=lambda run_id: None)
             with self.assertRaisesRegex(Invalid, 'prerequisites not verified|unknown or missing fields'):
-                apply_binding(plan, self.f.steam, self.f.settings, store, ready, kind='revert', bundle_directory=self.bundle)
+                apply_binding(plan, self.f.steam, self.f.settings, store, ready, kind='revert', bundle_directory=self.bundle,
+                              on_binding_id=lambda run_id: None)
+            # Neither the bundle slot nor the supplementary record can be left out (a record without its note).
+            for missing in ({'bundle_directory': None, 'on_binding_id': lambda run_id: None},
+                            {'bundle_directory': self.old, 'on_binding_id': None}):
+                with self.assertRaisesRegex(Invalid, 'bundle slot and supplementary record required'):
+                    apply_binding(plan, self.f.steam, self.f.settings, store, ready, **missing)
 
 
 
@@ -482,6 +546,40 @@ class RevertTests(MoveFixture, ONE['OnePassTests']):
         self.assertIn('戻す先にできる準備用Protonがありません', output)
         self.assertEqual(report['refused_targets'], {self.old: 'slot-manifest-missing'})
 
+    def test_refused_slots_are_shown_with_the_manual_route_beside_the_targets(self):
+        third = self.bundle + '-third'
+        self.make_old_slot(third)  # Placed by this tool, but without saved verification data.
+        _, _, output = self.revert_menu('1\nq\n')
+        self.assertIn('1. ' + self.old, output)
+        self.assertIn('戻す先にできないProton:', output)
+        self.assertIn(third + ': ' + update.REFUSED_TEXT['slot-manifest-missing'] + '。' + update.REFUSED_GUIDE, output)
+        _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertTrue(report['binding_written'], output)
+        self.assertEqual(report['refused_targets'], {third: 'slot-manifest-missing'})
+
+    def test_dependencies_are_shown_but_not_required(self):
+        _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertTrue(report['binding_written'], output)
+        self.assertTrue(report['dependencies'], report)
+        self.assertIsNone(report['dependencies_unreadable'])
+        self.assertIn('  依存: ' + report['dependencies'][0]['dependency_id'], output)
+        self.assertIn('戻す条件にしません', output)
+
+    def test_changed_placement_record_after_the_list_stops(self):
+        original = update.list_caches
+
+        def blocking(root, verified):
+            with PrivateStore(self.f.store_root) as store, store.locked('e' * 64):
+                store.write_record('installations', 'old-running.json',
+                                   installation_record(self.old, status='running', published=False, phase='staging'))
+            return original(root, verified)
+        before = self.games_config.read_bytes()
+        with unittest.mock.patch.object(update, 'list_caches', side_effect=blocking):
+            _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertFalse(report.get('binding_written'), output)
+        self.assertIn('revert target placement record changed', json.dumps(report, ensure_ascii=False))
+        self.assertEqual(before, self.games_config.read_bytes())
+
     def test_changed_slot_is_not_a_target(self):
         (self.tools / self.old / 'files' / 'extra.txt').write_text('changed')
         _, report, _ = self.revert_menu('1\n')
@@ -562,15 +660,15 @@ class RevertTests(MoveFixture, ONE['OnePassTests']):
         self.assertTrue(cache.is_dir())
 
     def test_change_of_caches_after_confirmation_stops(self):
-        cache = self.add_cache(self.old)
+        self.add_cache(self.old)
         original = update.list_caches
         calls = []
 
-        def changed(root):
+        def changed(root, verified):
             calls.append(1)
-            if len(calls) == 2:  # The comparison under the lock sees a cache added after the confirmation.
-                (cache / 'extra.cpython-314.pyc').write_bytes(b'x')
-            return original(root)
+            if len(calls) == 2:  # The comparison under the lock sees a cache rewritten after the confirmation.
+                self.add_cache(self.old, body=b'other synthetic bytecode')
+            return original(root, verified)
         before = self.games_config.read_bytes()
         with unittest.mock.patch.object(update, 'list_caches', side_effect=changed):
             _, report, output = self.revert_menu('1\n1\n1\n')
@@ -593,9 +691,9 @@ class RevertTests(MoveFixture, ONE['OnePassTests']):
         path = self.f.store_root / manifest.DIRECTORY / manifest.record_name(self.old)
         original = update.list_caches
 
-        def tamper(root):
+        def tamper(root, verified):
             path.write_bytes(path.read_bytes().replace(b'"version_value":"', b'"version_value":"changed '))
-            return original(root)
+            return original(root, verified)
         before = self.games_config.read_bytes()
         with unittest.mock.patch.object(update, 'list_caches', side_effect=tamper):
             _, report, output = self.revert_menu('1\n1\n1\n')
