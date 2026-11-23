@@ -1236,6 +1236,39 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(len(report['installation_history']), 1)
         self.assertFalse(report['wine_started'])
 
+    def test_menu_install_with_the_log_then_menu9_lists_an_unfinished_log(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe), \
+                patch.object(dep, 'plan_launch', side_effect=self.launch_fixture):
+            _, report, output = self.menu('8\n1\n1\n1\n1\n')
+        self.assertEqual(report['installation']['status'], 'present-verified', output)
+        self.assertEqual(report['steps'][0]['installer_log']['state'], 'final')
+        install_id = 'depinstall-' + 'e' * 32
+        with self.f.store() as store:
+            store.write_record(log.RECORDS, install_id + '.json',
+                               log._record(install_id, report['installation']['app_id'], 'open'))
+        with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe):
+            _, report, output = self.menu('9\n1\n')
+        self.assertEqual(report['installer_logs_open'], [install_id])
+        self.assertIn('導入のログ（未確定）があります（1件', output)
+
+    def test_a_final_copy_that_cannot_be_named_keeps_the_log_open_with_the_reason(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        with patch.object(log, '_place', side_effect=OSError(95, 'not supported')), \
+                patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), self.f.store() as store:
+            session = self.install_session(store).start_gui_check()
+            session.wait_gui_check(10)
+            session.confirm_display(True)
+            session.start_installer()
+            session.wait_installer(10)
+            record = session.finalize_log()
+        self.assertEqual((record['state'], record['reason']), ('open', 'finalize-failed:OSError'))
+        self.assertEqual(log.report_view(record)['reason'], 'finalize-failed:OSError')
+        folder = log.log_folder(self.home, record['app_id'], record['install_id'])
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), [log.LIVE])  # No temporary file left.
+
     def test_plan_failure_names_the_check_and_keeps_independent_diagnostics(self):
         appconfig = next((self.f.steam / 'compatibilitytools.d').glob('*/files/share/fex-emu/AppConfig'))
         (appconfig / 'override.json').write_text('{"DUMMY_SECRET": true}')

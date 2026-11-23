@@ -155,6 +155,23 @@ class CopyTests(unittest.TestCase):
         self.assertEqual(self.offer("1\n", statuses={INSTALL_ID: "present-verified"})[0], [])
         self.assertEqual(self.offer("1\n", saved=self.home / "plan-1.json")[0], [])  # Result kept privately.
 
+    def test_a_link_is_used_where_renameat2_is_missing_and_neither_leaves_a_partial_copy(self):
+        from unittest import mock
+
+        import preparation_publication as publication
+        with mock.patch.object(publication, '_rename_function', side_effect=Invalid('libc renameat2 unavailable')):
+            done, _ = self.offer("1\n")
+        self.assertTrue(done[0]["copied"], done)
+        (self.shared / done[0]["name"]).unlink()
+        with storage.PrivateStore(self.store_root) as store, store.locked("c" * 64):
+            record, digest = store.read_record(log.RECORDS, INSTALL_ID + ".json")
+            store.write_record(log.RECORDS, INSTALL_ID + ".json", {**record, "shared_copy": None}, digest)
+        with mock.patch.object(publication, '_rename_function', side_effect=Invalid('libc renameat2 unavailable')), \
+                mock.patch.object(log.os, 'link', side_effect=PermissionError(1, 'not permitted')):
+            done, _ = self.offer("1\n")
+        self.assertEqual((done[0]["copied"], done[0]["reason"]), (False, "not-copied:PermissionError"))
+        self.assertEqual(list(self.shared.iterdir()), [])
+
     def test_a_changed_log_is_not_copied(self):
         (self.folder / log.FINAL).write_bytes(b"changed after it was fixed\n")
         done, _ = self.offer("1\n")

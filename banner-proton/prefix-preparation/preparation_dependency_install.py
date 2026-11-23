@@ -1239,6 +1239,9 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                             if log_view is not None:
                                 report["steps"] = [{"step": "softdenchi-interactive", "installer_log": log_view,
                                                     "record": {"status": session.record["status"]}}]
+                                if log_view["state"] == "final" and log_view.get("writers_remaining"):
+                                    print(f"導入のログに、まだ書き手が残っています（{log_view['writers_remaining']}件）。"
+                                          "プロセスには何もしていません。", file=output)
                         else:
                             session.decline_installer()
             report.update(installation=dict(session.record), writes=[
@@ -1429,8 +1432,14 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
             history = [item for item in store.inventory()["dependency_installs"] if item.get("app_id") == record["app_id"]]
         if inspection.get("state") == "uninspected":
             print(restart_then_menu9(config), file=output)
+        from preparation_installer_log import logs_of
+        unfinished_logs = [item["install_id"] for item in logs_of(management, record["app_id"]) if item["state"] == "open"]
+        if unfinished_logs:
+            # Design: installer log 3.5. An attempt left before its end is not fixed later.
+            print(f"導入のログ（未確定）があります（{len(unfinished_logs)}件、私有の場所。導入の途中で抜けた回の分です）。",
+                  file=output)
         report = {"mode": "managed-dependency-reinspection-result", "scope": SCOPE, "tool_version": VERSION,
-                  "app_id": record["app_id"], "lingering": lingering,
+                  "app_id": record["app_id"], "lingering": lingering, "installer_logs_open": unfinished_logs,
                   "inspection": inspection, "installation_history": history, "wine_started": False,
                   "installation_records_updated": False, "preparation_complete": False,
                   "writes": [{"scope": "private-locks-and-result-json"}] +

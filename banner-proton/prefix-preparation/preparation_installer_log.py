@@ -9,6 +9,7 @@ shared result is made only after the operator confirms it, for an install that d
 end present-verified.
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -224,8 +225,36 @@ def _writers(identity, proc_root):
     return remaining, unreadable
 
 
+def _place(folder_fd, temporary, name):
+    """Give a finished temporary file its final name without replacing anything.
+
+    Linux ``renameat2(RENAME_NOREPLACE)`` first (it works on the device, as the slot placement
+    shows), then a hard link. ``FileExistsError`` when the name is taken; another OSError when
+    neither is available. The temporary name is gone after a rename and stays after a link.
+    """
+    from preparation_publication import _rename_function, rename_noreplace
+    try:
+        rename_noreplace(_rename_function(), folder_fd, temporary, folder_fd, name)
+        return "rename-noreplace"
+    except OSError as error:
+        if error.errno == errno.EEXIST:
+            raise FileExistsError(errno.EEXIST, "name exists") from None
+    except Invalid:
+        pass  # No renameat2 (not Linux, or no libc symbol): try a link.
+    os.link(temporary, name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd, follow_symlinks=False)
+    return "link"
+
+
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        require(written > 0, "short write")
+        view = view[written:]
+
+
 def _copy_range(read_fd, folder, size):
-    """Write bytes [0, size) of the live log to ``final.log`` (temporary file, then a non-replacing link)."""
+    """Write bytes [0, size) of the live log to ``final.log`` (temporary file, then a non-replacing name)."""
     digest = hashlib.sha256()
     folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     temporary = "final-" + secrets.token_hex(8) + ".tmp"
@@ -237,13 +266,13 @@ def _copy_range(read_fd, folder, size):
                 chunk = os.pread(read_fd, min(1024 * 1024, size - offset), offset)
                 if not chunk:
                     break
-                os.write(fd, chunk)
+                _write_all(fd, chunk)
                 digest.update(chunk)
                 offset += len(chunk)
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.link(temporary, FINAL, src_dir_fd=folder_fd, dst_dir_fd=folder_fd, follow_symlinks=False)
+        _place(folder_fd, temporary, FINAL)
         os.fsync(folder_fd)
         return offset, digest.hexdigest()
     finally:
@@ -284,8 +313,14 @@ def finalize(store, live, install_record, stop, proc_root="/proc"):
         validate_record(record)
         store.write_record(RECORDS, install_id + ".json", record, digest)
         return record
-    except (OSError, Invalid, TypeError, ValueError, KeyError):
-        return current
+    except (OSError, Invalid, TypeError, ValueError, KeyError) as error:
+        # Stays open; the reason is kept so a result can say why (no path, the class only).
+        kept = {**current, "reason": "finalize-failed:" + type(error).__name__}
+        try:
+            store.write_record(RECORDS, install_id + ".json", validate_record(kept), digest)
+            return kept
+        except (OSError, Invalid, TypeError, ValueError):
+            return current
     finally:
         live.close()
 
@@ -385,7 +420,7 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder):
             try:
                 sha = hashlib.sha256()
                 while chunk := os.read(src, 1024 * 1024):
-                    os.write(fd, chunk)
+                    _write_all(fd, chunk)
                     sha.update(chunk)
                 os.fsync(fd)
             finally:
@@ -393,7 +428,7 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder):
         finally:
             os.close(src)
         require(sha.hexdigest() == current["final"]["sha256"], "installer log changed")
-        os.link(temporary, name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd, follow_symlinks=False)
+        _place(folder_fd, temporary, name)
         os.fsync(folder_fd)
     except FileExistsError:
         return None, "not-copied:name-exists"
