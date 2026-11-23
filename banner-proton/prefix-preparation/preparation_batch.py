@@ -254,6 +254,8 @@ def build(ctx):
             continue
         ready.append(item)
     result["items"].extend(ready + resumes + new)
+    for item in result["skipped"] + [entry for entries in result["groups"].values() for entry in entries]:
+        item.pop("targets", None)  # Only items that run need their confirmed settings (not the result JSON).
     installs = [item for item in resumes + new if "softdenchi-silent" in item["plan"]["actions"]]
     if installs:
         result["consent"] = {"games": [item["title"] for item in installs], "asset": installs[0]["plan"]["asset"]}
@@ -438,6 +440,20 @@ def _binding_files(note, files):
     return "after" if states == {"after"} else "mixed"
 
 
+def _target_written(note, files, app):
+    """Every file the binding changes assigns its slot for this game (design 6, the 4.6 judgement).
+
+    The files are shared by every game, so whole-file hashes change when another game's
+    entry changes; the target's own items are read again instead.
+    """
+    from preparation_proton_update import bound_files, tool_id_of
+    if not files:
+        return False
+    changed = {name for name, entry in note["files"].items() if entry["changed"]}
+    found = set(bound_files(files, app, note["directory"], tool_id_of(note["directory"])))
+    return bool(changed) and changed <= found
+
+
 def reconcile(store, record, *, home=None, files=None, details=None):
     """Outcome of each game of an interrupted run, from its journaled IDs and what they made (design 6).
 
@@ -471,7 +487,8 @@ def reconcile(store, record, *, home=None, files=None, details=None):
                         note = _record_or_none(store, NOTES, value + ".json")
                         try:
                             validate_note(note)
-                            if note["binding_id"] == value and _binding_files(note, files) == "after":
+                            if note["binding_id"] == value and (_binding_files(note, files) == "after" or
+                                                                _target_written(note, files, app)):
                                 details[app] = "final-check-only"
                         except (Invalid, TypeError, KeyError, ValueError):
                             pass
@@ -844,10 +861,22 @@ def place_automatically(ctx, preferred=()):
                 continue
             raise  # Common to every registration (payload, runtime, capacity): stop once.
         compatdata = safe_path(ctx.steam / "steamapps/compatdata" / key, ctx.steam)
+        failed = None
         with PrivateStore(ctx.management, create=True) as store, \
                 store.locked(hashlib.sha256(str(compatdata).encode()).hexdigest()):
-            require(_same_plan(refresh(), plan), "static placement plan changed")
-            result = apply_static_placement(plan, refresh, store, plan.digest)
+            try:
+                again = refresh()
+            except (OSError, ValueError) as error:
+                # This registration failed in the plan made again under the lock, before anything is placed.
+                if getattr(error, "preparation_check", None) != "target-registration-exe":
+                    raise
+                failed = error
+            if failed is None:
+                require(_same_plan(again, plan), "static placement plan changed")
+                result = apply_static_placement(plan, refresh, store, plan.digest)
+        if failed is not None:
+            skipped.append({"app_id": key, "reason": str(failed) if isinstance(failed, ValueError) else type(failed).__name__})
+            continue
         return {"confirmation": key, "title": games[key]["title"], "skipped_candidates": skipped,
                 "excluded": [list(item) for item in excluded], "result": result}
     error = Invalid("no registered game can confirm the placement")

@@ -1201,7 +1201,8 @@ same numbers, followed by two new ones.
   read once for the whole list.
 - Without the bundle slot only the placement is listed. It is done with an automatically
   chosen confirmation registration (registrations assigned to a preparation slot first,
-  then by number); only a registration-specific failure tries the next one. The screen
+  then by number); only a registration-specific failure, also in the plan made again under
+  the lock before anything is placed, tries the next one. The screen
   names the registration used and the state of the slot data; when no registration can
   confirm, the skipped registrations and their reasons are shown and saved with the advice
   to register one game first. The list is then built again and confirmed a second time.
@@ -1223,8 +1224,10 @@ same numbers, followed by two new ones.
   that step. The next first screen reconciles an unfinished run from those IDs, the
   private records and what was made under them before a record (an installer input
   folder, binding backups; a binding note alone counts as nothing written). An unfinished
-  binding whose changed files all hold their new bytes (compared with the note's hashes) is
-  shown as "only the final check is missing". Runs are marked reviewed when a new run
+  binding whose changed files all hold their new bytes (compared with the note's hashes), or
+  whose own entries in those files all assign its slot (another game may have changed the
+  shared files since), is shown as "only the final check is missing". A lock held elsewhere
+  when menu 1 starts a game is "stopped before writing", not "partially applied". Runs are marked reviewed when a new run
   starts. The result JSON keeps each game's menu 1 report and journaled IDs and is
   rewritten whenever an ID is recorded and after every step (private copy and one shared
   copy, atomically).

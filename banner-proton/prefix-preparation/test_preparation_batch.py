@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The 0.31.0 first screen: the list of what this bundle would do, run after one confirmation."""
 
+import hashlib
 import json
 import os
 import runpy
@@ -89,6 +90,13 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         self.config['game_preparation']['profiles'][0]['exe_sha256'] = 'a' * 64
         _, _, output = self.first_screen('q\n')
         self.assertIn('自動で選べる作品プロファイルがありません', output)
+
+    def test_not_done_entries_carry_no_settings_into_the_result(self):
+        self.game_compat.mkdir(parents=True)  # A prefix without a record of this tool.
+        listing = batch.build(self.batch_context())
+        entries = listing['skipped'] + [item for group in listing['groups'].values() for item in group]
+        self.assertTrue(entries)
+        self.assertFalse(any('targets' in item for item in entries))
 
     def test_a_prefix_without_a_record_is_listed_once_with_its_remedy(self):
         (self.game_compat / 'pfx').mkdir(parents=True)
@@ -232,6 +240,21 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         _, _, output = self.first_screen('q\n')
         self.assertIn('ID 42: 一部適用・要確認（設定はすべて書き換え済みで、最後の確認だけが済んでいません', output)
 
+    def test_final_check_only_holds_when_another_game_changed_the_shared_files(self):
+        self.first_screen('1\n')
+        with PrivateStore(self.f.store_root) as store:
+            items, _ = update.history(store, '42')
+        binding = items[-1]['binding_id']
+        with PrivateStore(self.f.store_root) as store, store.locked('e' * 64):
+            record, digest = store.read_record('bindings', binding + '.json')
+            store.write_record('bindings', binding + '.json', dict(record, status='binding-running'), digest)
+        games = json.loads(self.games_config.read_text())
+        games['games']['99'] = dict(games['games']['42'])  # Another game's entry: the whole-file hash no longer matches.
+        self.games_config.write_text(json.dumps(games, indent=2) + '\n')
+        self.write_run({'binding': {'binding_id': binding}})
+        _, _, output = self.first_screen('q\n')
+        self.assertIn('ID 42: 一部適用・要確認（設定はすべて書き換え済みで、最後の確認だけが済んでいません', output)
+
     def test_result_keeps_each_game_report_and_ids(self):
         _, report, _ = self.first_screen('1\n')
         entry = next(item for item in report['items'] if item['kind'] == 'new')
@@ -265,6 +288,31 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         _, report, output = self.first_screen('1\n')
         outcomes = {item['kind']: item['outcome'] for item in report['items']}
         self.assertEqual(outcomes.get('resume'), 'done', output)
+
+    def test_a_run_records_every_listed_game_before_the_first_step(self):
+        self.forget_manifest()
+        with unittest.mock.patch.object(batch, '_save_manifest', side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            self.first_screen('1\n')
+        with PrivateStore(self.f.store_root) as store:
+            records = [store.read_record(batch.RUNS, path.name)[0] for path in (self.f.store_root / batch.RUNS).glob('batch-*.json')]
+        games = {(item['app_id'], item['step']): item['outcome'] for item in records[0]['games']}
+        self.assertEqual(games, {('-', 'save-manifest'): 'running', ('42', 'new'): 'not-started'})
+
+    def test_a_lock_held_elsewhere_stops_menu_1_before_any_write_and_ends_the_run(self):
+        from preparation_store import PrivateStore as Store
+        original = Store.locked
+
+        def locked(store, key):
+            if key == hashlib.sha256(str(self.game_compat).encode()).hexdigest():
+                raise batch.Invalid('preparation already locked')
+            return original(store, key)
+        with unittest.mock.patch.object(Store, 'locked', locked):
+            _, report, output = self.first_screen('1\n')
+        entry = next(item for item in report['items'] if item['kind'] == 'new')
+        self.assertEqual(entry['outcome'], 'skipped', output)  # Not "partially applied": nothing was written.
+        self.assertTrue(entry['run_stopped'])
+        self.assertFalse(self.game_compat.exists())
 
     def test_an_interrupted_run_lists_the_games_it_never_reached(self):
         journal = batch.Journal(self.batch_context())
@@ -569,6 +617,26 @@ class PlacementBatchTests(BatchFixture, ONE['OnePassTests']):
         self.assertIn('DroidDeckにゲームを1本登録し', output)
         self.assertFalse(slot.exists())
 
+    def test_a_registration_failing_under_the_lock_gives_way_to_the_next_candidate(self):
+        import preparation_static_placement as placement
+        slot = self.f.steam / 'compatibilitytools.d' / update.bundle_directory(self.config)
+        shutil.rmtree(slot)
+        original, calls = placement.plan_confirmed_placement, []
+
+        def second_fails(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:  # The plan made again under the lock.
+                error = batch.Invalid('registration EXE missing')
+                error.preparation_check = 'target-registration-exe'
+                raise error
+            return original(*args, **kwargs)
+        with unittest.mock.patch.object(placement, 'plan_confirmed_placement', side_effect=second_fails), \
+                self.assertRaises(batch.Invalid) as stopped:
+            self.run_menu('', lambda text: (0, batch.place_automatically(self.context()), ''))
+        self.assertEqual(str(stopped.exception), 'no registered game can confirm the placement')
+        self.assertEqual(stopped.exception.skipped_candidates, [{'app_id': '42', 'reason': 'registration EXE missing'}])
+        self.assertFalse(slot.exists())
+
     def test_a_check_common_to_every_candidate_stops_once(self):
         import preparation_static_placement as placement
         slot = self.f.steam / 'compatibilitytools.d' / update.bundle_directory(self.config)
@@ -585,9 +653,21 @@ class PlacementBatchTests(BatchFixture, ONE['OnePassTests']):
         self.assertFalse(slot.exists())
 
 
+@unittest.skipUnless(sys.platform == 'linux', 'native writer tests require Linux')
+class DllBatchTests(BatchFixture, ONE['PrefixDllOnePassTests']):
+    """A new game with a prefix DLL, prepared by the batch run."""
+
+    def test_each_dll_id_is_recorded_under_its_own_key(self):
+        _, report, output = self.first_screen('1\n')
+        entry = next(item for item in report['items'] if item['kind'] == 'new')
+        self.assertEqual(entry['outcome'], 'done', output)
+        self.assertIn('prefix-dll:mfc42-prefix', entry['ids'])
+        self.assertNotIn('prefix-dll', entry['ids'])
+
+
 # Only the fixtures of the one-pass tests are reused, not their tests.
-for _class in (NewGameBatchTests, MoveBatchTests, PlacementBatchTests):
-    for _name in dir(ONE['OnePassTests']):
+for _class in (NewGameBatchTests, MoveBatchTests, PlacementBatchTests, DllBatchTests):
+    for _name in dir(ONE['PrefixDllOnePassTests'] if _class is DllBatchTests else ONE['OnePassTests']):
         if _name.startswith('test_') and _name not in _class.__dict__:
             setattr(_class, _name, None)
 del _class, _name

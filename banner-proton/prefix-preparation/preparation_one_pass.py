@@ -784,11 +784,12 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         if mode == "interactive" and stream.readline(32).strip() != "1":
             return 0, None
         output = real_output
-        started = True
         selection._private_report_directory(home, protected)
         lock = hashlib.sha256(str(compatdata).encode()).hexdigest()
         stop = ProcessStopCheck(compatdata)
         with PrivateStore(management, create=True) as store, store.locked(lock):
+            # Writes of this game may exist from here; a lock held elsewhere stops before any write.
+            started = True
             check_targets()
             # The private lock is held from here to the last step; the plans are compared again under it.
             if label == "新規":

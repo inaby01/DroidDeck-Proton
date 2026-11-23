@@ -666,6 +666,32 @@ class RevertTests(MoveFixture, ONE['OnePassTests']):
         self.assertTrue(report['binding_written'], output)
         self.assertNotIn('戻すときのキャッシュの退避が途中で止まりました', self.status_output())
 
+    def test_caches_moved_before_the_note_was_updated_are_counted(self):
+        self.add_cache(self.old)
+        with unittest.mock.patch.object(update, 'move_caches', side_effect=OSError(18, 'refused')):
+            self.revert_menu('1\n1\n1\n')
+        with PrivateStore(self.f.store_root) as store:
+            _, orphans = update.history(store, '42')
+        # As if the rename had finished and the note update had not.
+        folder = self.f.store_root / update.CACHES / orphans[0]['binding_id']
+        folder.mkdir(mode=0o700, parents=True)
+        (self.f.store_root / update.CACHES).chmod(0o700)
+        (folder / 'c0001').mkdir(mode=0o755)
+        self.assertIn('戻すときのキャッシュの退避が途中で止まりました（1か所を移しました', self.status_output())
+
+    def test_a_catalog_naming_another_exe_than_the_registration_stops(self):
+        import preparation_selection as selection
+        from preparation_recheck import check_game_identity
+        source, _, games = selection.registration_catalog(self.environment)
+        other = Path(games['42']['exe']).with_name('other.exe')
+        shutil.copyfile(games['42']['exe'], other)
+        with PrivateStore(self.f.store_root) as store:
+            item = next(entry for entry in store.inventory()['game_prefixes'] if entry['app_id'] == '42')
+            record, digest = store.read_record('game-prefixes', item['trial_id'] + '.json')
+        with self.assertRaisesRegex(Invalid, 'game registration EXE changed'):
+            check_game_identity(record=record, record_sha256=digest, source=source,
+                                games={**games, '42': dict(games['42'], exe=str(other))}, steam=self.f.steam, home=self.home)
+
     def test_cache_directory_replaced_after_the_note_is_not_moved(self):
         cache = self.add_cache(self.old)
         original = update.write_note
