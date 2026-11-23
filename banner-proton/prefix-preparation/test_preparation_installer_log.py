@@ -266,6 +266,43 @@ class CopyTests(unittest.TestCase):
         self.assertTrue((self.shared / done[0]["name"]).exists())
         self.assertIn("反映の確認に失敗: copied-sync-failed:OSError", output)
 
+    def shared_folder_fds(self):
+        found = []
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                if os.readlink("/proc/self/fd/" + fd) == str(self.shared):
+                    found.append(fd)
+            except OSError:
+                pass
+        return found
+
+    @unittest.skipUnless(sys.platform == "linux", "/proc is Linux only")
+    def test_a_failing_status_of_the_folder_is_said_recorded_and_closed(self):
+        from unittest import mock
+        real_open, real_fstat, opened, fail_at = os.open, os.fstat, [], []
+
+        def opening(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if str(path) == str(self.shared) and flags & os.O_DIRECTORY:
+                opened.append(fd)
+            return fd
+
+        def stat_fails(fd, *args, **kwargs):
+            if len(opened) in fail_at and opened and fd == opened[-1]:
+                fail_at.clear()
+                raise OSError(5, "I/O error")
+            return real_fstat(fd, *args, **kwargs)
+        for when in (1, 2):  # 1: the folder held for the confirmation; 2: the folder opened again to write.
+            opened.clear()
+            fail_at[:] = [when]
+            with mock.patch.object(log.os, "open", opening), mock.patch.object(log.os, "fstat", stat_fails):
+                done, output = self.offer("1\n")
+            self.assertEqual((done[0]["copied"], done[0]["reason"]), (False, "not-copied:OSError"), when)
+            self.assertEqual(len(opened), when)
+            self.assertEqual(self.shared_folder_fds(), [], when)
+            self.assertEqual(list(self.shared.iterdir()), [])
+        self.assertIn("写せませんでした（not-copied:OSError）", output)
+
     def test_a_shared_folder_that_cannot_be_opened_is_said_and_recorded(self):
         import shutil
         shutil.rmtree(self.shared)

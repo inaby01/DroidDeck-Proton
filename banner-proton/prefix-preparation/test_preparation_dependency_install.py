@@ -510,6 +510,38 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual((record['state'], record['reason']), ('none', 'log-unavailable:OSError'))
 
     @unittest.skipUnless(sys.platform == 'linux', '/proc is Linux only')
+    def test_a_log_whose_closing_also_fails_still_lets_the_installer_run(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        real_open, real_fstat, real_close, ours, failing = os.open, os.fstat, os.close, [], set()
+
+        def opening(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if str(path).endswith('/live.log'):
+                ours.append(fd)
+                failing.add(fd)
+            return fd
+
+        def stat_fails(fd, *args, **kwargs):
+            if fd in failing:
+                raise OSError(5, 'I/O error')
+            return real_fstat(fd, *args, **kwargs)
+
+        def close_fails(fd):
+            real_close(fd)  # Linux frees the number even when close() reports an error.
+            if fd in failing:
+                failing.clear()
+                raise OSError(5, 'I/O error')
+        with patch.object(log.os, 'open', opening), patch.object(log.os, 'fstat', stat_fails), \
+                patch.object(log.os, 'close', close_fails):
+            result, _ = self.run_flow()
+        self.assertEqual(result['status'], 'present-verified', result)
+        self.assertEqual(self.open_live_logs(), [])
+        with self.f.store() as store:
+            record, _ = store.read_record('installer-logs', result['install_id'] + '.json')
+        self.assertEqual((record['state'], record['reason']), ('none', 'log-unavailable:OSError'))
+
+    @unittest.skipUnless(sys.platform == 'linux', '/proc is Linux only')
     def test_an_unreadable_log_record_still_closes_the_log(self):
         self.config['diagnostics'] = {'installer_log': True}
         with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture):

@@ -188,8 +188,7 @@ def open_log(store, install_id, app_id, home):
         digest = store.write_record(RECORDS, install_id + ".json", _record(install_id, app_id, "open"))
         return live, digest
     except (OSError, Invalid, TypeError, ValueError) as error:
-        if live is not None:
-            live.close()
+        _close_quietly(live)  # A failing close must not keep the installer from starting (Fable low).
         reason = "log-unavailable:" + type(error).__name__
         try:
             digest = store.write_record(RECORDS, install_id + ".json", _record(install_id, app_id, "none", reason))
@@ -451,7 +450,11 @@ def copy_to_shared(store, install_id, app_id, home, shared_folder, expected=None
         folder_fd = os.open(safe_path(shared_folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except (OSError, Invalid, TypeError, ValueError, KeyError) as error:
         return None, "not-copied:" + type(error).__name__
-    info = os.fstat(folder_fd)
+    try:
+        info = os.fstat(folder_fd)
+    except OSError as error:
+        os.close(folder_fd)  # Closed on this path too (Fable).
+        return None, "not-copied:" + type(error).__name__
     if expected is not None and (info.st_dev, info.st_ino) != tuple(expected):
         os.close(folder_fd)
         return None, "not-copied:folder-changed"
@@ -510,14 +513,17 @@ def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, ho
     done = []
     if not candidates or saved is None or safe_path(Path(saved).parent) != safe_path(shared_folder):
         return done
+    held = None
     try:
         held = hold_folder(shared_folder)  # The folder shown is the folder written to (Codex medium).
+        info = os.fstat(held)
     except (OSError, Invalid, ValueError) as error:
+        if held is not None:
+            os.close(held)
         reason = "not-copied:" + type(error).__name__  # Said and recorded, as when a copy fails (Fable low).
         print("共有のフォルダーを開けないため、導入のログは写しません（" + reason + "）", file=output)
         return [{"install_id": view["install_id"], "copied": False, "name": None, "reason": reason} for view in candidates]
     try:
-        info = os.fstat(held)
         return _offer(candidates, (info.st_dev, info.st_ino), done, shared_folder, store_root, home, stream, output, text,
                       labels)
     finally:
