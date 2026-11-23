@@ -1338,7 +1338,7 @@ releases these inherited values from the prefix it prepared:
 - One Wine run of `cmd.exe /d /c` with `C:\windows\system32\reg.exe delete <key> /v <name> /reg:64 /f`
   per value, joined by `&&` within a key (a failure stops that key) and `&` between keys. A key
   that had no other values and no sub-keys is then deleted itself (`reg delete <key> /reg:64 /f`).
-  The child is polled (30 s) and the prefix's processes are observed until none is left (60 s);
+  The child is polled (120 s) and the prefix's processes are observed until none is left (60 s);
   nothing is signalled. The registry file is then read again: the released values and keys must
   be gone, kept keys and their other data unchanged, and the `Runtimes` keys present.
 - Any failure stops before the installer: the installation record is
