@@ -107,7 +107,9 @@ def wine_lines(stream):
     require(pending is None, "unterminated registry continuation")
 
 
-_CANONICAL_HEADER = re.compile(r"\[(?:[^\]\\]|\\.)*\] \d+")
+# Key names: printable ASCII and doubled separators only, as in every header of the pinned template
+# (Codex final recheck H: an octal or other escape, or a character Wine folds differently, is refused).
+_CANONICAL_HEADER = re.compile(r"\[(?:[\x20-\x5b\x5e-\x7e]|\\\\)+\] \d+")
 _CANONICAL_HASH = re.compile(r"#(?:time=[0-9a-f]+|link|class=\"(?:[^\"\\]|\\.)*\"|arch=[a-z0-9]+)")
 _CANONICAL_NAME = re.compile(r'(@|"(?:[^"\\]|\\.)*")=(.*)')
 _CANONICAL_DATA = re.compile(r'"(?:[^"\\]|\\.)*"|str\(\d+\):"(?:[^"\\]|\\.)*"|dword:[0-9a-f]{8}')
@@ -188,8 +190,14 @@ def _canonical(text):
     if match:
         return ("dword", int(match.group(1), 16))
     match = re.fullmatch(r"hex(?:\(([0-9a-f]{1,8})\))?:(.*)", lowered, re.DOTALL)
-    if match and int(match.group(1) or "3", 16) in (1, 2):
-        return ("data", _data(text))  # A string written as hex compares with its quoted form.
+    if not match:
+        kind, value = _data(text)
+        if kind in ("sz", "expand_sz") or kind.startswith("str("):
+            # Strings by the bytes Wine keeps (UTF-16 with its terminator), so "A" equals hex(1):41,00,00,00
+            # but not hex(1):41,00 (Codex final recheck M).
+            number = {"sz": 1, "expand_sz": 2}.get(kind) or int(kind[4:-1])
+            return ("hex(" + format(number, "x") + ")", (value + "\0").encode("utf-16-le").hex())
+        return ("data", (kind, value))
     if match:
         parts = [part.strip() for part in match.group(2).split(",")]
         if parts and parts[-1] == "":
@@ -197,7 +205,7 @@ def _canonical(text):
         if all(re.fullmatch(r"[0-9a-f]{1,2}", part) for part in parts):
             return ("hex(" + format(int(match.group(1) or "3", 16), "x") + ")", bytes(int(part, 16) for part in parts).hex())
         return ("raw", lowered)
-    return ("data", _data(text))
+    return ("raw", lowered)
 
 
 def _other_hash(text):
@@ -371,8 +379,8 @@ def read_template(registry, archive_size, expected_tail_sha256):
     require(keys and len(versions) == 1, "template versions differ")
     original = {}
     for ident, entry in archive_scan["keys"].items():
-        if not entry["values"]:
-            continue
+        if not entry["exists"]:
+            continue  # A key the template had (even empty) is kept, never deleted (design 12, Codex L).
         require(entry["occurrences"] == 1 and not entry["duplicate"] and not entry["link"], "template original key shape")
         for value in entry["values"].values():
             require(restorable(value), "template original value type")
@@ -660,11 +668,13 @@ def validate_record(value):
     # progress or done carries what a resume compares with; nothing else is set before an evaluation.
     require((value["state"] == "failed") == (type(value.get("retryable")) is bool), "retryable only for a failed release")
     if value["state"] == "failed":
-        require(value["retryable"] == (reason.split(":", 1)[0] in RETRYABLE_REASONS), "retryable flag differs from reason")
+        head = reason.split(":", 1)[0]
+        require(head in FINAL_REASONS or head in RETRYABLE_REASONS, "unknown release reason")
+        require(value["retryable"] == (head in RETRYABLE_REASONS), "retryable flag differs from reason")
     require(value["state"] not in ("releasing", "released") or value.get("keys"), "release without its keys")
     require(value["state"] != "not-evaluated" or set(value) == {"state"}, "not-evaluated carries no data")
     by_state = {"absent": {"state", "values", "resumed_from", "version"},
-                "absent-after-release": {"state", "values", "resumed_from", "version"},
+                "absent-after-release": {"state", "values", "resumed_from", "version", "keys"},
                 "kept-vc-present": {"state", "values", "resumed_from", "version"},
                 "releasing": {"state", "values", "version", "keys", "resumed_from"},
                 "released": {"state", "values", "version", "keys", "resumed_from", "exit_code", "wineserver_observed",
@@ -681,6 +691,7 @@ def validate_record(value):
         for item in value["keys"].values():
             require(type(item) is dict and set(item) == {"values", "delete_key", "kept", "restore"} and
                     type(item["restore"]) is dict and set(item["restore"]) <= set(item["values"]) and
+                    not (item["restore"] and item["delete_key"]) and
                     all(type(value) is list and len(value) == 2 and restorable(tuple(value))
                         for value in item["restore"].values()) and
                     type(item["delete_key"]) is bool and type(item["kept"]) is str and
@@ -716,6 +727,20 @@ def _undecided(item):
     """A stop that read nothing reliable (a read error before any decision): it hides no earlier release (Codex final M2)."""
     return item["state"] == "failed" and item.get("retryable") is True and not item.get("keys") and \
         (item.get("reason") or "").split(":", 1)[0] in ("registry-unreadable", "template-unreadable")
+
+
+def completed(history):
+    """The newest evaluated release of one initialization when it finished with its plan kept, else None.
+
+    After a release the values are Wine's again, so a later run (an interruption before the installer)
+    must not judge them against DroidDeck's values (Codex final recheck M).
+    """
+    evaluated = [record for record in history if record.get("inherited_vc_record", {}).get("state") not in
+                 (None, "not-evaluated") and not _undecided(record["inherited_vc_record"])]
+    if evaluated and evaluated[-1]["inherited_vc_record"]["state"] in ("released", "absent-after-release") and \
+            evaluated[-1]["inherited_vc_record"].get("keys"):
+        return evaluated[-1]
+    return None
 
 
 def final_stop(history):

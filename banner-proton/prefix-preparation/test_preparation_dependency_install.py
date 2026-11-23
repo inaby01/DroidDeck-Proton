@@ -1654,6 +1654,19 @@ class InheritedVcTests(InstallTests):
         self.assertNotIn('インストーラの画面で操作してください', output)
 
 
+    def test_an_interruption_after_the_write_back_continues_without_redoing_it(self):
+        archive = {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
+        self.template.stop()
+        with patch.object(self.vc, 'read_template', return_value=VC['template'](tail_sha256=None, archive=archive)):
+            with patch.object(dep.DependencyInstallSession, '_stage', side_effect=KeyboardInterrupt), \
+                    self.assertRaises(KeyboardInterrupt):
+                self.silent_flow()
+            _, result, spawned = self.silent_flow()
+        self.template.start()
+        self.assertEqual(result['status'], 'present-verified', result)
+        self.assertEqual(result['inherited_vc_record']['state'], 'absent-after-release')
+        self.assertFalse(any(call.args[0][1:3] == ('runinprefix', 'cmd.exe') for call in spawned.call_args_list))
+
     def test_the_template_s_original_values_are_written_back(self):
         archive = {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
         self.template.stop()

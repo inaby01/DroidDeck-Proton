@@ -413,6 +413,54 @@ class RestoreTests(unittest.TestCase):
         self.assertEqual(vc.resume(scan(other), NO_MFC, plan)["reason"], "investigation-required")
 
 
+class FifthReviewTests(unittest.TestCase):
+    """Codex final recheck of the restore change."""
+
+    def test_escaped_or_non_ascii_key_names_are_not_in_wines_form(self):
+        octal = block() + "[Software\\\\Microsoft\\\\VisualStudio\\\\14\\0560\\\\VC] 1\n#link\n"
+        self.assertFalse(scan(octal)["canonical"])
+        self.assertEqual(vc.evaluate(scan(octal), NO_MFC, template(), initial(block()), "a" * 64)["reason"], "registry-shape")
+        folded = block().replace("VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\x64", "Visual\\x17ftudio\\\\14.0\\\\VC\\\\Runtimes\\\\x64", 1)
+        self.assertFalse(scan(folded)["canonical"])
+        self.assertTrue(scan(block())["canonical"])
+
+    def test_strings_compare_by_the_bytes_wine_keeps(self):
+        def kept(extra):
+            return vc.kept_hash(scan(block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n' + extra, 1))
+                                ["keys"]["native-x86"])
+        self.assertEqual(kept('"S"="A"\n'), kept('"S"=hex(1):41,00,00,00\n'))
+        self.assertNotEqual(kept('"S"="A"\n'), kept('"S"=hex(1):41,00\n'))
+        self.assertNotEqual(kept('"S"="A"\n'), kept('"S"=hex(1):41,00,00,00,00,00\n'))
+
+    def test_an_empty_key_of_the_template_is_kept(self):
+        tmpl = template(archive={"native-x86": {}})
+        plan = vc.evaluate(scan(block()), NO_MFC, tmpl, initial(block()), "a" * 64)["keys"]
+        self.assertEqual((plan["native-x86"]["restore"], plan["native-x86"]["delete_key"]), ({}, False))
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "system.reg"
+            archive = (HEADER + "[" + esc(vc.KEYS["native-x86"]) + "] 1\n").encode()
+            tail = ("\n" + block()).encode()
+            path.write_bytes(archive + tail)
+            found = vc.read_template(path, len(archive), hashlib.sha256(tail).hexdigest())
+            self.assertEqual(found["archive"], {"native-x86": {}})
+
+    def test_records_refuse_restore_with_key_deletion_and_unknown_reasons(self):
+        bad = {"native-x86": {"values": {"Bld": "a" * 64}, "delete_key": True, "kept": "b" * 64,
+                              "restore": {"Bld": ["dword", 1]}}}
+        for record in ({"state": "releasing", "keys": bad},
+                       {"state": "failed", "reason": "keys-in-archive", "retryable": False}):
+            with self.assertRaises(Invalid):
+                vc.validate_record(record)
+
+    def test_a_finished_release_is_recognised_as_done(self):
+        keys = {"native-x86": {"values": {"Version": "a" * 64}, "delete_key": True, "kept": "b" * 64, "restore": {}}}
+        done = {"install_id": "depinstall-" + "1" * 32, "inherited_vc_record": {"state": "released", "keys": keys,
+                                                                                 "wineserver_gone_before_read": True}}
+        winver_only = {"install_id": "depinstall-" + "2" * 32, "inherited_vc_record": {"state": "not-evaluated"}}
+        self.assertIs(vc.completed([done, winver_only]), done)
+        self.assertIsNone(vc.completed([done, {"inherited_vc_record": vc.failed("wait-timeout")}]))
+
+
 class RecordTests(unittest.TestCase):
     def test_unfinished_is_the_newest_evaluated_release_only(self):
         keys = {"native-x86": {"values": {"Version": "a" * 64}, "delete_key": True, "kept": "b" * 64}}

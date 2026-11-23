@@ -1020,6 +1020,15 @@ class DependencyInstallSession:
         except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError) as error:
             return self._release_stop(vc.failed("registry-unreadable:" + type(error).__name__))
         previous = vc.unfinished(history)
+        done = vc.completed(history) if previous is None else None
+        if done is not None and vc.verify(done["inherited_vc_record"]["keys"], scan) is None:
+            # Already released and still as the release left it: nothing to do (Codex final recheck M).
+            item = done["inherited_vc_record"]
+            self.record["inherited_vc_record"] = {"state": "absent-after-release", "values": 0, "keys": item["keys"],
+                                                  "resumed_from": done["install_id"], **({"version": item["version"]}
+                                                                                          if item.get("version") else {})}
+            self._save()
+            return None
         if previous is not None:
             original = previous["inherited_vc_record"]
             if not original.get("keys"):
@@ -1045,6 +1054,8 @@ class DependencyInstallSession:
                 decision["keys"] = keys  # Keep what a later run needs to continue (design 4, Codex M3).
             return self._release_stop(decision)
         if decision["state"] != "release":
+            if previous is not None and decision["state"] == "absent-after-release":
+                decision["keys"] = keys  # The plan stays with the record for a later run.
             self.record["inherited_vc_record"] = decision
             self._save()
             return None
