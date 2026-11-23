@@ -1335,6 +1335,23 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(report['installer_logs_open'], [install_id])
         self.assertIn('導入のログ（未確定）があります（1件', output)
 
+    def test_ctrl_c_in_menu8_after_the_installer_leaves_the_log_open(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        real = dep._wait_loop
+
+        def then_interrupt(wait, *args, **kwargs):
+            outcome = real(wait, *args, **kwargs)
+            if args and args[2] == 'installer':
+                raise KeyboardInterrupt
+            return outcome
+        with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe), \
+                patch.object(dep, 'plan_launch', side_effect=self.launch_fixture), \
+                patch.object(dep, '_wait_loop', side_effect=then_interrupt), self.assertRaises(KeyboardInterrupt):
+            self.menu('8\n1\n1\n1\n1\n')
+        records = [json.loads(path.read_text()) for path in (self.f.store_root / log.RECORDS).glob('depinstall-*.json')]
+        self.assertEqual([record['state'] for record in records], ['open'])
+
     def test_a_final_copy_that_cannot_be_named_keeps_the_log_open_with_the_reason(self):
         import preparation_installer_log as log
         self.config['diagnostics'] = {'installer_log': True}

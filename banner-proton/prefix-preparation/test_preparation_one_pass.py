@@ -457,6 +457,26 @@ class OnePassTests(GAME['GamePrefixTests']):
         records = [json.loads(path.read_text()) for path in (self.f.store_root / log.RECORDS).glob('depinstall-*.json')]
         self.assertEqual([record['state'] for record in records], ['open'])
 
+    def test_ctrl_c_in_the_interactive_fallback_leaves_its_log_open(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        self.use_installer(DEP['installer'](silent_noop=True))
+        self.pin_silent()
+        real, waits = dep._wait_loop, []
+
+        def second_interrupts(wait, *args, **kwargs):
+            outcome = real(wait, *args, **kwargs)
+            if args and args[2] == 'installer':
+                waits.append(1)
+                if len(waits) == 2:  # The first wait is the silent run; the second the interactive installer.
+                    raise KeyboardInterrupt
+            return outcome
+        with patch.object(dep, '_wait_loop', side_effect=second_interrupts), self.assertRaises(KeyboardInterrupt):
+            self.run_detail('12\n1\n1\n1\n1\n1\n')  # The last 1 answers that the winver window was shown.
+        self.assertEqual(len(waits), 2)
+        records = [json.loads(path.read_text()) for path in (self.f.store_root / log.RECORDS).glob('depinstall-*.json')]
+        self.assertEqual(sorted(record['state'] for record in records), ['final', 'open'])
+
     def test_a_partial_install_offers_its_log_next_to_the_result(self):
         files = dict(list(DEP['FILES'].items())[:1])
         self.use_installer(DEP['installer'](files=files, exit_code=91,

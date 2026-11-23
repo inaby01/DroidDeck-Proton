@@ -83,6 +83,23 @@ class OptionTests(unittest.TestCase):
                 log.validate_diagnostics(bad)
 
 
+class LiveLogTests(unittest.TestCase):
+    def test_a_failing_close_never_leaves_the_number_to_be_closed_again(self):
+        from unittest import mock
+        read_fd, write_fd = os.pipe()
+        live = log.LiveLog(Path("/nonexistent"), write_fd, read_fd, (0, 0))
+        real = os.close
+
+        def fails_after_closing(fd):
+            real(fd)  # Linux frees the number even when close() reports an error.
+            raise OSError(5, "I/O error")
+        with mock.patch.object(log.os, "close", side_effect=fails_after_closing), self.assertRaises(OSError):
+            live.close_write()
+        self.assertIsNone(live.write_fd)
+        live.close()
+        self.assertIsNone(live.read_fd)
+
+
 class WriterTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "linux", "/proc is Linux only")
     def test_processes_holding_the_log_are_counted(self):
@@ -243,10 +260,19 @@ class CopyTests(unittest.TestCase):
                 raise OSError(5, "I/O error")
             return real(fd)
         with mock.patch.object(log.os, "fsync", side_effect=second_fails):
-            done, _output = self.offer("1\n")
+            done, output = self.offer("1\n")
         self.assertTrue(done[0]["copied"], done)
         self.assertEqual(done[0]["reason"], "copied-sync-failed:OSError")
         self.assertTrue((self.shared / done[0]["name"]).exists())
+        self.assertIn("反映の確認に失敗: copied-sync-failed:OSError", output)
+
+    def test_a_shared_folder_that_cannot_be_opened_is_said_and_recorded(self):
+        import shutil
+        shutil.rmtree(self.shared)
+        done, output = self.offer("1\n")
+        self.assertEqual(done, [{"install_id": INSTALL_ID, "copied": False, "name": None,
+                                 "reason": "not-copied:FileNotFoundError"}])
+        self.assertIn("写しません（not-copied:FileNotFoundError）", output)
 
     def test_a_changed_log_is_not_copied(self):
         (self.folder / log.FINAL).write_bytes(b"changed after it was fixed\n")

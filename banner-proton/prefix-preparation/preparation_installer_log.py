@@ -130,8 +130,10 @@ class LiveLog:
 
     def close_write(self):
         if self.write_fd is not None:
-            os.close(self.write_fd)
-            self.write_fd = None
+            # Forget the number first: Linux frees it even when close() reports an error, and closing it
+            # again later could close an unrelated descriptor that took the number (Fable low).
+            write_fd, self.write_fd = self.write_fd, None
+            os.close(write_fd)
 
     def close(self):
         try:
@@ -510,8 +512,10 @@ def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, ho
         return done
     try:
         held = hold_folder(shared_folder)  # The folder shown is the folder written to (Codex medium).
-    except OSError:
-        return done
+    except (OSError, Invalid, ValueError) as error:
+        reason = "not-copied:" + type(error).__name__  # Said and recorded, as when a copy fails (Fable low).
+        print("共有のフォルダーを開けないため、導入のログは写しません（" + reason + "）", file=output)
+        return [{"install_id": view["install_id"], "copied": False, "name": None, "reason": reason} for view in candidates]
     try:
         info = os.fstat(held)
         return _offer(candidates, (info.st_dev, info.st_ino), done, shared_folder, store_root, home, stream, output, text,
@@ -539,7 +543,10 @@ def _offer(candidates, confirmed, done, shared_folder, store_root, home, stream,
                 name, reason = copy_to_shared(store, install_id, view["app_id"], home, shared_folder, confirmed)
         except (OSError, Invalid, ValueError) as error:
             name, reason = None, "not-copied:" + type(error).__name__
-        print(("写しました: " + name) if name else ("写せませんでした（" + str(reason) + "）"), file=output)
+        if name and reason:
+            print("写しました: " + name + "（フォルダーへの反映の確認に失敗: " + str(reason) + "）", file=output)
+        else:
+            print(("写しました: " + name) if name else ("写せませんでした（" + str(reason) + "）"), file=output)
         done.append({"install_id": install_id, "copied": name is not None, "name": name, "reason": reason})
     return done
 
