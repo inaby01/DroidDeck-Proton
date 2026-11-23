@@ -1095,8 +1095,9 @@ folder. `mfc-local` stays reserved and blocked.
   stops.
 - Menu 12: the confirmation lists each DLL (name, asset hash, destination); the fixed
   values gain `dlls` (recipe digest and measured asset per DLL); a missing or different
-  asset stops before anything is written, also when resuming a game whose DLL is already
-  placed (the asset is part of the confirmed values). On resume, a profile that changed
+  asset stops before anything is written. Since the 0.31.0 follow-up, a resumed game whose
+  DLL is already placed no longer needs the asset file (only a DLL still to place does);
+  the measured asset stays part of the confirmed values. On resume, a profile that changed
   since the initialization (other than an accepted later revision) stops before any step.
   The plan observes the process view before and after inspecting; an unclear view stops.
 - Not measured on a device: the 0.29.1 creation in the prefix's `syswow64`, loading from
@@ -1151,8 +1152,9 @@ first screen offers four entries. A bundle missing one of them keeps the earlier
   stop the others.
 - The next step comes from the read-only evaluation that menu 1 uses before its
   confirmation (`evaluate_resume`): the pre-write stops (profile and revision, blocked
-  dependencies, DLL assets, the installer of a new prefix, binding records) and each
-  step's decision (DLL resume, SoftDenchi state and installation plan, binding). The space
+  dependencies, the DLL assets and installer of a new prefix, binding records) and each
+  step's decision (DLL resume, with the asset required only for a DLL to place; SoftDenchi
+  state and installation plan, binding). The space
   check of each later step counts the bytes the earlier steps of the run write (a DLL before
   the installer; recorded as `capacity_after_earlier_steps`), and one SoftDenchi
   installation satisfies every dependency it handles. "Ready" means every dependency is verified and the game is bound. When resuming, menu 1 now
