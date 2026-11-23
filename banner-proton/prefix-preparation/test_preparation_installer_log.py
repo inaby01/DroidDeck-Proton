@@ -93,13 +93,14 @@ class WriterTests(unittest.TestCase):
             identity = (info.st_dev, info.st_ino)
             self.assertEqual(log._writers(identity, "/proc")[0], 0)
             with open(path, "ab") as stream:
-                child = subprocess.Popen(["sleep", "30"], stderr=stream)
+                # cat ends by itself when its input closes: no signal is sent.
+                child = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=stream)
             try:
                 remaining, _ = log._writers(identity, "/proc")
                 self.assertEqual(remaining, 1)
             finally:
-                child.terminate()  # Only the test's own child.
-                child.wait()
+                child.stdin.close()
+                child.wait(timeout=10)
 
 
 class CopyTests(unittest.TestCase):
@@ -205,6 +206,30 @@ class CopyTests(unittest.TestCase):
         done = log.offer_shared_copies([view], {INSTALL_ID: "partial"}, saved=shared / "plan-1.json", shared_folder=shared,
                                        store_root=self.store_root, home=self.home, stream=Swap(), output=io.StringIO(),
                                        text=str)
+        self.assertEqual((done[0]["copied"], done[0]["reason"]), (False, "not-copied:folder-changed"))
+        self.assertEqual(list(shared.iterdir()), [])
+
+    @unittest.skipUnless(sys.platform == "linux", "/proc is Linux only")
+    def test_the_confirmed_folder_is_held_so_a_deleted_and_remade_folder_never_matches(self):
+        import shutil
+        shared, held = self.shared, []
+
+        class Remake:
+            def readline(self, size):
+                for fd in os.listdir("/proc/self/fd"):
+                    try:
+                        if os.readlink("/proc/self/fd/" + fd) == str(shared):
+                            held.append(fd)
+                    except OSError:
+                        pass
+                shutil.rmtree(shared)
+                shared.mkdir(mode=0o700)  # On ext4 a free inode number can come back; a held one cannot.
+                return "1\n"
+        view = {"install_id": INSTALL_ID, "app_id": "42", "state": "final", "bytes": 21}
+        done = log.offer_shared_copies([view], {INSTALL_ID: "partial"}, saved=shared / "plan-1.json", shared_folder=shared,
+                                       store_root=self.store_root, home=self.home, stream=Remake(), output=io.StringIO(),
+                                       text=str)
+        self.assertTrue(held, "the confirmed folder must stay open while the operator answers")
         self.assertEqual((done[0]["copied"], done[0]["reason"]), (False, "not-copied:folder-changed"))
         self.assertEqual(list(shared.iterdir()), [])
 

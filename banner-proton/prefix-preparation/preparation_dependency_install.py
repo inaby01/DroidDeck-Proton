@@ -928,8 +928,14 @@ class DependencyInstallSession:
             if self.plan.installer_log:
                 from preparation_installer_log import open_log
                 self.log, _ = open_log(self.store, self.record["install_id"], self.record["app_id"], self.plan.home)
-            self.process = self._spawn(launch, (*head, str(self.staged), *self.plan.installer_arguments),
-                                       None if self.log is None else self.log.write_fd)
+            try:
+                self.process = self._spawn(launch, (*head, str(self.staged), *self.plan.installer_arguments),
+                                           None if self.log is None else self.log.write_fd)
+            except BaseException:
+                if self.log is not None:
+                    from preparation_installer_log import abandon
+                    self.log_record, self.log = abandon(self.store, self.log, self.record["install_id"]), None
+                raise
             if self.log is not None:
                 try:
                     self.log.close_write()  # The installer holds its own copy; the tool keeps only the read end.

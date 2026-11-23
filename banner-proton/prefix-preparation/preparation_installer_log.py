@@ -134,10 +134,12 @@ class LiveLog:
             self.write_fd = None
 
     def close(self):
-        self.close_write()
-        if self.read_fd is not None:
-            os.close(self.read_fd)
-            self.read_fd = None
+        try:
+            self.close_write()
+        finally:
+            if self.read_fd is not None:
+                read_fd, self.read_fd = self.read_fd, None
+                os.close(read_fd)
 
 
 WORK_ROOT = ".local/share/droiddeck-preparation-work"  # The per-game private work folder (as the managed recheck).
@@ -176,8 +178,9 @@ def open_log(store, install_id, app_id, home):
         except BaseException:
             os.close(write_fd)
             raise
+        live = LiveLog(folder, write_fd, read_fd, None)  # Owns both ends from here, so a failure below closes them.
         info = os.fstat(write_fd)
-        live = LiveLog(folder, write_fd, read_fd, (info.st_dev, info.st_ino))
+        live.identity = (info.st_dev, info.st_ino)
         require((os.fstat(read_fd).st_dev, os.fstat(read_fd).st_ino) == live.identity and stat.S_ISREG(info.st_mode),
                 "installer log replaced")
         digest = store.write_record(RECORDS, install_id + ".json", _record(install_id, app_id, "open"))
@@ -294,8 +297,10 @@ def finalize(store, live, install_record, stop, proc_root="/proc"):
         current, digest = store.read_record(RECORDS, install_id + ".json")
         validate_record(current)
     except (OSError, Invalid, TypeError, ValueError, KeyError):
+        _close_quietly(live)
         return None
     if current["state"] != "open" or live is None:
+        _close_quietly(live)
         return current
     try:
         live.close_write()
@@ -322,7 +327,33 @@ def finalize(store, live, install_record, stop, proc_root="/proc"):
         except (OSError, Invalid, TypeError, ValueError):
             return current
     finally:
-        live.close()
+        _close_quietly(live)
+
+
+def _close_quietly(live):
+    if live is not None:
+        try:
+            live.close()
+        except OSError:
+            pass
+
+
+def abandon(store, live, install_id):
+    """The installer was never started: close the log and record that there is none (never raises).
+
+    Without this the ``open`` record would stay in menu 9 for a run that wrote nothing.
+    """
+    _close_quietly(live)
+    try:
+        current, digest = store.read_record(RECORDS, install_id + ".json")
+        validate_record(current)
+        if current["state"] != "open":
+            return current
+        record = validate_record({**current, "state": "none", "reason": "installer-not-started"})
+        store.write_record(RECORDS, install_id + ".json", record, digest)
+        return record
+    except (OSError, Invalid, TypeError, ValueError, KeyError):
+        return None
 
 
 def summarize_file(path):
@@ -399,9 +430,9 @@ def shared_copy_candidates(views, statuses):
     return [view for view in views if view and view["state"] == "final" and statuses.get(view["install_id"]) != "present-verified"]
 
 
-def folder_identity(folder):
-    info = os.stat(safe_path(folder), follow_symlinks=False)
-    return info.st_dev, info.st_ino
+def hold_folder(folder):
+    """Open the shared folder and keep it open: while held, its inode number cannot be given to a new folder."""
+    return os.open(safe_path(folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
 
 
 def copy_to_shared(store, install_id, app_id, home, shared_folder, expected=None):
@@ -473,15 +504,24 @@ def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, ho
 
     ``saved`` must be the shared path of this result; a result kept privately is never accompanied by a copy.
     """
-    from preparation_store import PrivateStore
     candidates = shared_copy_candidates(views, statuses)
     done = []
     if not candidates or saved is None or safe_path(Path(saved).parent) != safe_path(shared_folder):
         return done
     try:
-        confirmed = folder_identity(shared_folder)  # The folder shown is the folder written to (Codex medium).
+        held = hold_folder(shared_folder)  # The folder shown is the folder written to (Codex medium).
     except OSError:
         return done
+    try:
+        info = os.fstat(held)
+        return _offer(candidates, (info.st_dev, info.st_ino), done, shared_folder, store_root, home, stream, output, text,
+                      labels)
+    finally:
+        os.close(held)  # Held through every copy, so a folder deleted and made again never matches (Fable medium).
+
+
+def _offer(candidates, confirmed, done, shared_folder, store_root, home, stream, output, text, labels):
+    from preparation_store import PrivateStore
     for view in candidates:
         install_id = view["install_id"]
         if labels and labels.get(install_id):

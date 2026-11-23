@@ -471,6 +471,74 @@ class InstallTests(TRIAL['TrialTests']):
             result, _ = self.run_flow()
         self.assertEqual(result['status'], 'present-verified', result)
 
+    @staticmethod
+    def open_live_logs():
+        found = []
+        for fd in os.listdir('/proc/self/fd'):
+            try:
+                if os.readlink('/proc/self/fd/' + fd).endswith('/live.log'):
+                    found.append(fd)
+            except OSError:
+                pass
+        return found
+
+    @unittest.skipUnless(sys.platform == 'linux', '/proc is Linux only')
+    def test_a_log_failing_after_opening_closes_both_ends(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        real_open, real_fstat, ours, failing = os.open, os.fstat, [], set()
+
+        def opening(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if str(path).endswith('/live.log'):
+                ours.append(fd)
+                failing.add(fd)
+            return fd
+
+        def stat_fails(fd, *args, **kwargs):
+            if fd in failing:
+                failing.clear()  # Once only: the numbers are reused after the log closes them.
+                raise OSError(5, 'I/O error')
+            return real_fstat(fd, *args, **kwargs)
+        with patch.object(log.os, 'open', opening), patch.object(log.os, 'fstat', stat_fails):
+            result, _ = self.run_flow()
+        self.assertEqual(result['status'], 'present-verified', result)
+        self.assertEqual(len(ours), 2)
+        self.assertEqual(self.open_live_logs(), [])
+        with self.f.store() as store:
+            record, _ = store.read_record('installer-logs', result['install_id'] + '.json')
+        self.assertEqual((record['state'], record['reason']), ('none', 'log-unavailable:OSError'))
+
+    @unittest.skipUnless(sys.platform == 'linux', '/proc is Linux only')
+    def test_an_unreadable_log_record_still_closes_the_log(self):
+        self.config['diagnostics'] = {'installer_log': True}
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture):
+            session = self.install_session(store).start_gui_check()
+            session.wait_gui_check(10)
+            session.confirm_display(True)
+            session.start_installer()
+            session.wait_installer(10)
+            self.assertEqual(len(self.open_live_logs()), 1)
+            with patch.object(store, 'read_record', side_effect=OSError(5, 'I/O error')):
+                self.assertIsNone(session.finalize_log())
+        self.assertEqual(self.open_live_logs(), [])
+
+    @unittest.skipUnless(sys.platform == 'linux', '/proc is Linux only')
+    def test_an_installer_that_never_started_leaves_no_open_log(self):
+        self.config['diagnostics'] = {'installer_log': True}
+        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=self.launch_fixture):
+            session = self.install_session(store).start_gui_check()
+            session.wait_gui_check(10)
+            session.confirm_display(True)
+            with patch.object(dep.DependencyInstallSession, '_spawn', side_effect=OSError(2, 'missing')), \
+                    self.assertRaises(OSError):
+                session.start_installer()
+            install_id = session.record['install_id']
+            record, _ = store.read_record('installer-logs', install_id + '.json')
+            self.assertEqual(session.finalize_log()['state'], 'none')
+        self.assertEqual((record['state'], record['reason']), ('none', 'installer-not-started'))
+        self.assertEqual(self.open_live_logs(), [])
+
     def test_an_installer_not_finished_keeps_the_log_open(self):
         import preparation_installer_log as log
         self.config['diagnostics'] = {'installer_log': True}
