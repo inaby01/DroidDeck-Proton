@@ -312,9 +312,13 @@ def resume(scan, mfc, previous):
     if scan["ancestor_links"] or any(entry["occurrences"] > 1 or entry["duplicate"] or entry["link"]
                                      for entry in scan["keys"].values()):
         return failed("investigation-required")
+    if not scan["runtimes_present"]["native"] or not scan["runtimes_present"]["wow"]:
+        return failed("investigation-required")  # Something beyond the plan is gone (Fable code review M1).
     remaining = {}
     for ident, entry in scan["keys"].items():
         original = previous.get(ident)
+        if original is not None and not original["delete_key"] and not entry["exists"]:
+            return failed("investigation-required")  # A key that had to stay is gone.
         if original is None:
             if entry["values"]:
                 return failed("investigation-required")

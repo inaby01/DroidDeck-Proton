@@ -7,6 +7,7 @@ import json
 import os
 import runpy
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -468,6 +469,22 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertEqual([item['status'] for item in self.installs()], ['stopped-before-installer'])
         # Running again stops before planning an installation (design: inherited VC record, Fable L4).
         _, report, _, _ = self.run_detail('12\n1\n1\n1\n')
+        self.assertEqual((report['stage'], report['reason']), ('softdenchi-state', 'inherited-vc-record-template-mismatch'))
+        self.assertEqual(len(self.installs()), 1)
+
+    def test_the_run_itself_stops_on_a_final_release_stop_even_if_the_plan_would_not(self):
+        vc, _ = self.inherit_vc()
+        with patch.object(vc, 'read_template', side_effect=Invalid('template tail changed')):
+            self.run_detail('12\n1\n1\n1\n')
+        real = dep.vc_latest
+
+        def only_the_run_sees_it(store_root, trial_id):
+            if sys._getframe(1).f_code.co_name == 'evaluate_resume':
+                return None, None
+            return real(store_root, trial_id)
+        # Defence in depth (Fable code review M2): the plan and the evaluation would not stop, the run still does.
+        with patch.object(dep, '_vc_final_stop', return_value=None), patch.object(dep, 'vc_latest', only_the_run_sees_it):
+            _, report, _, _ = self.run_detail('12\n1\n1\n1\n')
         self.assertEqual((report['stage'], report['reason']), ('softdenchi-state', 'inherited-vc-record-template-mismatch'))
         self.assertEqual(len(self.installs()), 1)
 

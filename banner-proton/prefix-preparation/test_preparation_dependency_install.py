@@ -106,6 +106,12 @@ if len(sys.argv) >= 3 and sys.argv[1] == 'runinprefix' and sys.argv[2].startswit
     spec = json.loads(raw.split(b'\\nDROIDDECK_SYNTHETIC_INSTALLER\\n', 1)[1])
     if sys.argv[3:] and spec.get('silent_noop'):
         raise SystemExit(0)
+    for arg in sys.argv[3:]:
+        if arg.startswith('/debuglog'):
+            # InstallShield's own log (diagnostic mode of the inherited VC record design).
+            target = root / 'pfx/drive_c' / arg[len('/debuglogC:') + 1:].replace(chr(92), '/')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('Checking setup prerequisite synthetic' + chr(10))
     for line in spec.get('stderr', []):
         sys.stderr.write(line + '\\n')
     sys.stderr.flush()
@@ -1471,7 +1477,8 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual((record['state'], record['reason']), ('open', 'finalize-failed:OSError'))
         self.assertEqual(log.report_view(record)['reason'], 'finalize-failed:OSError')
         folder = log.log_folder(self.home, record['app_id'], record['install_id'])
-        self.assertEqual(sorted(path.name for path in folder.iterdir()), [log.LIVE])  # No temporary file left.
+        # No temporary file left (the InstallShield log of diagnostic mode is kept beside it).
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), [log.LIVE, 'setup-debug.log'])
 
     def test_plan_failure_names_the_check_and_keeps_independent_diagnostics(self):
         appconfig = next((self.f.steam / 'compatibilitytools.d').glob('*/files/share/fex-emu/AppConfig'))
@@ -1631,6 +1638,104 @@ class InheritedVcTests(InstallTests):
         self.assertIn('受け継いだVC++の記録を外す段で止まりました', output)
         self.assertIn("ひな形から受け継いだ『VC++ 14.51導入済み』", output)
         self.assertNotIn('インストーラの画面で操作してください', output)
+
+
+    def test_the_real_template_path_size_and_hash_are_passed(self):
+        self.template.stop()
+        seen = []
+
+        def spy(*args):
+            seen.append(args)
+            return VC['template'](tail_sha256=None)
+        with patch.object(self.vc, 'read_template', side_effect=spy):
+            self.silent_flow()
+        self.template.start()
+        plan = self.install_plan().recheck
+        (path, size, tail), = seen
+        self.assertEqual(path, dep._tool_directory(plan) / 'files/share/default_pfx_arm64/system.reg')
+        self.assertEqual(size, (plan.inventory.entries.get('files/share/default_pfx_arm64/system.reg') or {}).get('size'))
+        self.assertEqual(tail, ((plan.tool_writes or {}).get('droiddeck_redist') or {}).get('registry_tail_sha256'))
+
+    def test_diagnostic_mode_keeps_the_release_output_and_the_installshield_log(self):
+        import preparation_installer_log as log
+        self.config['diagnostics'] = {'installer_log': True}
+        _, result, spawned = self.silent_flow()
+        self.assertEqual(result['status'], 'present-verified', result)
+        install_id = result['install_id']
+        installer = next(call.args[0] for call in spawned.call_args_list if len(call.args[0]) > 2 and
+                         str(call.args[0][2]).startswith('/'))
+        self.assertEqual(installer[-1], '/debuglogC:\\windows\\temp\\droiddeck-setup-' + install_id + '.log')
+        self.assertEqual(result['installer_debuglog']['state'], 'collected')
+        folder = log.work_parent(self.home, result['app_id']) / 'logs'
+        self.assertTrue((folder / (install_id + '-release') / 'release.log').is_file())
+        self.assertIn(b'Checking setup prerequisite', (folder / install_id / 'setup-debug.log').read_bytes())
+
+    def test_the_release_checks_the_prefix_is_clear_right_before_wine(self):
+        real = dep.DependencyInstallSession._clear
+
+        def busy_for_release(session):
+            if sys._getframe(1).f_code.co_name == '_run_release':
+                raise Invalid('target process view not clear')
+            return real(session)
+        with patch.object(dep.DependencyInstallSession, '_clear', busy_for_release):
+            session, _, _ = self.silent_flow()
+        self.assertEqual(session.release_stopped, 'wine-start:Invalid')
+        self.assertEqual(len(self.vc.fingerprint(self.registry())), 6)
+
+    def test_processes_left_after_the_child_stop_before_reading(self):
+        (self.control / 'reg-fail').write_text(' '.join(self.vc.VALUE_NAMES))  # Wine runs each time, nothing is deleted.
+        real = ProcessStopCheck.check
+        for view, reason in (({'active_count': 0, 'unknown_count': 1}, 'persistence-unconfirmed'),
+                             ({'active_count': 1, 'unknown_count': 0}, 'wait-timeout')):
+            def left(check, view=view):
+                if sys._getframe(1).f_code.co_name == '_run_release':
+                    return {'clear_in_view': False, **view}
+                return real(check)
+            with self.subTest(reason=reason), patch.object(ProcessStopCheck, 'check', left):
+                session, result, _ = self.silent_flow()
+                self.assertEqual(session.release_stopped, reason)
+                self.assertFalse(result['inherited_vc_record']['wineserver_gone_before_read'])
+
+    def test_a_wineserver_seen_during_the_release_is_recorded(self):
+        real = dep.inventory_processes
+
+        def with_server(compatdata, proc_root):
+            view = real(compatdata, proc_root)
+            if sys._getframe(1).f_code.co_name == 'look':
+                view = {**view, 'processes': [*view['processes'], {'pid': 1, 'started': 1, 'parent': 0,
+                                                                   'image': '\\opt\\wine\\wineserver'}]}
+            return view
+        with patch.object(dep, 'inventory_processes', with_server):
+            _, result, _ = self.silent_flow()
+        self.assertTrue(result['inherited_vc_record']['wineserver_observed'])
+
+    def test_only_this_initialization_is_resumed_and_a_resumed_stop_keeps_the_original(self):
+        (self.control / 'reg-fail').write_text('Installed')
+        self.silent_flow()
+        session, result, _ = self.silent_flow()  # Resumes, fails on Installed again.
+        self.assertEqual(session.release_stopped, 'values-remain')
+        self.assertEqual(len(result['inherited_vc_record']['keys']), 6)
+        # A record of another initialization is never resumed: the current values differ from the init fingerprint.
+        with self.f.store() as store:
+            for item in store.inventory()['dependency_installs']:
+                record, digest = store.read_record(dep.RECORDS, item['install_id'] + '.json')
+                store.write_record(dep.RECORDS, item['install_id'] + '.json', {**record, 'trial_id': 'trial-' + '0' * 32},
+                                   expected_hash=digest)
+        (self.control / 'reg-fail').unlink()
+        session, result, _ = self.silent_flow()
+        self.assertEqual(session.release_stopped, 'values-differ')
+
+
+    def test_a_resume_that_cannot_continue_keeps_what_the_next_run_needs(self):
+        (self.control / 'reg-fail').write_text('Installed')
+        self.silent_flow()
+        registry = self.install_plan().recheck.compatdata / 'pfx/system.reg'
+        registry.write_text(registry.read_text().replace(VC['VERSION'], 'v14.24.28127.00'))  # Not the original any more.
+        session, result, _ = self.silent_flow()
+        self.assertEqual(session.release_stopped, 'investigation-required')
+        self.assertFalse(result['inherited_vc_record']['retryable'])
+        self.assertEqual(len(result['inherited_vc_record']['keys']), 6)
+        self.assertIn('inherited-vc-record-investigation-required', self.install_plan().blockers)
 
 
 for _name in dir(InstallTests):

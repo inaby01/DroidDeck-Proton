@@ -188,7 +188,8 @@ class ReleaseTests(unittest.TestCase):
         decision = vc.resume(scan(partly), NO_MFC, original)
         self.assertEqual(decision["state"], "release")
         self.assertNotIn("Installed", decision["keys"]["native-x86"]["values"])
-        runtimes_only = "[Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes] 1\n"
+        runtimes_only = ("[Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes] 1\n"
+                         "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes] 1\n")
         self.assertEqual(vc.resume(scan(runtimes_only), NO_MFC, original)["state"], "absent-after-release")
         # An empty key left behind is not finished (design 4 resume).
         empty = runtimes_only + "[" + esc(vc.KEYS["native-x86"]) + "] 1\n"
@@ -198,6 +199,51 @@ class ReleaseTests(unittest.TestCase):
                          "investigation-required")
         self.assertEqual(vc.resume(scan(text), {"syswow64": "native", "system32": "absent"}, original)["state"],
                          "kept-vc-present")
+
+
+class GuardDetailTests(unittest.TestCase):
+    """Each guard on its own (Fable code review M2: a removed check must fail a test)."""
+
+    def evaluate(self, text, init=None, tail="a" * 64):
+        found = scan(text)
+        return vc.evaluate(found, NO_MFC, template(), initial(block()) if init is None else init, tail)
+
+    def test_link_and_value_duplicates_and_unreadable_names_stop(self):
+        linked = block().replace(f"[{esc(vc.KEYS['wow-x64'])}] 1795176401\n", f"[{esc(vc.KEYS['wow-x64'])}] 1795176401\n#link\n")
+        self.assertEqual(self.evaluate(linked)["reason"], "registry-shape")
+        ancestor = block() + "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio] 1\n#link\n"
+        self.assertEqual(self.evaluate(ancestor)["reason"], "registry-shape")
+        twice = block().replace('"Bld"=dword:00008d8f\n', '"Bld"=dword:00008d8f\n"bld"=dword:00008d8f\n', 1)
+        self.assertEqual(self.evaluate(twice)["reason"], "registry-shape")
+        root = "Software\\\\Wow6432Node\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\"
+        self.assertEqual(self.evaluate(block() + f'[{root}{{A}}] 1\n"DisplayName"=hex:00\n')["reason"], "uninstall-unreadable")
+        self.assertEqual(self.evaluate(block() + f'[{root}{{A}}] 1\n"DisplayName"="Microsoft Visual C++ 2015-2019 '
+                                       'Redistributable (x86) - 14.24.28127"\n')["reason"], "vc-registered-without-mfc140")
+
+    def test_the_initial_template_hash_must_match(self):
+        start = {**initial(block()), "template_tail_sha256": "b" * 64}
+        self.assertEqual(self.evaluate(block(), init=start)["reason"], "template-changed")
+
+    def test_mfc140_as_a_link_or_directory_counts_as_present(self):
+        with tempfile.TemporaryDirectory() as root:
+            wow = Path(root) / "pfx/drive_c/windows/syswow64"
+            wow.mkdir(parents=True)
+            (wow / "mfc140.dll").symlink_to("/nonexistent")
+            self.assertEqual(vc.mfc140(Path(root))["syswow64"], "other")
+
+    def test_resume_refuses_when_more_than_planned_is_gone_or_changed(self):
+        text = block().replace('"Rbld"=dword:00000000\n', '"Rbld"=dword:00000000\n"Other"="x"\n', 1)
+        original = vc.evaluate(scan(text), NO_MFC, template(), initial(text), "a" * 64)["keys"]
+        parents = ("[Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes] 1\n"
+                   "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes] 1\n")
+        kept = "[" + esc(vc.KEYS["native-x86"]) + '] 1\n"Other"="x"\n'
+        self.assertEqual(vc.resume(scan(parents + kept), NO_MFC, original)["state"], "absent-after-release")
+        self.assertEqual(vc.resume(scan(parents), NO_MFC, original)["reason"], "investigation-required")  # Kept key gone.
+        self.assertEqual(vc.resume(scan(kept), NO_MFC, original)["reason"], "investigation-required")  # Parents gone.
+        changed = "[" + esc(vc.KEYS["native-x86"]) + '] 1\n"Other"="y"\n'
+        self.assertEqual(vc.resume(scan(parents + changed), NO_MFC, original)["reason"], "investigation-required")
+        linked = parents + kept.replace("] 1\n", "] 1\n#link\n", 1)
+        self.assertEqual(vc.resume(scan(linked), NO_MFC, original)["reason"], "investigation-required")
 
 
 class RecordTests(unittest.TestCase):
