@@ -272,6 +272,25 @@ class OnePassTests(GAME['GamePrefixTests']):
         _, report, _, _ = self.run_detail('12\n1\n1\n1\n')
         self.assertEqual(report['status'], 'ready-to-launch', report)
 
+    def test_running_game_after_a_new_initialization_stops_before_binding(self):
+        self.config['game_preparation']['profiles'][0]['dependencies'] = []
+        original = one_pass.plan_game_binding
+
+        def running(**arguments):
+            with patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):
+                return original(**arguments)
+        with patch.object(one_pass, 'plan_game_binding', side_effect=running):
+            _, report, output, commands = self.run_detail('12\n1\n1\n1\n')
+        self.assertEqual((report['status'], report['stage']), ('stopped', 'binding'), report)
+        self.assertEqual([step['step'] for step in report['steps']], ['initialize', 'binding-plan'])
+        self.assertIn('process:target-process-view-not-clear', report['reason'])
+        self.assertEqual(report['next_step'], one_pass.BINDING_RUNNING)
+        self.assertIn('初期化は済んでいます', output)
+        self.assertEqual(len(commands), 1)
+        self.assertFalse(report['binding_written'])
+        _, report, _, _ = self.run_detail('12\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+
     def test_running_again_after_success_only_reports_the_binding(self):
         self.run_detail('12\n1\n1\n1\n')
         before = self.protected()

@@ -650,6 +650,14 @@ class GamePrefixTests(DEP['InstallTests']):
                                              on_binding_id=lambda run_id: None)
         self.assertEqual(result['status'], 'binding-verified')
 
+    def test_running_target_is_a_blocker_beside_the_dependencies(self):
+        self.config['game_preparation']['profiles'][0]['dependencies'] = ['softdenchi-runtime']
+        record, digest = self.initialize()
+        self.install_dependency(record, digest)
+        with patch.object(ProcessStopCheck, 'check', return_value={'clear_in_view': False}):
+            plan = self.binding_plan(record, digest)
+        self.assertEqual(plan.blockers, ('dependency-not-verified:softdenchi-runtime', game.PROCESS_BLOCKER))
+
     def test_binding_menu_names_a_running_game_without_promising_the_binding(self):
         self.config['game_preparation']['profiles'][0]['dependencies'] = []
         self.initialize()

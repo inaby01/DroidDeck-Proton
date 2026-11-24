@@ -824,5 +824,50 @@ for _class, _base in ((MoveTests, ONE['OnePassTests']), (DllMoveTests, ONE['Pref
 del _class, _base, _name  # Loop names must not be collected as test classes.
 
 
+def _only(cls, keep):
+    """Run only ``keep`` of the inherited tests: the rest assume a profile with dependencies."""
+    for name in [name for name in dir(cls) if name.startswith('test_') and name not in keep]:
+        setattr(cls, name, None)
+    return cls
+
+
+class _WithoutDependencies:
+    def pin_silent(self):
+        super().pin_silent()
+        self.config['game_preparation']['profiles'][0]['dependencies'] = []
+
+
+@unittest.skipUnless(sys.platform == 'linux', 'native writer tests require Linux')
+class NoDependencyMoveTests(_WithoutDependencies, MoveTests):
+    """A game prepared with a profile without dependencies is shown and moved (design: no-SoftDenchi 8.1)."""
+
+    def test_game_without_dependencies_is_shown_and_moved(self):
+        self.assertEqual(self.selection()['kind'], 'move')
+        entry, output = self.status_report()
+        self.assertEqual(entry['dependencies'], [], output)
+        self.assertIn('依存: なし', output)
+        status, report, output = self.move_menu('1\n1\n')
+        self.assertEqual(status, 2, output)
+        self.assertTrue(report['binding_written'], report)
+        self.assertEqual(self.selection()['kind'], 'bound')
+
+
+_only(NoDependencyMoveTests, {'test_game_without_dependencies_is_shown_and_moved'})
+
+
+@unittest.skipUnless(sys.platform == 'linux', 'native writer tests require Linux')
+class NoDependencyRevertTests(_WithoutDependencies, RevertTests):
+    """A moved game without dependencies is assigned back to the older slot."""
+
+    def test_game_without_dependencies_is_reverted(self):
+        _, report, output = self.revert_menu('1\n1\n1\n')
+        self.assertTrue(report['binding_written'], output)
+        current = update.current_selection(update.current_files(self.f.steam, self.f.settings), '42')
+        self.assertEqual(current['config'], update.tool_id_of(self.old))
+
+
+_only(NoDependencyRevertTests, {'test_game_without_dependencies_is_reverted'})
+
+
 if __name__ == '__main__':
     unittest.main()

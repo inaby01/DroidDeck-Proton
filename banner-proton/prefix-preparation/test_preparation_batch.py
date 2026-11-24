@@ -487,6 +487,26 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         self.assertEqual({item['kind']: item['outcome'] for item in report['items']}.get('new'), 'done', output)
         self.assertNotIn('ソフト電池の認証', output)
 
+    def test_a_batch_stopped_before_binding_resumes_the_game_next_time(self):
+        import preparation_one_pass as one_pass
+        profiles = self.config['game_preparation']['profiles']
+        profiles[0]['dependencies'] = []
+        original = one_pass.plan_game_binding
+
+        def running(**arguments):
+            with unittest.mock.patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):
+                return original(**arguments)
+        with unittest.mock.patch.object(one_pass, 'plan_game_binding', side_effect=running):
+            _, report, output = self.first_screen('1\n')
+        self.assertEqual({item['kind']: item['outcome'] for item in report['items']}.get('new'), 'partial', output)
+        self.assertIn('の前で止まりました（設定は書き換えていません）', output)
+        self.assertIn('再実行では続きから準備します', output)
+        self.assertNotIn('再実行では飛ばされます', output)
+        _, _, output = self.first_screen('q\n')
+        self.assertIn('[ID 42] の準備を続きから進める', output)
+        _, report, output = self.first_screen('1\n')
+        self.assertEqual({item['kind']: item['outcome'] for item in report['items']}.get('resume'), 'done', output)
+
     def test_a_matching_pinned_profile_is_mentioned(self):
         import hashlib
         exe = next(Path(game['exe']) for key, game in
