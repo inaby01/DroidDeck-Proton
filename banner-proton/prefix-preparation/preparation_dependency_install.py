@@ -1043,13 +1043,20 @@ class DependencyInstallSession:
         else:
             writes = p.tool_writes or {}
             tail_sha256 = (writes.get("droiddeck_redist") or {}).get("registry_tail_sha256")
+            from preparation_payload import REDIST_REGISTRY
+            shipped = p.inventory.entries.get(REDIST_REGISTRY) or {}
             try:
-                from preparation_payload import REDIST_REGISTRY
-                template = vc.read_template(_tool_directory(p) / REDIST_REGISTRY,
-                                            (p.inventory.entries.get(REDIST_REGISTRY) or {}).get("size"), tail_sha256)
+                template = vc.read_template(_tool_directory(p) / REDIST_REGISTRY, shipped.get("size"), tail_sha256)
             except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError) as error:
                 template = error
-            decision = vc.evaluate(scan, mfc, template, p.record.get("vc_runtime_fingerprint"), tail_sha256)
+            try:
+                # The template's own values, with or without DroidDeck's tail (design 14).
+                original = vc.read_template_original(_tool_directory(p) / REDIST_REGISTRY, shipped.get("size"),
+                                                     shipped.get("sha256"))
+            except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError):
+                original = None
+            decision = vc.evaluate(scan, mfc, template, p.record.get("vc_runtime_fingerprint"), tail_sha256,
+                                   original=original)
             keys = decision.get("keys")
         if decision["state"] == "failed":
             if previous is not None:

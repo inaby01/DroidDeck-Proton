@@ -1556,6 +1556,55 @@ for _name in dir(TRIAL['TrialTests']):
 VC = runpy.run_path(str(HERE / 'test_preparation_vc_record.py'))
 
 
+class TemplateOriginalVcTests(InstallTests):
+    """Design 14: the slot template has no DroidDeck tail yet, so the prefix holds Wine's own values only."""
+    VC_BLOCK = '\n' + ''.join(VC['wine_original'](ident) for ident in VC['ORIGINAL_KEYS'])
+
+    def setUp(self):
+        super().setUp()
+        import preparation_vc_record as vc
+        self.vc = vc
+        original = {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
+        self.original = patch.object(vc, 'read_template_original', return_value=original)
+        self.original.start()
+        self.addCleanup(self.original.stop)
+
+    def silent_flow(self):
+        return InheritedVcTests.silent_flow(self)
+
+    def test_nothing_is_released_and_the_installer_runs(self):
+        session, result, spawned = self.silent_flow()
+        self.assertIsNone(session.release_stopped)
+        self.assertEqual(result['status'], 'present-verified', result)
+        self.assertEqual(result['inherited_vc_record'], {'state': 'template-original', 'values': 24})
+        commands = [call.args[0][1:] for call in spawned.call_args_list]
+        self.assertFalse(any(command[:2] == ('runinprefix', 'cmd.exe') for command in commands), commands)
+
+    def test_the_real_template_path_size_and_hash_are_passed(self):
+        self.original.stop()
+        seen = []
+
+        def spy(*args):
+            seen.append(args)
+            return {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
+        with patch.object(self.vc, 'read_template_original', side_effect=spy):
+            self.silent_flow()
+        self.original.start()
+        plan = self.install_plan().recheck
+        (path, size, digest), = seen
+        entry = plan.inventory.entries.get('files/share/default_pfx_arm64/system.reg') or {}
+        self.assertEqual(path, dep._tool_directory(plan) / 'files/share/default_pfx_arm64/system.reg')
+        self.assertEqual((size, digest), (entry.get('size'), entry.get('sha256')))
+
+    def test_an_unconfirmed_original_keeps_the_earlier_stop(self):
+        self.original.stop()
+        with patch.object(self.vc, 'read_template_original', side_effect=Invalid('template original changed')):
+            session, result, _ = self.silent_flow()
+        self.original.start()
+        self.assertEqual(session.release_stopped, 'template-mismatch')
+        self.assertEqual(result['status'], 'stopped-before-installer')
+
+
 class InheritedVcTests(InstallTests):
     """Design: inherited VC record. The fake initialization writes DroidDeck's appended VC++ 14.51 keys."""
     VC_BLOCK = '\n' + VC['block']()

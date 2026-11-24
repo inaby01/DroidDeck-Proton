@@ -138,6 +138,81 @@ class TemplateTests(unittest.TestCase):
             vc.read_template(path, size, digest)
 
 
+class TemplateOriginalTests(unittest.TestCase):
+    """Design 14: the prefix holds only the template's own values (no DroidDeck tail yet)."""
+
+    ORIGINAL = {ident: dict(WINE_ORIGINAL) for ident in ORIGINAL_KEYS}
+
+    def text(self):
+        return "\n".join(wine_original(ident) for ident in ORIGINAL_KEYS)
+
+    def decide(self, text, *, original=None, init="same", tmpl=Invalid("template contract missing"), tail=None):
+        found = scan(text)
+        start = initial(text) if init == "same" else init
+        return vc.evaluate(found, NO_MFC, tmpl, start, tail, original=self.ORIGINAL if original is None else original)
+
+    def write(self, archive, tail=""):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        path = Path(root.name) / "system.reg"
+        data = (HEADER + archive).encode()
+        path.write_bytes(data + tail.encode())
+        return path, len(data), hashlib.sha256(data).hexdigest()
+
+    def test_the_original_part_is_read_with_or_without_a_tail(self):
+        for tail in ("", "\n" + block()):
+            with self.subTest(tail=bool(tail)):
+                path, size, digest = self.write(self.text(), tail)
+                self.assertEqual(vc.read_template_original(path, size, digest), self.ORIGINAL)
+        path, size, digest = self.write(self.text())
+        with self.assertRaisesRegex(Invalid, "original changed"):
+            vc.read_template_original(path, size, "b" * 64)
+        with self.assertRaisesRegex(Invalid, "shorter"):
+            vc.read_template_original(path, size + 1, digest)
+        for size_value, digest_value in ((None, digest), (size, None), (0, digest), (size, "x")):
+            with self.subTest(size=size_value, digest=digest_value), self.assertRaisesRegex(Invalid, "contract missing"):
+                vc.read_template_original(path, size_value, digest_value)
+
+    def test_only_the_original_values_are_kept_without_a_fingerprint_too(self):
+        for init in ("same", None, {"state": "unreadable", "error_class": "OSError"}, initial(block())):
+            with self.subTest(init=init if init in ("same", None) else init["state"]):
+                decision = self.decide(self.text(), init=init)
+                self.assertEqual(decision, {"state": "template-original", "values": 24})
+                vc.validate_record(decision)
+        # A template with DroidDeck's tail but a prefix made before it (no tail in the prefix) is the same.
+        self.assertEqual(self.decide(self.text(), tmpl=template(), tail="a" * 64)["state"], "template-original")
+
+    def test_anything_else_takes_the_earlier_path(self):
+        changed = self.text().replace('"Minor"=dword:0000002a', '"Minor"=dword:00000033', 1)
+        empty_extra = self.text() + "[" + esc(vc.KEYS["native-x86"]) + "] 1\n"
+        extra_value = self.text().replace('"Rbld"=dword:00000000', '"Rbld"=dword:00000000\n"Other"=dword:00000001', 1)
+        missing = "\n".join(wine_original(ident) for ident in ORIGINAL_KEYS[1:])
+        # DroidDeck appended its block straight to the prefix after initialization (droiddeck-seed-redists).
+        seeded = self.text() + "\n" + block()
+        cases = {name: self.decide(text) for name, text in
+                 (("changed", changed), ("empty-extra", empty_extra), ("missing", missing), ("seeded", seeded))}
+        self.assertEqual({name: decision["state"] for name, decision in cases.items()},
+                         {"changed": "failed", "empty-extra": "failed", "missing": "failed", "seeded": "failed"})
+        self.assertEqual(cases["changed"]["reason"], "template-mismatch")
+        self.assertEqual(self.decide(extra_value)["state"], "template-original")  # Other values are not released.
+        # Without the original (it could not be confirmed) the earlier result stays.
+        self.assertEqual(vc.evaluate(scan(self.text()), NO_MFC, Invalid("x"), initial(self.text()), None)["reason"],
+                         "template-mismatch")
+        # DroidDeck's values in the prefix are still released, even when the original is known.
+        tmpl = template(archive=self.ORIGINAL)
+        self.assertEqual(self.decide(block(), tmpl=tmpl, tail="a" * 64)["state"], "release")
+        # A present MFC140 or a VC++ registration is decided first, as before.
+        found = scan(self.text())
+        self.assertEqual(vc.evaluate(found, {"syswow64": "native", "system32": "absent"}, Invalid("x"), None, None,
+                                     original=self.ORIGINAL)["state"], "kept-vc-present")
+
+    def test_the_record_shape(self):
+        vc.validate_record({"state": "template-original", "values": 24})
+        for extra in ({"keys": {}}, {"version": "x"}, {"reason": "template-mismatch"}, {"exit_code": 0}):
+            with self.subTest(extra=extra), self.assertRaises(Invalid):
+                vc.validate_record({"state": "template-original", "values": 24, **extra})
+
+
 class DecisionTests(unittest.TestCase):
     def decide(self, text, *, mfc=NO_MFC, tmpl=None, init="same", tail="a" * 64):
         found = scan(text)

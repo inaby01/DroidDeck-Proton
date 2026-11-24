@@ -217,7 +217,8 @@ def _binding_verified(context, key):
 
 VC_STATE_TEXT = {"releasing": "外している途中で止まりました", "absent": "なし（外すものはありませんでした）",
                  "absent-after-release": "外し終えています（前回の続き）", "released": "外しました",
-                 "kept-vc-present": "VC++の実体があるため外していません", "failed": "外せませんでした"}
+                 "kept-vc-present": "VC++の実体があるため外していません",
+                 "template-original": "なし（ひな形のもとの値のまま。外すものはありません）", "failed": "外せませんでした"}
 
 
 def _describe_steps(steps):

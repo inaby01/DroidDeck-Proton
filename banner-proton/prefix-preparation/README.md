@@ -1402,3 +1402,25 @@ releases these inherited values from the prefix it prepared:
   preparation, binding, moving and the status check. Reverting (individual operation 6) shows
   the dependencies as not judgeable and, as that display is advisory, still reverts when its
   own checks pass; detail menu 8 does not look at the profile.
+
+## A template DroidDeck has not appended to yet (0.33.1)
+
+- Fix: a preparation slot placed moments ago may not carry DroidDeck's appended VC++ runtime
+  record yet (DroidDeck appends at session start and in its idle job). A prefix initialized
+  from it holds only the template's own Runtimes values, yet 0.32.0-0.33.0 stopped such a
+  prefix before the installer as `template-mismatch` (final), because the template had no
+  tail to compare with.
+- The release step now also reads the template's original part: the first `size` bytes of the
+  slot's `default_pfx_arm64/system.reg`, accepted only when their SHA-256 equals the archive
+  inventory's (the same bytes are hashed and parsed), with or without DroidDeck's tail after it.
+  When the prefix's six keys match it exactly (a key the original lacks must not exist, even
+  empty; a key it has must hold the same value names, types and data, and the registry has its
+  usual shape), nothing is released or written and the installer runs: the record says
+  `template-original` with the value count. This holds without, or against, the initialization
+  fingerprint, because nothing is written. Every other case takes the earlier path; a prefix
+  that holds DroidDeck's values is still released.
+- DroidDeck also appends its block to each prefix without its marker. If that happens between
+  initialization and the installer, the prefix stops as before and has to be registered again;
+  do not launch games from DroidDeck while a preparation runs.
+- A record that already stopped as `template-mismatch` stays final. Earlier tools refuse the
+  new state, so do not run an earlier `prepare.sh` after 0.33.1.

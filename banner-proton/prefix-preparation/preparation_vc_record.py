@@ -51,7 +51,9 @@ UNINSTALL_ROOTS = ("software\\microsoft\\windows\\currentversion\\uninstall",
 # Real VC++ 14.x installations: the 2015-20xx redistributable bundle or its Minimum/Additional runtime MSIs.
 VC14_NAME = re.compile(r"microsoft visual c\+\+ 2015-20\d\d .*redistributable|"
                        r"microsoft visual c\+\+ 20\d\d .*(?:minimum|additional) runtime - 14\.")
-STATES = ("not-evaluated", "releasing", "absent", "absent-after-release", "released", "kept-vc-present", "failed")
+# "template-original": the prefix holds only the template's own values, nothing DroidDeck added (design 14).
+STATES = ("not-evaluated", "releasing", "absent", "absent-after-release", "released", "kept-vc-present",
+          "template-original", "failed")
 # Stops the operator cannot clear by running again (design 4, Fable L4): shown as "stops", skipped by the batch.
 FINAL_REASONS = ("investigation-required", "no-initial-fingerprint", "initial-fingerprint-unreadable", "template-mismatch",
                  "template-changed", "registry-shape", "values-differ", "vc-registered-without-mfc140",
@@ -368,9 +370,7 @@ def read_template(registry, archive_size, expected_tail_sha256):
     digest = hashlib.sha256(tail).hexdigest()
     require(digest == expected_tail_sha256, "template tail changed")
     archive = data[:archive_size]
-    require(archive.startswith(b"WINE REGISTRY Version 2"), "registry header missing")
-    body = archive.split(b"\n", 1)[1] if b"\n" in archive else b""
-    archive_scan = scan_lines(wine_lines(io.BytesIO(body)), physical_links(io.BytesIO(body)))
+    original = _archive_keys(archive)
     tail_scan = scan_lines(wine_lines(io.BytesIO(tail)), physical_links(io.BytesIO(tail)))
     keys, versions = {}, set()
     for ident, entry in tail_scan["keys"].items():
@@ -382,6 +382,14 @@ def read_template(registry, archive_size, expected_tail_sha256):
         versions.add(entry["values"]["Version"][1])
         keys[ident] = dict(entry["values"])
     require(keys and len(versions) == 1, "template versions differ")
+    return {"keys": keys, "version": versions.pop(), "tail_sha256": digest, "archive": original}
+
+
+def _archive_keys(archive):
+    """The Runtimes keys of the template as the archive shipped it (Wine's own values, design 12)."""
+    require(archive.startswith(b"WINE REGISTRY Version 2"), "registry header missing")
+    body = archive.split(b"\n", 1)[1] if b"\n" in archive else b""
+    archive_scan = scan_lines(wine_lines(io.BytesIO(body)), physical_links(io.BytesIO(body)))
     original = {}
     for ident, entry in archive_scan["keys"].items():
         if not entry["exists"]:
@@ -390,7 +398,44 @@ def read_template(registry, archive_size, expected_tail_sha256):
         for value in entry["values"].values():
             require(restorable(value), "template original value type")
         original[ident] = dict(entry["values"])
-    return {"keys": keys, "version": versions.pop(), "tail_sha256": digest, "archive": original}
+    return original
+
+
+def read_template_original(registry, archive_size, archive_sha256):
+    """The template's own Runtimes values, whether or not DroidDeck has appended to it yet (design 14).
+
+    Reads the slot's registry once and interprets the first ``archive_size`` bytes only after
+    their hash equals the archive's (the same bytes are hashed and parsed). Returns
+    {ident: {name: (type, data)}} of the keys the archive has; raises Invalid otherwise.
+    """
+    require(type(archive_size) is int and archive_size > 0 and type(archive_sha256) is str and
+            re.fullmatch(r"[0-9a-f]{64}", archive_sha256) is not None, "template contract missing")
+    with regular_open(safe_path(registry), MAX_REGISTRY) as stream:
+        before = os.fstat(stream.fileno())
+        data = stream.read(MAX_REGISTRY + 1)
+        unchanged(before, os.fstat(stream.fileno()))
+    require(len(data) >= archive_size, "template shorter than its archive")
+    archive = data[:archive_size]
+    require(hashlib.sha256(archive).hexdigest() == archive_sha256, "template original changed")
+    return _archive_keys(archive)
+
+
+def template_original(scan, original):
+    """Whether the prefix holds exactly the template's own values and nothing DroidDeck added (design 14).
+
+    A key the original lacks must not exist at all (an empty key counts: design 4 and 6 delete
+    those too); a key it has must carry the same value names with the same types and data.
+    """
+    for ident, entry in scan["keys"].items():
+        want = original.get(ident)
+        if want is None:
+            if entry["exists"]:
+                return False
+            continue
+        if set(entry["values"]) != set(want) or \
+                any(value_hash(entry["values"][name]) != value_hash(want[name]) for name in want):
+            return False
+    return True
 
 
 RESTORE_SZ = re.compile(r"[0-9A-Za-z.]{1,40}")
@@ -464,11 +509,12 @@ def failed(reason, **extra):
     return {"state": "failed", "reason": reason, "retryable": head in RETRYABLE_REASONS, **extra}
 
 
-def evaluate(scan, mfc, template, initial, current_tail_sha256):
+def evaluate(scan, mfc, template, initial, current_tail_sha256, original=None):
     """Decide before the installer (design 3). Returns a decision dict.
 
     ``initial`` is the init record's fingerprint entry (None for records written before 0.32.0).
     ``template`` is read_template()'s result or an Invalid instance when it could not be read.
+    ``original`` is read_template_original()'s result (None when it could not be confirmed).
     """
     targets = {ident: entry for ident, entry in scan["keys"].items() if entry["values"]}
     count = sum(len(entry["values"]) for entry in targets.values())
@@ -482,6 +528,12 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256):
         return failed("uninstall-unreadable", values=count)
     if scan["uninstall"]["vc14"]:
         return failed("vc-registered-without-mfc140", values=count)
+    shape_ok = not scan["ancestor_links"] and not any(entry["occurrences"] > 1 or entry["duplicate"] or entry["link"]
+                                                      for entry in scan["keys"].values())
+    if isinstance(original, dict) and shape_ok and template_original(scan, original):
+        # Nothing inherited: the template had no DroidDeck tail when the prefix was made. Also without
+        # (or against) the init fingerprint, as nothing is written (design 14, Fable L3).
+        return {"state": "template-original", "values": count}
     if isinstance(template, OSError):
         # A read error may pass; a mismatch does not (Fable code review L6).
         return failed("template-unreadable:" + type(template).__name__, values=count)
@@ -681,6 +733,7 @@ def validate_record(value):
     by_state = {"absent": {"state", "values", "resumed_from", "version"},
                 "absent-after-release": {"state", "values", "resumed_from", "version", "keys"},
                 "kept-vc-present": {"state", "values", "resumed_from", "version"},
+                "template-original": {"state", "values"},
                 "releasing": {"state", "values", "version", "keys", "resumed_from"},
                 "released": {"state", "values", "version", "keys", "resumed_from", "exit_code", "wineserver_observed",
                              "wineserver_gone_before_read"}}
