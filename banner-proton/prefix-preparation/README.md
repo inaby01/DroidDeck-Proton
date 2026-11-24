@@ -1370,8 +1370,8 @@ releases these inherited values from the prefix it prepared:
 - A profile may declare no dependencies (`"dependencies": []`). Preparing a game with it only
   initializes the prefix and binds it to the preparation slot: nothing is installed, no DLL is
   placed and the inherited VC++ runtime record is left as it is. The one-pass confirmation
-  shows "依存 なし", the status check (also for a move) "依存: なし", and detail menu 11's
-  profile line "依存 なし"; the result JSON has an empty `dependencies` list. The SoftDenchi
+  shows "依存 なし", the status check (also for a move) "依存: なし", and detail menu 11
+  "依存: なし" (and "依存 なし" in its profile line when the profile revision changed); the result JSON has an empty `dependencies` list. The SoftDenchi
   licence, authentication and installation lines appear only for a profile that uses
   SoftDenchi. A profile without a pinned EXE hash cannot get a later revision for an
   initialized prefix (as for any profile without one); give a changed profile a new
@@ -1386,7 +1386,8 @@ releases these inherited values from the prefix it prepared:
   every other blocker stays. A one-pass run that stops there says the prefix is initialized and
   that the next run continues after the games are closed. The batch result of a new or resumed
   game stopped at binding before its binding run began (no binding id yet) says the next run
-  continues, whatever the reason; a stop after a binding run began keeps the earlier text.
+  continues (or the next list names why it cannot); a stop after a binding run began, or one
+  because the binding history needs a look, keeps the earlier text.
   Detail menu 11 asks to close
   the game and run again without promising the binding.
 - `game_preparation.default_profile` (optional) names the profile the batch run uses for new

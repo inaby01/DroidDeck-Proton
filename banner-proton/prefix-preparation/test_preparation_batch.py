@@ -476,6 +476,11 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         lines = '\n'.join(batch._partial_lines(ctx, {'kind': 'new'}, changed))
         self.assertIn('再実行では続きから準備します', lines)
         self.assertNotIn('再実行では飛ばされます', lines)
+        # A binding history that needs a look keeps the earlier text.
+        for reason in batch.BINDING_HISTORY_STOPS:
+            stopped = {**entry, 'report': {'stage': 'binding', 'reason': reason}}
+            lines = '\n'.join(batch._partial_lines(ctx, {'kind': 'new'}, stopped))
+            self.assertIn('再実行では飛ばされます', lines)
 
     def test_the_default_profile_chooses_among_profiles_without_a_hash(self):
         profiles = self.config['game_preparation']['profiles']

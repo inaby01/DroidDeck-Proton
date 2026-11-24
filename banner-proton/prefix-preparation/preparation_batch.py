@@ -25,6 +25,9 @@ RUNS_LOCK = hashlib.sha256(b"droiddeck-batch-runs").hexdigest()  # One lock file
 LOCK_REASONS = ("preparation already locked", "DroidDeck settings are locked")
 OUTCOMES = {"done": "完了", "not-started": "未着手", "skipped": "書き込み前に中止", "partial": "一部適用・要確認",
             "running": "実行中に中断・要確認"}
+# binding_action's stops (preparation_one_pass.py): the settings need a look before any rerun.
+BINDING_HISTORY_STOPS = frozenset(("binding-partially-applied", "binding-changed-after-verified-binding",
+                                   "previous-binding-wrote-files"))
 STAGE_TEXT = {
     "softdenchi-interactive": "ソフト電池の導入",
     "softdenchi-silent": "ソフト電池の導入",
@@ -811,10 +814,13 @@ def _partial_lines(ctx, item, entry):
     stage = steps[-1] if steps else None
     binding_id = (ids.get("binding") or {}).get("binding_id")
     # Stopped at binding before any binding run began (its id is recorded before the first settings
-    # write): the settings were not touched, whatever the reason (a running game, a dependency not
-    # verified, a plan changed right before the write), and the next run continues from the
-    # initialized prefix or names why it cannot (design: no-SoftDenchi 4.4).
-    before_binding = stage == "binding" and item["kind"] not in ("move", "align") and binding_id is None
+    # write): this run did not touch the settings (a running game, a dependency not verified, a plan
+    # changed right before the write), and the next run continues from the initialized prefix or
+    # names why it cannot (design: no-SoftDenchi 4.4). A binding history that needs a look (the
+    # settings may be half written by an earlier run) keeps the earlier text.
+    reason = str((entry.get("report") or {}).get("reason") or "")
+    before_binding = (stage == "binding" and item["kind"] not in ("move", "align") and binding_id is None and
+                      reason not in BINDING_HISTORY_STOPS)
     if before_binding:
         lines = ["「" + STAGE_TEXT[stage] + "」の前で止まりました（設定は書き換えていません）。"]
     else:
