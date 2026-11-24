@@ -1414,13 +1414,18 @@ releases these inherited values from the prefix it prepared:
   slot's `default_pfx_arm64/system.reg`, accepted only when their SHA-256 equals the archive
   inventory's (the same bytes are hashed and parsed), with or without DroidDeck's tail after it.
   When the prefix's six keys match it exactly (a key the original lacks must not exist, even
-  empty; a key it has must hold the same value names, types and data, and the registry has its
-  usual shape), nothing is released or written and the installer runs: the record says
-  `template-original` with the value count. This holds without, or against, the initialization
-  fingerprint, because nothing is written. Every other case takes the earlier path; a prefix
-  that holds DroidDeck's values is still released.
-- DroidDeck also appends its block to each prefix without its marker. If that happens between
-  initialization and the installer, the prefix stops as before and has to be registered again;
-  do not launch games from DroidDeck while a preparation runs.
+  empty; a key it has must hold the same value names, types and data, the same other values and
+  the same sub-keys, and the registry has its usual shape), nothing is released or written and
+  the installer runs: the record says `template-original` with the value count. This holds
+  without, or against, the initialization fingerprint, because nothing is written. Every other
+  case takes the earlier path; a prefix that holds DroidDeck's values is still released.
+- A read error of the original part stops as `template-unreadable` (running again may clear it),
+  as a read error of the tail does; a hash or content mismatch keeps the earlier final stop.
+- A prefix whose history began or finished a release is never judged this way: its values are
+  Wine's because the tool wrote them back.
+- DroidDeck also appends its block to each prefix without its marker, at session start and in
+  its idle job, without a lock. If that happens between initialization and the installer, the
+  prefix stops as before and has to be registered again; the tool cannot close this window. Do
+  not launch games from DroidDeck while a preparation runs, and run it in one go.
 - A record that already stopped as `template-mismatch` stays final. Earlier tools refuse the
   new state, so do not run an earlier `prepare.sh` after 0.33.1.

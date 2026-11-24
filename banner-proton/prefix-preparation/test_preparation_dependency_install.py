@@ -1564,8 +1564,7 @@ class TemplateOriginalVcTests(InstallTests):
         super().setUp()
         import preparation_vc_record as vc
         self.vc = vc
-        original = {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
-        self.original = patch.object(vc, 'read_template_original', return_value=original)
+        self.original = patch.object(vc, 'read_template_original', return_value=VC['original_of']())
         self.original.start()
         self.addCleanup(self.original.stop)
 
@@ -1586,7 +1585,7 @@ class TemplateOriginalVcTests(InstallTests):
 
         def spy(*args):
             seen.append(args)
-            return {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
+            return VC['original_of']()
         with patch.object(self.vc, 'read_template_original', side_effect=spy):
             self.silent_flow()
         self.original.start()
@@ -1599,6 +1598,25 @@ class TemplateOriginalVcTests(InstallTests):
     def test_an_unconfirmed_original_keeps_the_earlier_stop(self):
         self.original.stop()
         with patch.object(self.vc, 'read_template_original', side_effect=Invalid('template original changed')):
+            session, result, _ = self.silent_flow()
+        self.original.start()
+        self.assertEqual(session.release_stopped, 'template-mismatch')
+        self.assertEqual(result['status'], 'stopped-before-installer')
+
+    def test_a_read_error_of_the_original_can_be_retried(self):
+        # Fable code review L1: a read error may pass, a mismatch does not.
+        self.original.stop()
+        with patch.object(self.vc, 'read_template_original', side_effect=PermissionError(13, 'denied')):
+            session, result, _ = self.silent_flow()
+        self.original.start()
+        self.assertEqual(session.release_stopped, 'template-unreadable:PermissionError')
+        self.assertEqual((result['status'], result['inherited_vc_record']['retryable']), ('stopped-before-installer', True))
+
+    def test_a_prefix_released_before_is_never_judged_as_the_original(self):
+        # Fable code review L3: after a release the values are Wine's because the tool wrote them back.
+        self.original.stop()
+        with patch.object(self.vc, 'touched', return_value=True), \
+                patch.object(self.vc, 'read_template_original', side_effect=AssertionError('not read')):
             session, result, _ = self.silent_flow()
         self.original.start()
         self.assertEqual(session.release_stopped, 'template-mismatch')

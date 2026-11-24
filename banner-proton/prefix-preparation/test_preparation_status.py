@@ -109,6 +109,17 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         self.assertIn('もう一度実行しても進みません', output)
         self.assertNotIn('続きから進めます', output)
 
+    def test_a_prefix_with_only_the_template_original_is_shown_as_nothing_to_release(self):
+        vc, vc_tests = self.inherit_vc()
+        (self.f.steam / 'steamapps/compatdata/vc-block.reg').write_text(
+            '\n' + ''.join(vc_tests['wine_original'](ident) for ident in vc_tests['ORIGINAL_KEYS']))
+        with patch.object(vc, 'read_template_original', return_value=vc_tests['original_of']()):
+            self.run_detail('12\n1\n1\n1\n')
+        _, report, output = self.status()
+        self.assertEqual(self.entry(report)['inherited_vc_record'],
+                         {'state': 'template-original', 'reason': None, 'retryable': None})
+        self.assertIn('受け継いだVC++の記録: なし（ひな形のもとの値のまま。外すものはありません）', output)
+
     def test_prepared_game_is_ready_and_nothing_is_written(self):
         self.run_menu('1\n1\n1\n1\n')
         locks = sorted(os.listdir(self.f.store_root / 'locks')) if (self.f.store_root / 'locks').exists() else []

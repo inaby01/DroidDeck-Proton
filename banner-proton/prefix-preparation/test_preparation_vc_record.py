@@ -58,6 +58,12 @@ def wine_original(ident):
     return "\n".join(lines) + "\n"
 
 
+def original_of(idents=ORIGINAL_KEYS):
+    """read_template_original()'s form for keys holding Wine's own values and nothing else."""
+    return {ident: {"values": dict(WINE_ORIGINAL), "kept": vc.kept_hash({"others": [], "subkeys": []})}
+            for ident in idents}
+
+
 def initial(text):
     return {"state": "captured", "keys": vc.fingerprint(scan(text)), "template_tail_sha256": "a" * 64}
 
@@ -141,7 +147,7 @@ class TemplateTests(unittest.TestCase):
 class TemplateOriginalTests(unittest.TestCase):
     """Design 14: the prefix holds only the template's own values (no DroidDeck tail yet)."""
 
-    ORIGINAL = {ident: dict(WINE_ORIGINAL) for ident in ORIGINAL_KEYS}
+    ORIGINAL = original_of()
 
     def text(self):
         return "\n".join(wine_original(ident) for ident in ORIGINAL_KEYS)
@@ -194,17 +200,64 @@ class TemplateOriginalTests(unittest.TestCase):
         self.assertEqual({name: decision["state"] for name, decision in cases.items()},
                          {"changed": "failed", "empty-extra": "failed", "missing": "failed", "seeded": "failed"})
         self.assertEqual(cases["changed"]["reason"], "template-mismatch")
-        self.assertEqual(self.decide(extra_value)["state"], "template-original")  # Other values are not released.
+        # Other values and sub-keys are compared too: when unsure, stop (Fable code review L2).
+        sub_key = self.text() + "[" + esc(vc.KEYS["wow-x86"]) + "\\\\Child] 1\n"
+        self.assertEqual({name: self.decide(text)["reason"] for name, text in (("other", extra_value), ("sub-key", sub_key))},
+                         {"other": "template-mismatch", "sub-key": "template-mismatch"})
+        with_other = original_of()
+        with_other["native-arm64"]["kept"] = vc.kept_hash(scan(extra_value)["keys"]["native-arm64"])  # Shipped with it.
+        self.assertEqual(self.decide(extra_value, original=with_other)["state"], "template-original")
         # Without the original (it could not be confirmed) the earlier result stays.
         self.assertEqual(vc.evaluate(scan(self.text()), NO_MFC, Invalid("x"), initial(self.text()), None)["reason"],
                          "template-mismatch")
         # DroidDeck's values in the prefix are still released, even when the original is known.
-        tmpl = template(archive=self.ORIGINAL)
+        tmpl = template(archive={ident: dict(WINE_ORIGINAL) for ident in ORIGINAL_KEYS})
         self.assertEqual(self.decide(block(), tmpl=tmpl, tail="a" * 64)["state"], "release")
         # A present MFC140 or a VC++ registration is decided first, as before.
         found = scan(self.text())
         self.assertEqual(vc.evaluate(found, {"syswow64": "native", "system32": "absent"}, Invalid("x"), None, None,
                                      original=self.ORIGINAL)["state"], "kept-vc-present")
+
+    def test_a_read_error_of_the_original_can_be_retried(self):
+        # Fable code review L1: a read error may pass, a mismatch does not.
+        found = self.decide(self.text(), original=PermissionError(13, "denied"))
+        self.assertEqual((found["reason"], found["retryable"]), ("template-unreadable:PermissionError", True))
+        vc.validate_record(found)
+        # With a broken shape the original does not matter: the earlier final stop stays.
+        linked = self.text() + "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio] 1\n#link\n"
+        self.assertEqual(self.decide(linked, original=OSError(5, "io"))["reason"], "template-mismatch")
+        # A readable template with DroidDeck's tail still decides on its own path.
+        self.assertEqual(self.decide(block(), original=OSError(5, "io"), tmpl=template(), tail="a" * 64)["reason"],
+                         "template-unreadable:OSError")
+
+    def test_links_duplicates_and_odd_lines_are_never_the_original(self):
+        key = f"[{esc(vc.KEYS['wow-x64'])}] 1795176401\n"
+        cases = {
+            "link": self.text().replace(key, key + "#link\n", 1),
+            "ancestor": self.text() + "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio] 1\n#link\n",
+            "twice": self.text().replace('"Rbld"=dword:00000000', '"Rbld"=dword:00000000\n"rbld"=dword:00000000', 1),
+            "repeated-key": self.text() + "\n" + key,
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.decide(text)["state"], "failed")
+        odd = self.text().replace('"Rbld"=dword:00000000', '"Rbld"=dword:0', 1)  # Not as Wine writes it.
+        self.assertEqual(self.decide(odd)["reason"], "registry-shape")
+
+    def test_a_rerun_after_the_original_evaluates_again_and_a_release_is_never_judged_so(self):
+        decision = self.decide(self.text())
+        history = [{"install_id": "depinstall-" + "1" * 32, "inherited_vc_record": decision}]
+        # Nothing was written: the next run is neither a resume nor a finished release, and decides again.
+        self.assertEqual((vc.unfinished(history), vc.completed(history), vc.touched(history), vc.final_stop(history)),
+                         (None, None, False, None))
+        self.assertEqual(self.decide(self.text()), decision)
+        keys = {"native-x86": {"values": {"Bld": "a" * 64}, "delete_key": True, "kept": "b" * 64, "restore": {}}}
+        for state in ("releasing", "released", "absent-after-release"):
+            with self.subTest(state):
+                self.assertTrue(vc.touched(history + [{"inherited_vc_record": {"state": state, "values": 1, "keys": keys}}]))
+        self.assertTrue(vc.touched([{"inherited_vc_record": {"state": "failed", "reason": "values-remain",
+                                                             "retryable": True, "keys": keys}}]))
+        self.assertFalse(vc.touched([{}, {"inherited_vc_record": {"state": "not-evaluated"}}]))
 
     def test_the_record_shape(self):
         vc.validate_record({"state": "template-original", "values": 24})

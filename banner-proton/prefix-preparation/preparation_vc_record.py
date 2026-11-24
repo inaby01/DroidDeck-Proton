@@ -385,20 +385,26 @@ def read_template(registry, archive_size, expected_tail_sha256):
     return {"keys": keys, "version": versions.pop(), "tail_sha256": digest, "archive": original}
 
 
-def _archive_keys(archive):
-    """The Runtimes keys of the template as the archive shipped it (Wine's own values, design 12)."""
+def _archive_entries(archive):
+    """The Runtimes keys the template had as the archive shipped it, as scanned (Wine's own, design 12)."""
     require(archive.startswith(b"WINE REGISTRY Version 2"), "registry header missing")
     body = archive.split(b"\n", 1)[1] if b"\n" in archive else b""
     archive_scan = scan_lines(wine_lines(io.BytesIO(body)), physical_links(io.BytesIO(body)))
-    original = {}
+    require(not archive_scan["ancestor_links"], "template original key shape")
+    entries = {}
     for ident, entry in archive_scan["keys"].items():
         if not entry["exists"]:
             continue  # A key the template had (even empty) is kept, never deleted (design 12, Codex L).
         require(entry["occurrences"] == 1 and not entry["duplicate"] and not entry["link"], "template original key shape")
         for value in entry["values"].values():
             require(restorable(value), "template original value type")
-        original[ident] = dict(entry["values"])
-    return original
+        entries[ident] = entry
+    return entries
+
+
+def _archive_keys(archive):
+    """The Runtimes values of the template as the archive shipped it (written back by a release, design 12)."""
+    return {ident: dict(entry["values"]) for ident, entry in _archive_entries(archive).items()}
 
 
 def read_template_original(registry, archive_size, archive_sha256):
@@ -406,7 +412,8 @@ def read_template_original(registry, archive_size, archive_sha256):
 
     Reads the slot's registry once and interprets the first ``archive_size`` bytes only after
     their hash equals the archive's (the same bytes are hashed and parsed). Returns
-    {ident: {name: (type, data)}} of the keys the archive has; raises Invalid otherwise.
+    {ident: {"values": {name: (type, data)}, "kept": kept_hash}} of the keys the archive has
+    (other values and sub-keys are compared too: Fable code review L2); raises Invalid otherwise.
     """
     require(type(archive_size) is int and archive_size > 0 and type(archive_sha256) is str and
             re.fullmatch(r"[0-9a-f]{64}", archive_sha256) is not None, "template contract missing")
@@ -417,14 +424,16 @@ def read_template_original(registry, archive_size, archive_sha256):
     require(len(data) >= archive_size, "template shorter than its archive")
     archive = data[:archive_size]
     require(hashlib.sha256(archive).hexdigest() == archive_sha256, "template original changed")
-    return _archive_keys(archive)
+    return {ident: {"values": dict(entry["values"]), "kept": kept_hash(entry)}
+            for ident, entry in _archive_entries(archive).items()}
 
 
 def template_original(scan, original):
     """Whether the prefix holds exactly the template's own values and nothing DroidDeck added (design 14).
 
     A key the original lacks must not exist at all (an empty key counts: design 4 and 6 delete
-    those too); a key it has must carry the same value names with the same types and data.
+    those too); a key it has must carry the same value names with the same types and data, and
+    the same other values and sub-keys (Fable code review L2: when unsure, stop).
     """
     for ident, entry in scan["keys"].items():
         want = original.get(ident)
@@ -432,8 +441,8 @@ def template_original(scan, original):
             if entry["exists"]:
                 return False
             continue
-        if set(entry["values"]) != set(want) or \
-                any(value_hash(entry["values"][name]) != value_hash(want[name]) for name in want):
+        if not entry["exists"] or set(entry["values"]) != set(want["values"]) or kept_hash(entry) != want["kept"] or \
+                any(value_hash(entry["values"][name]) != value_hash(want["values"][name]) for name in want["values"]):
             return False
     return True
 
@@ -514,7 +523,8 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256, original=None):
 
     ``initial`` is the init record's fingerprint entry (None for records written before 0.32.0).
     ``template`` is read_template()'s result or an Invalid instance when it could not be read.
-    ``original`` is read_template_original()'s result (None when it could not be confirmed).
+    ``original`` is read_template_original()'s result, an OSError when it could not be read, or None
+    (not confirmed, or not to be used: the prefix was released before, Fable code review L3).
     """
     targets = {ident: entry for ident, entry in scan["keys"].items() if entry["values"]}
     count = sum(len(entry["values"]) for entry in targets.values())
@@ -534,6 +544,9 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256, original=None):
         # Nothing inherited: the template had no DroidDeck tail when the prefix was made. Also without
         # (or against) the init fingerprint, as nothing is written (design 14, Fable L3).
         return {"state": "template-original", "values": count}
+    if isinstance(original, OSError) and shape_ok:
+        # The template-original check could not run: a read error may pass (Fable code review L1).
+        return failed("template-unreadable:" + type(original).__name__, values=count)
     if isinstance(template, OSError):
         # A read error may pass; a mismatch does not (Fable code review L6).
         return failed("template-unreadable:" + type(template).__name__, values=count)
@@ -546,8 +559,7 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256, original=None):
                       values=count)
     if initial.get("template_tail_sha256") != current_tail_sha256 or template["tail_sha256"] != current_tail_sha256:
         return failed("template-changed", values=count)
-    if scan["ancestor_links"] or any(entry["occurrences"] > 1 or entry["duplicate"] or entry["link"]
-                                     for entry in scan["keys"].values()):
+    if not shape_ok:
         return failed("registry-shape", values=count)
     current = fingerprint(scan)
     expected = {ident: {name: value_hash(value) for name, value in values.items()}
@@ -556,10 +568,10 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256, original=None):
         return failed("values-differ", values=count)
     plan = {}
     for ident, entry in targets.items():
-        original = template["archive"].get(ident, {})
+        archived = template["archive"].get(ident, {})
         # Names the template had before DroidDeck are written back; the rest are deleted (design 12).
         plan[ident] = {"values": current[ident], "kept": kept_hash(entry),
-                       "restore": {name: list(original[name]) for name in current[ident] if name in original},
+                       "restore": {name: list(archived[name]) for name in current[ident] if name in archived},
                        "delete_key": ident not in template["archive"] and not entry["others"] and not entry["subkeys"]}
     return {"state": "release", "values": count, "version": template["version"], "keys": plan}
 
@@ -799,6 +811,16 @@ def completed(history):
             evaluated[-1]["inherited_vc_record"].get("keys"):
         return evaluated[-1]
     return None
+
+
+def touched(history):
+    """Whether any record of one initialization began or finished a release (Fable code review L3).
+
+    Such a prefix holds Wine's values because the tool wrote them back, so it is never judged as
+    "only the template's own values".
+    """
+    return any((record.get("inherited_vc_record") or {}).get("state") in ("releasing", "released", "absent-after-release")
+               or (record.get("inherited_vc_record") or {}).get("keys") for record in history)
 
 
 def final_stop(history):
