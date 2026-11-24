@@ -810,10 +810,11 @@ def _partial_lines(ctx, item, entry):
             steps.append(stage)
     stage = steps[-1] if steps else None
     binding_id = (ids.get("binding") or {}).get("binding_id")
-    # Stopped by the binding plan before any binding run began (a running game, a dependency not
-    # verified): the settings were not touched and the next run continues (design: no-SoftDenchi 4.4).
-    before_binding = (stage == "binding" and item["kind"] not in ("move", "align") and binding_id is None and
-                      str((entry.get("report") or {}).get("reason") or "").startswith("binding-blocked:"))
+    # Stopped at binding before any binding run began (its id is recorded before the first settings
+    # write): the settings were not touched, whatever the reason (a running game, a dependency not
+    # verified, a plan changed right before the write), and the next run continues from the
+    # initialized prefix or names why it cannot (design: no-SoftDenchi 4.4).
+    before_binding = stage == "binding" and item["kind"] not in ("move", "align") and binding_id is None
     if before_binding:
         lines = ["「" + STAGE_TEXT[stage] + "」の前で止まりました（設定は書き換えていません）。"]
     else:

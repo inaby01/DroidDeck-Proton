@@ -681,6 +681,7 @@ class GamePrefixTests(DEP['InstallTests']):
         self.assertEqual(report['plan']['blockers'], [game.PROCESS_BLOCKER])
         self.assertIn('ゲームかWineが動いています', output)
         self.assertIn('依存の確認からやり直します', output)
+        self.assertIn('依存: なし', output)
         self.assertNotIn('全依存が検証済みになるまで', output)
         self.assertEqual(before, self.protected())
 

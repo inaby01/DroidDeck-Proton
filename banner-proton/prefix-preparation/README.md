@@ -1384,8 +1384,10 @@ releases these inherited values from the prefix it prepared:
   blocker `process:target-process-view-not-clear`. The one-pass resume drops only the
   `dependency-not-verified:<id>` blockers of dependencies its earlier steps make verified;
   every other blocker stays. A one-pass run that stops there says the prefix is initialized and
-  that the next run continues after the games are closed; the batch result says the same,
-  while a stop after a binding run began keeps the earlier text. Detail menu 11 asks to close
+  that the next run continues after the games are closed. The batch result of a new or resumed
+  game stopped at binding before its binding run began (no binding id yet) says the next run
+  continues, whatever the reason; a stop after a binding run began keeps the earlier text.
+  Detail menu 11 asks to close
   the game and run again without promising the binding.
 - `game_preparation.default_profile` (optional) names the profile the batch run uses for new
   registrations. It must name a profile without a pinned EXE hash. Without it, the batch run
@@ -1396,5 +1398,6 @@ releases these inherited values from the prefix it prepared:
 - Detail menu 8 (SoftDenchi installation) still lists every managed prefix, including one
   prepared without dependencies; it installs only after the operator selects it and confirms.
 - Tool 0.32.0 reading a record of a profile it does not have stops before writing in
-  preparation, binding, moving and the status check; reverting (individual operation 6) and
-  detail menu 8 do not look at the profile.
+  preparation, binding, moving and the status check. Reverting (individual operation 6) shows
+  the dependencies as not judgeable and, as that display is advisory, still reverts when its
+  own checks pass; detail menu 8 does not look at the profile.

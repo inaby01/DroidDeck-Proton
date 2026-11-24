@@ -471,6 +471,11 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         # A move stopped at binding keeps the earlier text.
         lines = '\n'.join(batch._partial_lines(ctx, {'kind': 'move'}, {**entry, 'ids': {}}))
         self.assertIn('再実行では飛ばされます', lines)
+        # A plan changed right before the write (the game started in between) is a stop before binding too.
+        changed = {**entry, 'report': {'stage': 'binding', 'reason': 'game binding plan changed'}}
+        lines = '\n'.join(batch._partial_lines(ctx, {'kind': 'new'}, changed))
+        self.assertIn('再実行では続きから準備します', lines)
+        self.assertNotIn('再実行では飛ばされます', lines)
 
     def test_the_default_profile_chooses_among_profiles_without_a_hash(self):
         profiles = self.config['game_preparation']['profiles']

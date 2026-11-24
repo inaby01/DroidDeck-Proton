@@ -681,6 +681,8 @@ def interactive_game_binding(directory, renderer, config, *, input_stream=None, 
             print("  依存: " + selection._text(item["dependency_id"] + " / " + item["state"] +
                                               (" / " + item["reason"] if item.get("reason") and item["state"] != "blocked" else "")),
                   file=output)
+        if not summary["dependencies"]:
+            print("  依存: なし", file=output)
         if not summary["exe_path_ascii"]:
             print(NON_ASCII_NOTE, file=output)
         print("割り当て先: " + selection._text(summary["tool_directory"]), file=output)
