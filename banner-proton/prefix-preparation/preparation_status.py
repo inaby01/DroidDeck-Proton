@@ -411,8 +411,8 @@ def _game(key, listed, title, context):
                         dependencies = [{"dependency_id": value["dependency_id"], "state": value["state"]}
                                         for value in plan.dependencies]
                         entry["dependencies"] = dependencies
-                        print("  依存: " + "、".join(text(value["dependency_id"] + " / " + value["state"])
-                                                    for value in dependencies), file=output)
+                        print("  依存: " + ("、".join(text(value["dependency_id"] + " / " + value["state"])
+                                                     for value in dependencies) or "なし"), file=output)
                     except (OSError, ValueError, TypeError, KeyError) as error:
                         blockers = ["unreadable:" + type(error).__name__]
                     if blockers:
@@ -448,7 +448,8 @@ def _game(key, listed, title, context):
         dependencies = _describe_steps(evaluation["steps"])
         if dependencies is not None:
             entry["dependencies"] = dependencies
-            print("  依存: " + "、".join(text(item["dependency_id"] + " / " + item["state"]) for item in dependencies), file=output)
+            print("  依存: " + ("、".join(text(item["dependency_id"] + " / " + item["state"]) for item in dependencies)
+                               or "なし"), file=output)
         released = next((step["latest"] for step in evaluation["steps"] if step["step"] == "inherited-vc-record"), None)
         if released is not None:
             # The newest evaluated release of this initialization (design: inherited VC record 6, Codex L1).

@@ -72,6 +72,15 @@ class ActionTableTests(unittest.TestCase):
         self.assertTrue(one_pass.softdenchi_action(record('cancelled-absent'), 0, 'present-verified')[2])
         self.assertFalse(one_pass.softdenchi_action(record('present-verified'), 0, 'present-verified')[2])
 
+    def test_only_not_verified_blockers_of_pending_dependencies_are_dropped(self):
+        pending = {'softdenchi-runtime', 'target-process-view-not-clear'}
+        blockers = ('dependency-not-verified:softdenchi-runtime', 'dependency-blocked:softdenchi-runtime',
+                    'dependency-not-verified:other', 'process:target-process-view-not-clear',
+                    'dependency-not-verified:target-process-view-not-clear', 'no-colon')
+        self.assertEqual(one_pass.blockers_left(blockers, pending),
+                         ['dependency-blocked:softdenchi-runtime', 'dependency-not-verified:other',
+                          'process:target-process-view-not-clear', 'no-colon'])
+
     def test_binding_rows(self):
         class Plan:
             def __init__(self, same):
@@ -232,6 +241,36 @@ class OnePassTests(GAME['GamePrefixTests']):
         self.assertEqual(games['games']['42']['valve'], False)
         self.assertIn('DroidDeckからこのゲームを起動', output)
         self.assertFalse(report['preparation_complete'])
+
+    def test_profile_without_dependencies_is_initialized_and_bound(self):
+        self.config['game_preparation']['profiles'][0]['dependencies'] = []
+        status, report, output, commands = self.run_detail('12\n1\n1\n1\n')
+        self.assertEqual(status, 2, output)
+        self.assertEqual(report['status'], 'ready-to-launch', report)
+        self.assertEqual([step['step'] for step in report['steps']], ['initialize', 'binding-plan', 'binding'])
+        self.assertEqual(len(commands), 1, commands)  # Only the initialization ran Wine.
+        self.assertEqual(self.installs(), [])
+        self.assertIn('依存 なし', output)
+        self.assertNotIn('prefix内（', output)
+        self.assertNotIn('使用許諾', output)
+        self.assertIn('DroidDeckからこのゲームを起動してください。', output)
+        self.assertNotIn('ソフト電池の認証', output)
+
+    def test_running_game_without_dependencies_stops_the_resume_before_binding(self):
+        self.config['game_preparation']['profiles'][0]['dependencies'] = []
+        self.initialize()
+        before = self.protected()
+        with patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):
+            _, report, output, commands = self.run_detail('12\n1\n1\n')
+        self.assertEqual(report['status'], 'stopped', report)
+        self.assertEqual(report['stage'], 'binding')
+        self.assertIn('process:target-process-view-not-clear', report['reason'])
+        self.assertIn('ゲームまたはWineが動いているため', output)
+        self.assertEqual(commands, [])
+        self.assertEqual(before, self.protected())
+        # Once the game is closed, the same run binds it.
+        _, report, _, _ = self.run_detail('12\n1\n1\n1\n')
+        self.assertEqual(report['status'], 'ready-to-launch', report)
 
     def test_running_again_after_success_only_reports_the_binding(self):
         self.run_detail('12\n1\n1\n1\n')

@@ -563,7 +563,8 @@ def detailed_menu(directory, renderer, config, *, input_stream=None, output_stre
         print("11. 依存が揃った実ゲームprefixを準備用slotへ割り当て（Wine・ゲームは起動しない）", file=output)
     if config.get("initialization_trial") is True and "placement_review" in config and "game_preparation" in config \
             and "dependency_installation" in config:
-        print("12. 新しいゲームを1回で準備（初期化→ソフト電池を画面なしで導入→割り当て。途中からの再開も可）", file=output)
+        print("12. 新しいゲームを1回で準備（初期化→（ソフト電池を使うプロファイルでは）ソフト電池を画面なしで導入→割り当て。"
+              "途中からの再開も可）", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
     if answer == "4" and "placement_review" in config:

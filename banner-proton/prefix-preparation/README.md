@@ -1364,3 +1364,34 @@ releases these inherited values from the prefix it prepared:
   the initialization record, and in diagnostic mode the InstallShield log in the prefix.
   Records of 0.32.0 carry new optional fields; earlier tools refuse them, so do not run an
   earlier `prepare.sh` after 0.32.0.
+
+## Profiles without dependencies and the default profile (0.33.0)
+
+- A profile may declare no dependencies (`"dependencies": []`). Preparing a game with it only
+  initializes the prefix and binds it to the preparation slot: nothing is installed, no DLL is
+  placed and the inherited VC++ runtime record is left as it is. The confirmation, the result
+  and the status check show "依存 なし"; the SoftDenchi licence, authentication and
+  installation lines appear only for a profile that uses SoftDenchi. Such a profile has no
+  pinned EXE hash, so it cannot get a later revision for an initialized prefix; give a changed
+  profile a new `profile_id` instead.
+- Binding now requires on its own that the target game and Wine were seen stopped before and
+  after the dependency checks, the last step of the readiness callback right before each file
+  is replaced. Before, this was implied only by the dependency states, so a profile without
+  dependencies would have had no such check. The binding plan reports a running target as the
+  blocker `process:target-process-view-not-clear`. The one-pass resume drops only the
+  `dependency-not-verified:<id>` blockers of dependencies its earlier steps make verified;
+  every other blocker stays. A one-pass run that stops there says the prefix is initialized and
+  that the next run continues after the games are closed; the batch result says the same,
+  while a stop after a binding run began keeps the earlier text. Detail menu 11 asks to close
+  the game and run again without promising the binding.
+- `game_preparation.default_profile` (optional) names the profile the batch run uses for new
+  registrations. It must name a profile without a pinned EXE hash. Without it, the batch run
+  uses the only profile without a pinned EXE hash, as before; with two or more such profiles
+  new registrations are listed under "not done". Other profiles are chosen with individual
+  operation 1. Prepare games that need another profile with individual operation 1 before
+  running the batch, which would otherwise prepare them with the default profile.
+- Detail menu 8 (SoftDenchi installation) still lists every managed prefix, including one
+  prepared without dependencies; it installs only after the operator selects it and confirms.
+- Tool 0.32.0 reading a record of a profile it does not have stops before writing in
+  preparation, binding, moving and the status check; reverting (individual operation 6) and
+  detail menu 8 do not look at the profile.

@@ -20,6 +20,7 @@ from preparation_assets import digest_json, exe_identity, inspect_assets_from_fo
 from preparation_common import VERSION, Invalid, require, safe_path
 from preparation_game_prefix import (
     NON_ASCII_NOTE,
+    PROCESS_BLOCKER,
     RECORDS,
     GamePrefixSession,
     apply_game_binding,
@@ -46,6 +47,9 @@ PREFIX_DLL_BLOCKED = ("DLL（{0}）を入れる前の確認で止まりました
                       "置き先に書きかけの {0} が残っている場合は、結果JSONを戻してください（回復の手順をお知らせします）。")
 SOFTDENCHI_STATE_STOP = "ソフト電池の導入記録または状態に確認が要ります。修復はしていません。"
 BINDING_BLOCKED = "全依存が検証済みになるまで割り当てません。"
+# The plan saw the game or Wine running (design: no-SoftDenchi 4.4); the next run continues from here.
+BINDING_RUNNING = ("ゲームかWineが動いているため、割り当てる前に止めました。初期化は済んでいます。"
+                   "すべてのゲームとWineを終了してから、もう一度実行すると続きから準備します。")
 BINDING_STOP = "割り当ての状態に確認が要ります。設定は変更していません。"
 # Records after which a new installation may follow (same rule as retry_blockers), except failures.
 RETRYABLE = ("cancelled-absent", "stopped-before-installer", "running", "needs-user")
@@ -391,6 +395,17 @@ def pre_write_stops(*, profile, recipes, directory, record=None, softdenchi=None
     return _dll_asset_stop(dll_items, problems) if problems else None
 
 
+def blockers_left(blockers, pending):
+    """Binding blockers that the steps before binding will not clear.
+
+    The steps before binding make only the pending dependencies verified, so only their own
+    "not verified" blockers may be dropped. Any other form stays, also when its text after
+    the colon equals a pending dependency id (design: no-SoftDenchi 4.3).
+    """
+    return [blocker for blocker in blockers
+            if not (blocker.startswith("dependency-not-verified:") and blocker.split(":", 1)[1] in pending)]
+
+
 def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, source, games, common, stop_check,
                     silent_launch=None, inventory=None):
     """Read-only evaluation of what menu 1 does next for an initialized game (no locks, no writes).
@@ -515,8 +530,7 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
             bplan = plan_game_binding(record=record, record_sha256=record_digest, source=source, games=games,
                                       stop_check=stop_check, recipe=softdenchi, previous_slots=roots, **common, **extra)
         steps.append({"step": "binding-plan", "evaluated": True, "plan": bplan.summary(), "action": action, "reason": reason})
-        # The steps before binding make only the pending dependencies verified.
-        remaining = [blocker for blocker in bplan.blockers if blocker.split(":", 1)[1] not in pending]
+        remaining = blockers_left(bplan.blockers, pending)
         if remaining:
             return stopped("binding", "binding-blocked:" + ",".join(remaining), BINDING_BLOCKED)
         if action == "stop":
@@ -847,7 +861,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             output = io.StringIO()  # The batch screen showed and confirmed the details.
         print("ゲーム: " + text(games[key]["title"]) + f" [ID {key}]", file=output)
         print("作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）/ 依存 " +
-              text(", ".join(profile["dependencies"])), file=output)
+              text(", ".join(profile["dependencies"]) or "なし"), file=output)
         print("prefix: " + text(str(compatdata)) + ("（新規作成）" if label == "新規" else "（初期化済み・続きから）"), file=output)
         print("準備用Proton: " + text(proton["directory"]), file=output)
         if label == "新規":
@@ -878,8 +892,9 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         if evaluation is not None:
             print("今の状態から見込まれること: " + ("・".join(text(action_text(action, recipes)) for action in evaluation["actions"])
                                              or "入れるもの・割り当ての変更はありません（照合だけ）"), file=output)
-        print("書くもの: 新規prefix・専用work/HOME・prefix内（" + ("DLL・" if dll_items else "") +
-              "ソフト電池" + ("・受け継いだVC++の記録を外す" if uses_softdenchi else "") + "）・このゲームの設定項目・私有記録/lock・結果JSON。"
+        inside = [*(["DLL"] if dll_items else []), *(["ソフト電池", "受け継いだVC++の記録を外す"] if uses_softdenchi else [])]
+        print("書くもの: 新規prefix・専用work/HOME・" + ("prefix内（" + "・".join(inside) + "）・" if inside else "") +
+              "このゲームの設定項目・私有記録/lock・結果JSON。"
               "既存の他prefix・ゲームフォルダー・認証・セーブは変更しません。", file=output)
         print("すべてのゲーム・Wineを終了してから続行してください。", file=output)
         print("この内容で準備する場合は1、取消はq: ", end="", file=output, flush=True)
@@ -1040,7 +1055,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             report["steps"].append({"step": "binding-plan", "plan": summary, "action": action, "reason": reason})
             # Dependencies first (design 5.1 step 4 before 5): an already bound game is not "ready" while one is unverified.
             if bplan.blockers:
-                raise Stopped(stage, "binding-blocked:" + ",".join(bplan.blockers), BINDING_BLOCKED)
+                raise Stopped(stage, "binding-blocked:" + ",".join(bplan.blockers),
+                              BINDING_RUNNING if PROCESS_BLOCKER in bplan.blockers else BINDING_BLOCKED)
             if action == "already-bound":
                 print("このゲームはすでに準備用Protonに割り当て済みです。設定は変更しません。", file=output)
             elif action == "stop":
@@ -1057,7 +1073,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 if result["status"] != "binding-verified":
                     raise Stopped(stage, "binding-" + result["status"], "割り当てが完了しませんでした。設定のバックアップは私有記録にあります。")
         report["status"] = "ready-to-launch"
-        print("準備が終わりました。DroidDeckからこのゲームを起動し、ソフト電池の認証を行ってください。", file=output)
+        print("準備が終わりました。DroidDeckからこのゲームを起動" + ("し、ソフト電池の認証を行ってください。" if uses_softdenchi
+                                                                   else "してください。"), file=output)
     except Stopped as stopped:
         output = real_output
         report.update(status="stopped", stage=stopped.check, reason=stopped.reason, next_step=stopped.next_step)

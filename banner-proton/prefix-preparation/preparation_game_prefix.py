@@ -38,6 +38,10 @@ from preparation_store import PrivateStore
 
 SCOPE = "registered-game-new-prefix"
 RECORDS = "game-prefixes"
+# Binding blocker when the target game or Wine was seen running around the dependency checks.
+# The "process:" form keeps it apart from dependency blockers ("dependency-…:<id>"), whose ids
+# may be any identifier, including this text.
+PROCESS_BLOCKER = "process:target-process-view-not-clear"
 ID_PREFIX = "gprefix-"
 HANDLERS = ("softdenchi-interactive", "mfc-local", "game-folder-file", "prefix-dll")
 # Handlers whose recipes may be declared ready: the guarded SoftDenchi installer, a read-only
@@ -85,7 +89,7 @@ def registration_identity(exe, title):
 
 def validate_game_config(value):
     """Operator-declared profiles and recipes. Declarations never authorize execution by themselves."""
-    fields(value, ("profiles", "recipes"))
+    fields(value, ("profiles", "recipes"), ("default_profile",))
     recipes = {}
     require(type(value["recipes"]) is list and 0 < len(value["recipes"]) <= 64, "invalid recipe list")
     for item in value["recipes"]:
@@ -115,7 +119,8 @@ def validate_game_config(value):
         string(item["title"])
         string(item["edition"])
         require(item["edition_status"] in ("unconfirmed", "confirmed"), "invalid edition status")
-        require(type(item["dependencies"]) is list and 0 < len(item["dependencies"]) <= 32 and
+        # No dependencies: only initialize the prefix and bind it (design: no-SoftDenchi 4.2).
+        require(type(item["dependencies"]) is list and len(item["dependencies"]) <= 32 and
                 len(set(item["dependencies"])) == len(item["dependencies"]) and
                 all(identifier(dep) in recipes for dep in item["dependencies"]), "profile references unknown dependency")
         require(item["exe_sha256"] is None or type(item["exe_sha256"]) is str and SHA256.fullmatch(item["exe_sha256"]),
@@ -127,7 +132,22 @@ def validate_game_config(value):
         names = [recipes[dep]["asset"]["filename"].lower() for dep in item["dependencies"] if recipes[dep]["handler"] == "prefix-dll"]
         require(len(names) == len(set(names)), "prefix DLL names repeat within a profile")
         profiles[key] = item
+    if "default_profile" in value:
+        chosen = value["default_profile"]
+        require(type(chosen) is str and chosen in profiles and profiles[chosen]["exe_sha256"] is None,
+                "default profile must name a profile without an EXE hash")
     return profiles, recipes
+
+
+def automatic_profiles(value):
+    """Profiles a new registration may get without a choice (batch run, design: Proton update 5).
+
+    ``default_profile`` when the bundle names one (design: no-SoftDenchi 5), otherwise every
+    profile without an EXE hash; the caller uses the result only when it has exactly one entry.
+    """
+    if type(value) is dict and "default_profile" in value:
+        return [value["default_profile"]]
+    return [item["profile_id"] for item in value["profiles"] if item["exe_sha256"] is None]
 
 
 def _validate_game_folder_file(item):
@@ -458,7 +478,15 @@ class GameBindingPlan:
 
 
 def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe, payload=None, previous_slots=()):
-    """Live, offline dependency states. A view that is not clear makes every check uninspected.
+    """Live, offline dependency states. A view that is not clear makes every check uninspected."""
+    return _observed_dependencies(profile, recipes, compatdata, recipe, stop_check, exe, payload, previous_slots)[0]
+
+
+def _observed_dependencies(profile, recipes, compatdata, recipe, stop_check, exe, payload=None, previous_slots=()):
+    """Dependency states and whether the target was seen stopped before and after the checks.
+
+    The second value is the stopped-process guarantee for binding: with no dependencies there
+    is no state to turn ``uninspected``, so callers must require it themselves (design 4.3).
 
     ``payload`` is (verified inventory, tool directory) of the selected Proton, used by ``prefix-dll``.
     ``previous_slots`` lets the x86 layout check accept a link into another tool-placed slot
@@ -490,10 +518,11 @@ def _dependency_states(profile, recipes, compatdata, recipe, stop_check, exe, pa
         else:
             require(item["handler"] == "softdenchi-interactive", "unsupported ready handler")
             states.append({**declared, "state": inspect_dependency_state(compatdata, recipe)["state"]})
-    if clear and not stop_check.check()["clear_in_view"]:
+    after = stop_check.check()["clear_in_view"]
+    if clear and not after:
         states = [{**item, "state": "uninspected", "reason": "concurrent-process-observed"} if item["state"] != "blocked" else item
                   for item in states]
-    return tuple(states)
+    return tuple(states), clear and after
 
 
 def _payload(base):
@@ -523,10 +552,11 @@ def plan_game_binding(*, record, record_sha256, config, directory, renderer, sou
     require(isinstance(stop_check, ProcessStopCheck) and stop_check.compatdata == base.compatdata, "matching process observation required")
     exe = base.target.exe
     previous_slots = tuple(safe_path(root) for root in previous_slots)
-    dependencies = _dependency_states(profile, recipes, base.compatdata, recipe, stop_check, exe, _payload(base),
-                                      previous_slots)
+    dependencies, stopped = _observed_dependencies(profile, recipes, base.compatdata, recipe, stop_check, exe,
+                                                   _payload(base), previous_slots)
     blockers = sorted({("dependency-blocked:" if item["state"] == "blocked" else "dependency-not-verified:") + item["dependency_id"]
-                       for item in dependencies if item["state"] != "present-verified"})
+                       for item in dependencies if item["state"] != "present-verified"} |
+                      (set() if stopped else {PROCESS_BLOCKER}))
     binding = plan_binding(steam, settings, record["app_id"], base.customization.directory, choice)
     signature = {"version": VERSION, "base": base.digest, "profile": record["profile"]["profile_digest"],
                  "current_profile": digest_json(profile), "dependencies": list(dependencies), "binding": binding.digest,
@@ -572,8 +602,7 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
     base = plan.base
     tool = safe_path(base.target.steam / "compatibilitytools.d" / base.customization.directory, base.target.steam)
     # Only SoftDenchi, read-only game-folder checks and prefix DLLs can be ready (validate_game_config); mfc-local stays blocked.
-    require(plan.dependencies and all(item["state"] == "present-verified" for item in plan.dependencies),
-            "dependencies not verified")
+    require(all(item["state"] == "present-verified" for item in plan.dependencies), "dependencies not verified")
 
     def ready():
         base.target.verify()
@@ -583,9 +612,11 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
         require_initialized_directories(base.compatdata, base.record)
         require(_prefix(base.compatdata) == base.prefix_version, "game prefix version changed")
         # Same check as planning: an unclear view before or after inspection is never verified.
-        states = _dependency_states(plan.profile, plan.recipes, base.compatdata, recipe, stop_check, base.target.exe,
-                                    _payload(base), plan.previous_slots)
+        # Last step, so the observation is the one closest to the write (design 4.3).
+        states, stopped = _observed_dependencies(plan.profile, plan.recipes, base.compatdata, recipe, stop_check,
+                                                 base.target.exe, _payload(base), plan.previous_slots)
         require(all(item["state"] == "present-verified" for item in states), "dependency postconditions changed")
+        require(stopped, "target process view not clear")
         return {"target": True, "dependencies": True, "payload": True, "stopped": True}
     return apply_binding(plan.binding, base.target.steam, base.settings, store, ready,
                          bundle_directory=base.customization.directory, under_lock=under_lock, on_binding_id=on_binding_id)
@@ -657,7 +688,12 @@ def interactive_game_binding(directory, renderer, config, *, input_stream=None, 
         if plan.blockers:
             for blocker in plan.blockers:
                 print("停止理由: " + selection._text(blocker), file=output)
-            print("全依存が検証済みになるまで割り当てません。変更せずに結果を保存します。", file=output)
+            if PROCESS_BLOCKER in plan.blockers:
+                # Not a promise: after the game stops, the dependencies may still be missing.
+                print("ゲームかWineが動いています。終了してから、もう一度実行してください（依存の確認からやり直します）。"
+                      "変更せずに結果を保存します。", file=output)
+            else:
+                print("全依存が検証済みになるまで割り当てません。変更せずに結果を保存します。", file=output)
             report["writes"] = []
         else:
             print("このゲームだけを準備用slotへ割り当てる場合は1、取消はq（ゲームは起動しません）: ", end="", file=output, flush=True)

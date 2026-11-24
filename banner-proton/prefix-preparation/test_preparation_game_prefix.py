@@ -136,6 +136,24 @@ class ConfigTests(unittest.TestCase):
                 game.validate_game_config(value)
 
 
+    def test_profile_without_dependencies_and_the_default_profile(self):
+        bare = {**PROFILE, 'profile_id': 'no-dependencies', 'dependencies': []}
+        profiles, _recipes = game.validate_game_config({'profiles': [PROFILE, bare], 'recipes': RECIPES})
+        self.assertEqual(profiles['no-dependencies']['dependencies'], [])
+        value = {'profiles': [PROFILE, bare], 'recipes': RECIPES}
+        # Two profiles without an EXE hash: none is automatic unless the bundle names one.
+        self.assertEqual(game.automatic_profiles(value), ['example-game', 'no-dependencies'])
+        value['default_profile'] = 'example-game'
+        game.validate_game_config(value)
+        self.assertEqual(game.automatic_profiles(value), ['example-game'])
+        pinned = {**PROFILE, 'profile_id': 'pinned', 'exe_sha256': EXE_HASH}
+        for wrong in ('unknown', 'pinned', None, 1):
+            with self.subTest(default=wrong), self.assertRaises(Invalid):
+                game.validate_game_config({'profiles': [PROFILE, bare, pinned], 'recipes': RECIPES, 'default_profile': wrong})
+        with self.assertRaises(Invalid):
+            game.validate_game_config({'profiles': [PROFILE], 'recipes': RECIPES, 'other': 1})
+
+
 @unittest.skipUnless(sys.platform == 'linux', 'requires Linux filesystem/native fixture; not device Wine')
 class GamePrefixTests(DEP['InstallTests']):
     def setUp(self):
@@ -600,6 +618,51 @@ class GamePrefixTests(DEP['InstallTests']):
                 self.assertRaisesRegex(Invalid, 'dependency postconditions changed'):
             game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest, stop, self.recipe, on_binding_id=lambda run_id: None)
         self.assertEqual(stop.calls, 2)
+        self.assertEqual(before, self.protected())
+
+    def test_profile_without_dependencies_binds_only_with_the_target_stopped(self):
+        self.config['game_preparation']['profiles'][0]['dependencies'] = []
+        record, digest = self.initialize()
+        plan = self.binding_plan(record, digest)
+        self.assertEqual((plan.dependencies, plan.blockers), ((), ()))
+        with patch.object(ProcessStopCheck, 'check', return_value={'clear_in_view': False}):
+            running = self.binding_plan(record, digest)
+        self.assertEqual(running.blockers, (game.PROCESS_BLOCKER,))
+        before = self.protected()
+
+        class AppearsDuringInspection:
+            calls = 0
+
+            def check(self):
+                self.calls += 1
+                return {'clear_in_view': self.calls == 1}
+        stop = AppearsDuringInspection()
+        lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
+        with PrivateStore(self.f.store_root) as store, store.locked(lock), \
+                self.assertRaisesRegex(Invalid, 'target process view not clear'):
+            game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest, stop, self.recipe,
+                                    on_binding_id=lambda run_id: None)
+        self.assertEqual(stop.calls, 2)
+        self.assertEqual(before, self.protected())
+        with PrivateStore(self.f.store_root) as store, store.locked(lock):
+            result = game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,
+                                             ProcessStopCheck(self.game_compat, self.f.proc), self.recipe,
+                                             on_binding_id=lambda run_id: None)
+        self.assertEqual(result['status'], 'binding-verified')
+
+    def test_binding_menu_names_a_running_game_without_promising_the_binding(self):
+        self.config['game_preparation']['profiles'][0]['dependencies'] = []
+        self.initialize()
+        before = self.protected()
+        with patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe), \
+                patch.object(ProcessStopCheck, 'check', return_value={'clear_in_view': False}):
+            status, report, output = self.detail_menu('11\n1\n')
+        self.assertEqual(status, 2, output)
+        self.assertFalse(report['binding_written'])
+        self.assertEqual(report['plan']['blockers'], [game.PROCESS_BLOCKER])
+        self.assertIn('ゲームかWineが動いています', output)
+        self.assertIn('依存の確認からやり直します', output)
+        self.assertNotIn('全依存が検証済みになるまで', output)
         self.assertEqual(before, self.protected())
 
     def test_dependency_menu_lists_game_prefixes_beside_probe_trials(self):

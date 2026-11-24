@@ -458,6 +458,35 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         self.assertEqual(len(after), 1, after)
         self.assertEqual(json.loads(next(iter(after)).read_text())['run_id'], report['run_id'])
 
+    def test_a_stop_before_binding_continues_on_the_next_run(self):
+        import types
+        ctx = types.SimpleNamespace(management=self.f.store_root)
+        entry = {'outcome': 'partial', 'ids': {'initialize': {'trial_id': 'gprefix-' + 'a' * 32}},
+                 'report': {'stage': 'binding', 'reason': 'binding-blocked:process:target-process-view-not-clear'}}
+        lines = '\n'.join(batch._partial_lines(ctx, {'kind': 'new'}, entry))
+        self.assertIn('「設定（3つのファイル）の書き換え」の前で止まりました', lines)
+        self.assertIn('再実行では続きから準備します', lines)
+        self.assertNotIn('再実行では飛ばされます', lines)
+        self.assertNotIn('バックアップは作られていません', lines)
+        # A move stopped at binding keeps the earlier text.
+        lines = '\n'.join(batch._partial_lines(ctx, {'kind': 'move'}, {**entry, 'ids': {}}))
+        self.assertIn('再実行では飛ばされます', lines)
+
+    def test_the_default_profile_chooses_among_profiles_without_a_hash(self):
+        profiles = self.config['game_preparation']['profiles']
+        profiles.append(dict(profiles[0], profile_id='no-dependencies', title='Without dependencies', dependencies=[]))
+        _, _, output = self.first_screen('q\n')
+        self.assertIn('自動で選べる作品プロファイルがありません', output)
+        self.config['game_preparation']['default_profile'] = 'no-dependencies'
+        _, _, output = self.first_screen('q\n')
+        self.assertIn('[ID 42] を新しく準備する（Without dependencies）', output)
+        self.assertNotIn('ソフト電池の認証', output)
+        self.assertNotIn('使用許諾', output)
+        status, report, output = self.first_screen('1\n')
+        self.assertEqual(status, 2, output)
+        self.assertEqual({item['kind']: item['outcome'] for item in report['items']}.get('new'), 'done', output)
+        self.assertNotIn('ソフト電池の認証', output)
+
     def test_a_matching_pinned_profile_is_mentioned(self):
         import hashlib
         exe = next(Path(game['exe']) for key, game in

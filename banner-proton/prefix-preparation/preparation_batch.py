@@ -160,7 +160,8 @@ def build(ctx):
     for item in records:
         by_key.setdefault(item["app_id"], []).append(item)
     profiles = config["game_preparation"]["profiles"]
-    automatic = [item["profile_id"] for item in profiles if item["exe_sha256"] is None]
+    from preparation_game_prefix import automatic_profiles
+    automatic = automatic_profiles(config["game_preparation"])
     moves, resumes, new = [], [], []
     roots, placed = (), {}
     if os.path.lexists(ctx.management):
@@ -319,7 +320,8 @@ def show(ctx, listing):
             profile = next(p for p in config["game_preparation"]["profiles"] if p["profile_id"] == item["plan"]["profile_id"])
             print(f"  {number}) " + _text(item["title"]) + f" [ID {item['app_id']}] を新しく準備する（" +
                   _text(profile["title"]) + "）", file=output)
-            print("     準備が終わったら起動して、ソフト電池の認証をしてください。", file=output)
+            if item["plan"].get("uses_softdenchi", True):
+                print("     準備が終わったら起動して、ソフト電池の認証をしてください。", file=output)
             for title in item.get("also_matches", []):
                 print("     このゲームは" + _text(title) + "のプロファイルとも一致します。" + _text(profile["title"]) +
                       "のプロファイルで準備します（ほかのプロファイルは個別の操作の1で選べます）。", file=output)
@@ -781,7 +783,7 @@ def show_outcomes(ctx, report, listing):
              if entry["outcome"] == "done" and item["kind"] in ("move", "align", "new", "resume")]
     if ready:
         print("起動してよいゲーム: " + _text("、".join(item["title"] for item in ready)), file=output)
-        if any(item["kind"] == "new" for item in ready):
+        if any(item["kind"] == "new" and item["plan"].get("uses_softdenchi", True) for item in ready):
             print("新しく準備したゲームは、起動したらソフト電池の認証をしてください。", file=output)
         if any(item["kind"] in ("move", "align") for item in ready):
             print("移したゲームは、切り替えたあとの最初の起動が長くなることがあります。", file=output)
@@ -807,13 +809,20 @@ def _partial_lines(ctx, item, entry):
         if stage in STAGE_TEXT and stage not in steps:
             steps.append(stage)
     stage = steps[-1] if steps else None
-    lines = [("「" + STAGE_TEXT[stage] + "」の途中かその後で止まりました。") if stage else "書き込みのあとで止まりました。"]
     binding_id = (ids.get("binding") or {}).get("binding_id")
+    # Stopped by the binding plan before any binding run began (a running game, a dependency not
+    # verified): the settings were not touched and the next run continues (design: no-SoftDenchi 4.4).
+    before_binding = (stage == "binding" and item["kind"] not in ("move", "align") and binding_id is None and
+                      str((entry.get("report") or {}).get("reason") or "").startswith("binding-blocked:"))
+    if before_binding:
+        lines = ["「" + STAGE_TEXT[stage] + "」の前で止まりました（設定は書き換えていません）。"]
+    else:
+        lines = [("「" + STAGE_TEXT[stage] + "」の途中かその後で止まりました。") if stage else "書き込みのあとで止まりました。"]
     if _backup_exists(ctx, binding_id):
         lines.append(f"書き換える前の設定のバックアップが私有記録（backups/{binding_id}）にあります。")
-    elif stage == "binding":
+    elif stage == "binding" and not before_binding:
         lines.append("設定のバックアップは作られていません（設定はまだ書き換えていない可能性があります）。")
-    if stage == "binding":
+    if stage == "binding" and not before_binding:
         lines.append("再実行では飛ばされます（設定の書き換えが途中で止まった状態は、もう一度実行しても書き換える前に止まるため）。")
     else:
         lines.append("再実行では続きから準備します（続きから行えない状態なら、一覧の「しないこと」に理由が出ます）。")
