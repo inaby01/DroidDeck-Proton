@@ -1612,6 +1612,15 @@ class TemplateOriginalVcTests(InstallTests):
         self.assertEqual(session.release_stopped, 'template-unreadable:PermissionError')
         self.assertEqual((result['status'], result['inherited_vc_record']['retryable']), ('stopped-before-installer', True))
 
+    def test_a_template_changing_while_read_can_be_retried(self):
+        # Codex code review M: DroidDeck appending to the slot template during the read is not a mismatch.
+        self.original.stop()
+        with patch.object(self.vc, 'read_template_original', side_effect=Invalid('input changed during read (size)')):
+            session, result, _ = self.silent_flow()
+        self.original.start()
+        self.assertEqual(session.release_stopped, 'template-unreadable:ChangedDuringRead')
+        self.assertTrue(result['inherited_vc_record']['retryable'])
+
     def test_a_prefix_released_before_is_never_judged_as_the_original(self):
         # Fable code review L3: after a release the values are Wine's because the tool wrote them back.
         self.original.stop()

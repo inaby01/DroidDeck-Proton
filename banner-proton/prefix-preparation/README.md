@@ -1419,8 +1419,9 @@ releases these inherited values from the prefix it prepared:
   the installer runs: the record says `template-original` with the value count. This holds
   without, or against, the initialization fingerprint, because nothing is written. Every other
   case takes the earlier path; a prefix that holds DroidDeck's values is still released.
-- A read error of the original part stops as `template-unreadable` (running again may clear it),
-  as a read error of the tail does; a hash or content mismatch keeps the earlier final stop.
+- A read error of the original part or the tail, or a template that changed while it was read
+  (DroidDeck appending at that moment), stops as `template-unreadable` (running again may clear
+  it); a stable hash or content mismatch keeps the earlier final stop.
 - A prefix whose history began or finished a release is never judged this way: its values are
   Wine's because the tool wrote them back.
 - DroidDeck also appends its block to each prefix without its marker, at session start and in

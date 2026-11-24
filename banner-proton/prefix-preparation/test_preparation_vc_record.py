@@ -223,6 +223,15 @@ class TemplateOriginalTests(unittest.TestCase):
         found = self.decide(self.text(), original=PermissionError(13, "denied"))
         self.assertEqual((found["reason"], found["retryable"]), ("template-unreadable:PermissionError", True))
         vc.validate_record(found)
+        # DroidDeck appending to the slot template while it is read is a change during the read (Codex code review M).
+        changing = Invalid("input changed during read (size,mtime_ns)")
+        for name, decision in (("original", self.decide(self.text(), original=changing)),
+                               ("template", self.decide(block(), original=None, tmpl=changing))):
+            with self.subTest(name):
+                self.assertEqual((decision["reason"], decision["retryable"]), ("template-unreadable:ChangedDuringRead", True))
+        # A stable mismatch keeps the final stop.
+        self.assertEqual(self.decide(self.text(), original=Invalid("template original changed"))["reason"],
+                         "template-mismatch")
         # With a broken shape the original does not matter: the earlier final stop stays.
         linked = self.text() + "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio] 1\n#link\n"
         self.assertEqual(self.decide(linked, original=OSError(5, "io"))["reason"], "template-mismatch")

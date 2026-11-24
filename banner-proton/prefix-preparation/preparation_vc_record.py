@@ -14,7 +14,7 @@ import os
 import re
 import stat
 
-from preparation_common import Invalid, regular_open, require, safe_path, unchanged
+from preparation_common import Invalid, input_change, regular_open, require, safe_path, unchanged
 from preparation_dependency_state import (
     MAX_KEY_HEADERS,
     MAX_LOGICAL_LINE,
@@ -511,6 +511,19 @@ def mfc140(compatdata):
     return result
 
 
+def read_error(error):
+    """The retryable reason suffix of an error that read nothing reliable, else None (Codex code review M).
+
+    A read error, or a file that changed while it was read (DroidDeck appending to the slot template
+    at that moment), may pass when run again; a stable mismatch may not.
+    """
+    if isinstance(error, OSError):
+        return type(error).__name__
+    if isinstance(error, Invalid) and input_change(error):
+        return "ChangedDuringRead"
+    return None
+
+
 def failed(reason, **extra):
     require(REASON.fullmatch(reason) is not None, "invalid reason")
     head = reason.split(":", 1)[0]
@@ -523,8 +536,8 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256, original=None):
 
     ``initial`` is the init record's fingerprint entry (None for records written before 0.32.0).
     ``template`` is read_template()'s result or an Invalid instance when it could not be read.
-    ``original`` is read_template_original()'s result, an OSError when it could not be read, or None
-    (not confirmed, or not to be used: the prefix was released before, Fable code review L3).
+    ``original`` is read_template_original()'s result, the error it raised, or None (not to be used:
+    the prefix was released before, Fable code review L3).
     """
     targets = {ident: entry for ident, entry in scan["keys"].items() if entry["values"]}
     count = sum(len(entry["values"]) for entry in targets.values())
@@ -544,12 +557,12 @@ def evaluate(scan, mfc, template, initial, current_tail_sha256, original=None):
         # Nothing inherited: the template had no DroidDeck tail when the prefix was made. Also without
         # (or against) the init fingerprint, as nothing is written (design 14, Fable L3).
         return {"state": "template-original", "values": count}
-    if isinstance(original, OSError) and shape_ok:
-        # The template-original check could not run: a read error may pass (Fable code review L1).
-        return failed("template-unreadable:" + type(original).__name__, values=count)
-    if isinstance(template, OSError):
+    if shape_ok and read_error(original):
+        # The template-original check could not run: a read error may pass (Fable code review L1, Codex M).
+        return failed("template-unreadable:" + read_error(original), values=count)
+    if read_error(template):
         # A read error may pass; a mismatch does not (Fable code review L6).
-        return failed("template-unreadable:" + type(template).__name__, values=count)
+        return failed("template-unreadable:" + read_error(template), values=count)
     if isinstance(template, Exception) or template is None:
         return failed("template-mismatch", values=count)
     if initial is None:

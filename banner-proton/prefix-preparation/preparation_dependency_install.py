@@ -1055,10 +1055,8 @@ class DependencyInstallSession:
                     # The template's own values, with or without DroidDeck's tail (design 14).
                     original = vc.read_template_original(_tool_directory(p) / REDIST_REGISTRY, shipped.get("size"),
                                                          shipped.get("sha256"))
-                except OSError as error:
-                    original = error  # A read error may pass (Fable code review L1).
-                except (Invalid, ValueError, UnicodeError, TypeError, KeyError):
-                    original = None
+                except (OSError, Invalid, ValueError, UnicodeError, TypeError, KeyError) as error:
+                    original = error  # A read error or a change while reading may pass (Fable L1, Codex M).
             decision = vc.evaluate(scan, mfc, template, p.record.get("vc_runtime_fingerprint"), tail_sha256,
                                    original=original)
             keys = decision.get("keys")
