@@ -598,6 +598,9 @@ def apply_game_binding(plan, store, refresh, confirmation, stop_check, recipe=No
     recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
     require(isinstance(plan, GameBindingPlan) and confirmation == plan.digest, "exact binding confirmation required")
     require(not plan.blockers, "game binding blocked")
+    # The stopped-target guarantee rests on this observation (design: no-SoftDenchi 4.3).
+    require(isinstance(stop_check, ProcessStopCheck) and stop_check.compatdata == plan.base.compatdata,
+            "matching process observation required")
     require(refresh().digest == plan.digest, "game binding plan changed")
     base = plan.base
     tool = safe_path(base.target.steam / "compatibilitytools.d" / base.customization.directory, base.target.steam)
@@ -672,7 +675,7 @@ def interactive_game_binding(directory, renderer, config, *, input_stream=None, 
             print(f"作品プロファイル: 初期化時の改訂{change['initialized_revision']}から改訂{change['current_revision']}へ"
                   "（同じEXEハッシュ。依存はこの場で検査します）", file=output)
             print("  現在のプロファイル: " + selection._text(plan.profile["title"] + " / " + plan.profile["edition"] + " / 依存 " +
-                                                     ", ".join(plan.profile["dependencies"])) +
+                                                     (", ".join(plan.profile["dependencies"]) or "なし")) +
                   "（初期化時の依存の一覧は記録になく、比べられません）", file=output)
         for item in summary["dependencies"]:
             print("  依存: " + selection._text(item["dependency_id"] + " / " + item["state"] +

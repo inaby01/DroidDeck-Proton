@@ -606,19 +606,30 @@ class GamePrefixTests(DEP['InstallTests']):
         self.assertEqual(plan.blockers, ())
         before = self.protected()
 
-        class AppearsDuringInspection:
-            calls = 0
+        calls = []
 
+        class AppearsDuringInspection(ProcessStopCheck):
             def check(self):
-                self.calls += 1
-                return {'clear_in_view': self.calls == 1}
-        stop = AppearsDuringInspection()
+                calls.append(1)
+                return {'clear_in_view': len(calls) == 1}
+        stop = AppearsDuringInspection(self.game_compat, self.f.proc)
         lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
         with PrivateStore(self.f.store_root) as store, store.locked(lock), \
                 self.assertRaisesRegex(Invalid, 'dependency postconditions changed'):
             game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest, stop, self.recipe, on_binding_id=lambda run_id: None)
-        self.assertEqual(stop.calls, 2)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(before, self.protected())
+
+    def test_binding_observes_the_planned_prefix(self):
+        self.config['game_preparation']['profiles'][0]['dependencies'] = []
+        record, digest = self.initialize()
+        plan = self.binding_plan(record, digest)
+        lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
+        for stop in (ProcessStopCheck(self.game_compat.parent / '43', self.f.proc), object()):
+            with self.subTest(stop=stop), PrivateStore(self.f.store_root) as store, store.locked(lock), \
+                    self.assertRaisesRegex(Invalid, 'matching process observation required'):
+                game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest, stop,
+                                        self.recipe, on_binding_id=lambda run_id: None)
 
     def test_profile_without_dependencies_binds_only_with_the_target_stopped(self):
         self.config['game_preparation']['profiles'][0]['dependencies'] = []
@@ -630,19 +641,19 @@ class GamePrefixTests(DEP['InstallTests']):
         self.assertEqual(running.blockers, (game.PROCESS_BLOCKER,))
         before = self.protected()
 
-        class AppearsDuringInspection:
-            calls = 0
+        calls = []
 
+        class AppearsDuringInspection(ProcessStopCheck):
             def check(self):
-                self.calls += 1
-                return {'clear_in_view': self.calls == 1}
-        stop = AppearsDuringInspection()
+                calls.append(1)
+                return {'clear_in_view': len(calls) == 1}
+        stop = AppearsDuringInspection(self.game_compat, self.f.proc)
         lock = __import__('hashlib').sha256(str(self.game_compat).encode()).hexdigest()
         with PrivateStore(self.f.store_root) as store, store.locked(lock), \
                 self.assertRaisesRegex(Invalid, 'target process view not clear'):
             game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest, stop, self.recipe,
                                     on_binding_id=lambda run_id: None)
-        self.assertEqual(stop.calls, 2)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(before, self.protected())
         with PrivateStore(self.f.store_root) as store, store.locked(lock):
             result = game.apply_game_binding(plan, store, lambda: self.binding_plan(record, digest), plan.digest,

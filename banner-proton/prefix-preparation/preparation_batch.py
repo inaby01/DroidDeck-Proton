@@ -1090,7 +1090,7 @@ def _finish(ctx, protected, report):
 def individual(directory, renderer, config, ctx):
     """Individual operations: 0.30.0's entries 1-4 with the same numbers, then 5 and 6 (design 3.7)."""
     output, stream = ctx.output, ctx.stream
-    print("1. 新しいゲームを準備（初期化→DLL→ソフト電池→割り当て。途中からの再開も可）", file=output)
+    print("1. 新しいゲームを準備（初期化→（プロファイルにあれば）DLL・ソフト電池→割り当て。途中からの再開も可）", file=output)
     print("2. ゲームの状態を確認（何も変更しません）", file=output)
     print("3. 新しいProtonを準備用slotに置く（起動しない）", file=output)
     print("4. 詳細メニュー（検証用・手動の操作）", file=output)

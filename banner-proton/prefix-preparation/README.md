@@ -1369,11 +1369,14 @@ releases these inherited values from the prefix it prepared:
 
 - A profile may declare no dependencies (`"dependencies": []`). Preparing a game with it only
   initializes the prefix and binds it to the preparation slot: nothing is installed, no DLL is
-  placed and the inherited VC++ runtime record is left as it is. The confirmation, the result
-  and the status check show "依存 なし"; the SoftDenchi licence, authentication and
-  installation lines appear only for a profile that uses SoftDenchi. Such a profile has no
-  pinned EXE hash, so it cannot get a later revision for an initialized prefix; give a changed
-  profile a new `profile_id` instead.
+  placed and the inherited VC++ runtime record is left as it is. The one-pass confirmation
+  shows "依存 なし", the status check (also for a move) "依存: なし", and detail menu 11's
+  profile line "依存 なし"; the result JSON has an empty `dependencies` list. The SoftDenchi
+  licence, authentication and installation lines appear only for a profile that uses
+  SoftDenchi. A profile without a pinned EXE hash cannot get a later revision for an
+  initialized prefix (as for any profile without one); give a changed profile a new
+  `profile_id` instead. Binding also requires the process observation it is given to be of
+  the planned prefix.
 - Binding now requires on its own that the target game and Wine were seen stopped before and
   after the dependency checks, the last step of the readiness callback right before each file
   is replaced. Before, this was implied only by the dependency states, so a profile without
