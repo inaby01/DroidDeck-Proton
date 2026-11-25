@@ -180,6 +180,12 @@ def one_pass_ref(config):
     return ref(config)
 
 
+def redo_ref(config):
+    """recovery.sh 7 (1.0.0); the earlier screen had no way to prepare the same registration again."""
+    from preparation_selection import operational_layout
+    return "recovery.sh の7" if operational_layout(config) else "名前を変えた新しい登録"
+
+
 def restart_then_one_pass(config):
     return ("DroidDeckを完全に終了して起動し直してから、もう一度 " + one_pass_ref(config) +
             " で同じゲームを選んでください（続きから進めます）。")
@@ -187,7 +193,7 @@ def restart_then_one_pass(config):
 
 def failed_then_menu9(config):
     return ("導入の記録が失敗として残りました。" + one_pass_ref(config) + "をもう一度実行しても、この記録で止まります。" +
-            menu_ref(config, 9) + "で導入状態を確認し、結果を戻してください。")
+            menu_ref(config, 9) + "で導入状態を確認し、結果を戻してください。やり直すときは " + redo_ref(config) + " を使います。")
 
 
 def release_next_step(record, config):
@@ -196,7 +202,7 @@ def release_next_step(record, config):
     item = record.get("inherited_vc_record") or {}
     head = "ソフト電池は導入していません（受け継いだVC++の記録を外す段で止まりました：" + text_reason(item.get("reason")) + "）。"
     if item.get("retryable") is False:
-        return head + "もう一度実行しても進みません。結果JSONを戻してください。"
+        return head + "もう一度実行しても進みません。結果JSONを戻してください。やり直すときは " + redo_ref(config) + " を使います。"
     if (item.get("reason") or "").startswith(("wait-timeout", "persistence-unconfirmed")):
         return head + "ゲームとWineをすべて終了し、DroidDeckを起動し直してから、もう一度 " + one_pass_ref(config) + " を実行してください。"
     return head + "もう一度 " + one_pass_ref(config) + " を実行すると、外す段からやり直します。"
@@ -491,7 +497,8 @@ def evaluate_resume(*, record, record_digest, profile, recipes, softdenchi, sour
             if vc_stop is not None:
                 # Running again cannot clear this stop (design: inherited VC record, Fable L4).
                 return stopped("softdenchi-state", "inherited-vc-record-" + vc_stop.split(":", 1)[0],
-                               "ソフト電池の導入前に止まりました：" + text_reason(vc_stop) + "。もう一度実行しても進みません。")
+                               "ソフト電池の導入前に止まりました：" + text_reason(vc_stop) + "。もう一度実行しても進みません。"
+                               "やり直すときは " + redo_ref(common["config"]) + " を使います。")
             clear = stop_check.check()["clear_in_view"]
             state = inspect_dependency_state(base.compatdata, softdenchi)["state"] if clear else "uninspected"
             if clear and not stop_check.check()["clear_in_view"]:
@@ -989,7 +996,8 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
                 vc_stop = vc_latest(base.store_root, record["trial_id"])[1]
                 if vc_stop is not None:
                     raise Stopped(stage, "inherited-vc-record-" + vc_stop.split(":", 1)[0],
-                                  "ソフト電池の導入前に止まりました：" + text_reason(vc_stop) + "。もう一度実行しても進みません。")
+                                  "ソフト電池の導入前に止まりました：" + text_reason(vc_stop) + "。もう一度実行しても進みません。"
+                               "やり直すときは " + redo_ref(config) + " を使います。")
                 state = inspect_managed_dependency(base, store, stop, softdenchi)
                 action, reason, separately = softdenchi_action(latest, invalid, state["state"])
                 step = {"step": "softdenchi-state", "latest_installation": latest and {k: latest.get(k) for k in

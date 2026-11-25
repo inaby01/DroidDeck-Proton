@@ -64,6 +64,7 @@ MANIFEST_SKIP_TEXT = {
 OUTCOME_TEXT = {
     "confirmed-target-items-changed": "確認したときから、このゲームの割り当ての設定が変わりました",
     "manifest-save-failed": "照合情報を保存できませんでした。このProtonは置けていますが、戻す先には使えません",
+    "placement-record-not-finished": "置く途中で止まった記録を仕上げられませんでした。status.sh で確かめてください",
     "manifest-mismatch": "同じ名前で別の中身の照合情報があるため、書き換えていません",
     "manifest-broken": "保存済みの照合情報を読めないため、書き換えていません",
     "manifest-rules-differ": "保存済みの照合情報は照合規則の版が違うため、書き換えていません",
@@ -120,6 +121,7 @@ def build(ctx):
         target_items,
     )
     from preparation_slot_manifest import build as build_manifest
+    from preparation_slot_manifest import placed_slots
     from preparation_slot_manifest import state as manifest_state
     from preparation_status import _slot
     from preparation_store import PrivateStore
@@ -155,6 +157,29 @@ def build(ctx):
             result["manifest"] = "unknown"
     else:
         result["manifest"] = "missing"
+    if os.path.lexists(ctx.management):
+        try:
+            with PrivateStore(ctx.management) as store:
+                unfinished = unfinished_placements(store, bundle)
+        except (OSError, Invalid, TypeError, KeyError, ValueError):
+            unfinished = []
+        if unfinished:
+            # Before the slot data and any game: this slot then counts as placed by this tool (1.0.0, 7.1).
+            result["items"].append({"kind": "finish-placement"})
+    else:
+        unfinished = []
+    if not unfinished:
+        # A matching slot that no record shows this tool placed is not finished either; it is listed (7.1).
+        try:
+            if os.path.lexists(ctx.management):
+                with PrivateStore(ctx.management) as store:
+                    placed_here = bundle in placed_slots(store)[0]
+            else:
+                placed_here = False
+        except (OSError, Invalid, TypeError, KeyError, ValueError):
+            placed_here = True  # Unknown: the status check names unreadable records.
+        if not placed_here:
+            result["placement"] = "not-placed-by-this-tool"
     if result["manifest"] == "missing":
         result["items"].append({"kind": "save-manifest"})
     records, unreadable = _game_records(ctx.management) if os.path.lexists(ctx.management) else ([], 0)
@@ -314,6 +339,9 @@ def show(ctx, listing):
             print("     置いたあと、移すゲーム・新しく準備するゲームを出して、もう一度確認します。", file=output)
         elif item["kind"] == "save-manifest":
             print(f"  {number}) このProtonの照合情報を保存する（あとでこのProtonへ戻せるようにするため）", file=output)
+        elif item["kind"] == "finish-placement":
+            print(f"  {number}) このProtonを置いた記録を仕上げる（置く途中で止まった記録があります。"
+                  "仕上げないと、あとで新しいProtonへ移せません）", file=output)
         elif item["kind"] in ("move", "align"):
             verb = "移す" if item["kind"] == "move" else "DroidDeckの画面で選んだ内容にそろえる"
             print(f"  {number}) " + _text(item["title"]) + f" [ID {item['app_id']}] を " + _text(listing["bundle"]) +
@@ -351,9 +379,14 @@ def show(ctx, listing):
         print("  " + RELEASE_TEXT, file=output)
     skipped, groups = listing["skipped"], listing["groups"]
     manifest = MANIFEST_SKIP_TEXT.get(listing.get("manifest"))
-    if skipped or groups or manifest:
+    placement = listing.get("placement") == "not-placed-by-this-tool"
+    if skipped or groups or manifest or placement:
         print(file=output)
         print("しないこと", file=output)
+        if placement:
+            print("  - このProtonを置いた記録の仕上げ: ツールが置いた記録がありません（ツール以外で置かれたものとして扱い、"
+                  "記録は作りません）。このProtonに割り当てたゲームは、あとで新しいProtonへツールでは移しません"
+                  "（DroidDeckの画面と同期のコマンドで移せます）。", file=output)
         if manifest:
             print("  - このProtonの照合情報の保存: " + manifest + "（書き換えません）。このProtonへは、あとでツールでは戻せません"
                   "（DroidDeckの画面と同期のコマンドで戻せます）。", file=output)
@@ -364,8 +397,9 @@ def show(ctx, listing):
         if others:
             print(f"  - ツールの記録がなく、prefixがあるゲーム（{len(others)}本）: " +
                   _text("、".join(item["title"] for item in others)), file=output)
-            print("    ツールは既にあるprefixに書きません。準備したいゲームがあれば、名前を変えて登録し直し、"
-                  "起動せずにもう一度 prepare.sh を実行してください。", file=output)
+            print("    ツールは既にあるprefixに書きません。準備したいゲームがあれば、recovery.sh の7でprefixを消して、"
+                  "もう一度 prepare.sh を実行してください（登録はそのままで構いません。"
+                  "ソフト電池を使わず標準のProtonで遊ぶゲームは、このままで構いません）。", file=output)
     if not items:
         print("することはありません。", file=output)
     print("DroidDeckに登録したゲームは、起動する前に prepare.sh を実行してください。", file=output)
@@ -564,6 +598,83 @@ def _write_private(ctx, protected, name, report):
     return folder / name
 
 
+def unfinished_placements(store, directory):
+    """Installation records of ``directory`` left running or needing inspection (read-only, any tool version)."""
+    from preparation_tool_writer import validate_installation_record
+    found = []
+    try:
+        with store.directory(("installations",)) as fd:
+            names = sorted(store._names(fd))
+    except FileNotFoundError:
+        return found
+    for name in names:
+        if name.startswith("tmp-"):
+            continue
+        try:
+            record, digest = store.read_record("installations", name)
+            validate_installation_record(record, any_version=True)
+        except (OSError, Invalid, TypeError, KeyError, ValueError):
+            continue
+        if record["directory"] == directory and record["status"] in ("running", "needs-inspection"):
+            found.append((name, record, digest))
+    return found
+
+
+def _finish_placement(ctx, listing):
+    """Finish the records of an interrupted placement of the bundle slot (1.0.0, 7.1); failures are reported."""
+    try:
+        return _finish_placement_locked(ctx, listing), None
+    except (OSError, Invalid, TypeError, KeyError, ValueError, UnicodeError) as error:
+        return "failed", {"error_class": type(error).__name__, "reason": str(error) if isinstance(error, Invalid) else None}
+
+
+def _finish_placement_locked(ctx, listing):
+    """A record that reached publication becomes installed-tree-verified when the placed tree verifies now
+    and its staging wrapper is gone or empty (the checks the placement would have made last); an earlier
+    running record becomes failed (its staging folder is kept, as on any failure)."""
+    import stat as stat_module
+
+    from preparation_payload import verify_fex_runtime_tree
+    from preparation_store import PrivateStore
+    from preparation_tool_writer import validate_installation_record
+    bundle = listing["bundle"]
+    tools = safe_path(ctx.steam / "compatibilitytools.d", ctx.steam)
+    tool = safe_path(tools / bundle, ctx.steam)
+    with PrivateStore(ctx.management, create=True) as store, \
+            store.locked(hashlib.sha256(str(tool).encode()).hexdigest()):
+        verify_fex_runtime_tree(tool, listing["inventory"], listing["customization"].overlays)
+        left = 0
+        for name, record, digest in unfinished_placements(store, bundle):
+            try:
+                staging = tools / record["staging_name"]
+                holds_tree = False
+                if os.path.lexists(staging):
+                    info = os.lstat(staging)
+                    require(stat_module.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(), "staging folder unexpected")
+                    with os.scandir(staging) as entries:
+                        holds_tree = any(True for _ in entries)
+                if record["phase"] == "publish-intent" and holds_tree:
+                    # The tree never left its staging folder: this record did not publish (the slot in place is
+                    # another placement's). Its staging folder is kept, as on any failure.
+                    record.update(status="failed", phase="tree-verified", published=False)
+                elif record["phase"] in ("publish-intent", "published") and not holds_tree:
+                    if os.path.lexists(staging):
+                        os.rmdir(staging)  # Only the empty wrapper the placement would have removed last.
+                    record.update(status="installed-tree-verified", phase="post-verified", published=True)
+                elif record["phase"] in ("publish-intent", "published"):
+                    left += 1  # Published, yet its staging folder is not empty: left for inspection.
+                    continue
+                else:
+                    record.update(status="failed")
+                validate_installation_record(record, any_version=True)
+                store.write_record("installations", name, record, digest)
+            except (OSError, Invalid, TypeError, KeyError, ValueError):
+                left += 1  # The other records are still finished.
+    if left:
+        return "partial"
+    return "finished"
+
+
 def _save_manifest(ctx, listing):
     """Save the bundle slot's verification data; a failure is reported and the run goes on (design 4.7)."""
     try:
@@ -720,7 +831,12 @@ def run(ctx, listing, protected, report=None):
             break
         app = item.get("app_id") or "-"
         journal.step(app, item["kind"], "running")
-        if item["kind"] == "save-manifest":
+        if item["kind"] == "finish-placement":
+            finished, error = _finish_placement(ctx, listing)
+            entry.update(outcome="done" if finished == "finished" else "skipped", state=finished)
+            if finished != "finished":
+                entry.update(reason="placement-record-not-finished", **({"error": error} if error else {}))
+        elif item["kind"] == "save-manifest":
             saved, error = _save_manifest(ctx, listing)
             entry.update(outcome="done" if saved in ("created", "same") else "skipped", state=saved)
             if saved not in ("created", "same"):
@@ -778,7 +894,8 @@ def show_outcomes(ctx, report, listing):
     print(file=output)
     print("結果", file=output)
     for item, entry in zip(listing["items"], report["items"], strict=True):
-        label = {"place": "Protonを置く", "save-manifest": "照合情報の保存"}.get(item["kind"]) or \
+        label = {"place": "Protonを置く", "save-manifest": "照合情報の保存",
+                 "finish-placement": "置いた記録の仕上げ"}.get(item["kind"]) or \
             (_text(item["title"]) + f" [ID {item['app_id']}]")
         reason = entry.get("reason") or (entry.get("error") or {}).get("reason") or \
             (entry.get("error") or {}).get("error_class") or ",".join(entry.get("blockers", []))
@@ -1143,6 +1260,7 @@ def recovery(directory, renderer, config, **options):
     print("4. 新しいゲームのprefixを初期化だけする（5の前に。ゲームは起動しません）", file=output)
     print("5. ソフト電池を画面ありで入れる（使用許諾を画面で読む・画面なしの導入で入らなかったとき）", file=output)
     print("6. ソフト電池の状態を見る（何も変更しません）", file=output)
+    print("7. ゲームの準備をやり直す（同じ登録のまま、prefixを消して新しく準備できるようにする）", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
     if answer == "1":
@@ -1161,5 +1279,8 @@ def recovery(directory, renderer, config, **options):
         import preparation_dependency_install as dependency
         action = dependency.interactive_dependency_install if answer == "5" else dependency.interactive_dependency_reinspect
         return action(directory, renderer, config, **options)
+    if answer == "7":
+        from preparation_redo import interactive_redo
+        return interactive_redo(directory, renderer, config, **options)
     print("取り消しました。", file=output)
     return 0, None

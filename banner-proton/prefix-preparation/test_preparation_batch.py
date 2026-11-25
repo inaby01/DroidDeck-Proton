@@ -114,7 +114,8 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         (self.game_compat / 'pfx').mkdir(parents=True)
         _, _, output = self.first_screen('q\n')
         self.assertIn('ツールの記録がなく、prefixがあるゲーム（1本）', output)
-        self.assertEqual(output.count('名前を変えて登録し直し'), 1)
+        self.assertEqual(output.count('recovery.sh の7でprefixを消して'), 1)
+        self.assertNotIn('名前を変えて', output)
 
     def test_payload_missing_offers_no_run(self):
         archive = next(self.f.fixture.source.root.glob('DroidDeck-Proton-*.tar.gz'))

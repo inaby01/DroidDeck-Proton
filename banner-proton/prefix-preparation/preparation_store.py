@@ -276,6 +276,26 @@ class PrivateStore:
                     pass
         return hashlib.sha256(raw).hexdigest()
 
+    def retire_record(self, directory, name, destination):
+        """Move one record to retired/<destination>/<directory>/ (1.0.0 redo). Never deletes or replaces;
+        readers of ``directory`` no longer see it."""
+        self._guard()
+        require(COMPONENT.fullmatch(name) and not name.startswith("tmp-"), "invalid record filename")
+        with self.directory((directory,)) as source, \
+                self.directory(("retired", destination, directory), create=True) as target:
+            raw = self._read(source, name)
+            try:
+                os.stat(name, dir_fd=target, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                require(False, "retired record already exists")
+            self._guard()
+            os.rename(name, name, src_dir_fd=source, dst_dir_fd=target)
+            os.fsync(target)
+            os.fsync(source)
+        return hashlib.sha256(raw).hexdigest()
+
     def write_new_large(self, directory, name, value, limit):
         """Create a large private JSON record once; an existing name is never replaced.
 

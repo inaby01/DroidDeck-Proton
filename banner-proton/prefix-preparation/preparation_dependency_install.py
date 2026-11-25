@@ -1573,7 +1573,9 @@ def interactive_dependency_install(directory, renderer, config, *, input_stream=
                                 head = ("ソフト電池は導入していません（受け継いだVC++の記録を外す段で止まりました：" +
                                         text_reason(session.release_stopped) + "）。")
                                 if item.get("retryable") is False:  # Per reason, as the one pass (Codex final L2).
-                                    head += "もう一度実行しても進みません。結果JSONを戻してください。"
+                                    from preparation_one_pass import redo_ref
+                                    head += ("もう一度実行しても進みません。結果JSONを戻してください。やり直すときは " +
+                                             redo_ref(config) + " を使います。")
                                 elif session.release_stopped.startswith(("wait-timeout", "persistence-unconfirmed")):
                                     head += ("ゲームとWineをすべて終了し、DroidDeckを起動し直してから、" +
                                              menu_ref(config, 8) + "をもう一度実行してください。")

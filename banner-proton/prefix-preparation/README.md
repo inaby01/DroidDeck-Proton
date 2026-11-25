@@ -10,7 +10,7 @@ runs on its own (`prepare_game.py --emit-selection-script --script-entry <entry>
 | `prepare.sh` | The list of 0.31.0's first screen, then one yes/no confirmation runs everything listed (placement, moves, new and resumed preparation). | yes |
 | `status.sh` | The game status check. | result JSON only |
 | `diagnose.sh` | Measures DroidDeck's runtime (OS, the pinned scripts, hook libraries, label, umask, environment presence) and lists each item next to the bundle's `runtime_reference`, with the runtime check's own verdict. For finding what a DroidDeck update changed. | result JSON only |
-| `recovery.sh` | Rare operations: prepare one game (non-ASCII paths, profile choice, resume), move one game, revert to the previous slot, initialize a new prefix only, install SoftDenchi with its screen, read the SoftDenchi state. | per operation |
+| `recovery.sh` | Rare operations: prepare one game (non-ASCII paths, profile choice, resume), move one game, revert to the previous slot, initialize a new prefix only, install SoftDenchi with its screen, read the SoftDenchi state, prepare a game again (7). | per operation |
 
 - Guidance names these scripts (`menu_ref`/`one_pass_ref` map the earlier menus 8, 9, 10 and 12
   to `recovery.sh` 5, 6, 4 and 1).
@@ -22,6 +22,27 @@ runs on its own (`prepare_game.py --emit-selection-script --script-entry <entry>
   `DroidDeck-Proton-<upstream>-softdenchi-r<N>-aarch64.tar.gz`.
 - The installer log of a preparation is still collected privately (a preparation cannot be
   repeated after a stop) and copied to the shared folder only after a stop and a confirmation.
+- `recovery.sh` 7 prepares a game again under the same registration. Offered for a registration
+  with a prefix (its ID, or for a large ID the signed form), tool records or a private work folder
+  of its ID, when there is no binding record of that ID (it never reached "ready"). Not offered when
+  a record that may belong to it cannot be read, when DroidDeck's settings cannot be read or choose
+  a SoftDenchi Proton for it, when a prefix without tool records holds SoftDenchi (it may have been
+  prepared by hand), when both prefix forms exist, or when the prefix or the work folder is not our
+  own directory. A running game or Wine in the prefix stops it, rechecked under the lock. After one
+  confirmation the tool's records of that ID move to `retired/<redo id>/` in the private store
+  (never deleted), the private work folder is renamed to `retired-<id>`, and the prefix is renamed
+  out of DroidDeck's view and removed without following links; a leftover is removed again the next
+  time 7 is opened. The next `prepare.sh` lists the game as new. Saves in the game folder are not
+  touched; the SoftDenchi authentication inside the prefix is gone. Guidance that used to say
+  "register again under another name" points here.
+- An interrupted placement of the bundle slot (an installation record left `running` or
+  `needs-inspection`) is listed by `prepare.sh` as "finish the placement record". Under the slot
+  lock the tree is verified again, then each record is finished on its own: a `publish-intent` or
+  `published` record becomes `installed-tree-verified` when its staging wrapper is gone or empty; a
+  `publish-intent` record whose tree is still in staging, and an earlier running record, become
+  `failed` (staging kept). The slot then counts as placed, so a later Proton update can move games
+  from it. A matching slot with no record that this tool placed it is not finished; the list names
+  it under "しないこと".
 
 ## Earlier versions
 

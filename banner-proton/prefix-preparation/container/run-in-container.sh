@@ -62,6 +62,7 @@ for test in \
     /input/prefix-preparation/test_preparation_proton_update.py \
     /input/prefix-preparation/test_preparation_batch.py \
     /input/prefix-preparation/test_preparation_diagnose.py \
+    /input/prefix-preparation/test_preparation_redo.py \
     /input/prefix-preparation/test_preparation_folder_reads.py \
     /input/prefix-preparation/test_preparation_probe_recovery.py \
     /input/prefix-preparation/test_preparation_probe.py \
