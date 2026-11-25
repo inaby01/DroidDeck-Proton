@@ -767,6 +767,9 @@ def validate_record(value):
         require(set(value) <= by_state[value["state"]], "fields do not fit the state")
     if value["state"] == "released":
         require(value.get("wineserver_gone_before_read") is True, "released without the re-read after Wine")
+    if value["state"] == "template-original":
+        # Only written with the values it found (Codex code review L).
+        require(type(value.get("values")) is int and 1 <= value["values"] <= 36, "template-original without its count")
     require(value.get("values") is None or (type(value["values"]) is int and 0 <= value["values"] <= 36), "invalid count")
     require(value.get("version") is None or (type(value["version"]) is str and len(value["version"]) <= 40), "invalid version")
     if value.get("keys") is not None:

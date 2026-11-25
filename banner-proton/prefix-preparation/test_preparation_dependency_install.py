@@ -1632,6 +1632,38 @@ class TemplateOriginalVcTests(InstallTests):
         self.assertEqual(result['status'], 'stopped-before-installer')
 
 
+class ReleasedHistoryVcTests(InstallTests):
+    """Fable code review L3 with a real history: released once, interrupted, then the kept data changed."""
+    VC_BLOCK = '\n' + ''.join(VC['runtimes'](ident, extra=('"Other"="x"',) if ident == 'native-x64' else ())
+                              for ident in VC['ORIGINAL_KEYS'])
+
+    def setUp(self):
+        super().setUp()
+        import preparation_vc_record as vc
+        self.vc = vc
+        archive = {ident: dict(VC['WINE_ORIGINAL']) for ident in VC['ORIGINAL_KEYS']}
+        self.template = patch.object(vc, 'read_template', return_value=VC['template'](tail_sha256=None, archive=archive))
+        self.template.start()
+        self.addCleanup(self.template.stop)
+
+    def silent_flow(self):
+        return InheritedVcTests.silent_flow(self)
+
+    def test_a_prefix_released_before_is_never_judged_as_the_original(self):
+        with patch.object(dep.DependencyInstallSession, '_stage', side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            self.silent_flow()
+        registry = self.install_plan().recheck.compatdata / 'pfx/system.reg'
+        text = registry.read_text()
+        self.assertEqual(text.count('"Other"="x"\n'), 1)
+        registry.write_text(text.replace('"Other"="x"\n', ''))  # Now exactly the template's own values.
+        found = self.vc.scan_file(registry)
+        self.assertTrue(self.vc.template_original(found, VC['original_of']()))  # Without the history it would pass.
+        with patch.object(self.vc, 'read_template_original', side_effect=AssertionError('not read')):
+            session, result, _ = self.silent_flow()
+        self.assertEqual((session.release_stopped, result['status']), ('values-differ', 'stopped-before-installer'))
+
+
 class InheritedVcTests(InstallTests):
     """Design: inherited VC record. The fake initialization writes DroidDeck's appended VC++ 14.51 keys."""
     VC_BLOCK = '\n' + VC['block']()
@@ -1941,8 +1973,9 @@ class InheritedVcTests(InstallTests):
 
 
 for _name in dir(InstallTests):
-    if _name.startswith('test_') and _name not in vars(InheritedVcTests):
-        setattr(InheritedVcTests, _name, None)
+    for _class in (InheritedVcTests, ReleasedHistoryVcTests):  # Their block makes every flow release first.
+        if _name.startswith('test_') and _name not in vars(_class):
+            setattr(_class, _name, None)
 
 
 if __name__ == '__main__':

@@ -175,6 +175,23 @@ class TemplateOriginalTests(unittest.TestCase):
             vc.read_template_original(path, size, "b" * 64)
         with self.assertRaisesRegex(Invalid, "shorter"):
             vc.read_template_original(path, size + 1, digest)
+        # Other values and sub-keys of the archive are read and compared as kept data (Fable re-review).
+        key = f"[{esc(vc.KEYS['native-x64'])}] 1795176401\n"
+        kept = self.text().replace(key, key + '"Other"=hex:01,02\n@="d"\n', 1) + \
+            "[" + esc(vc.KEYS["native-x64"]) + "\\\\Child] 1\n\"A\"=dword:00000001\n"
+        path, size, digest = self.write(kept, "\n" + block())
+        found = vc.read_template_original(path, size, digest)
+        self.assertEqual(self.decide(kept, original=found), {"state": "template-original", "values": 24})
+        self.assertEqual(self.decide(self.text(), original=found)["reason"], "template-mismatch")
+        # A link on an ancestor in the archive is refused for both readers (Fable re-review N2).
+        linked = self.text() + "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio] 1\n#link\n"
+        path, size, digest = self.write(linked, "\n" + block())
+        with self.assertRaisesRegex(Invalid, "template original key shape"):
+            vc.read_template_original(path, size, digest)
+        tail_digest = hashlib.sha256(("\n" + block()).encode()).hexdigest()
+        with self.assertRaisesRegex(Invalid, "template original key shape"):
+            vc.read_template(path, size, tail_digest)
+        path, size, digest = self.write(self.text())
         for size_value, digest_value in ((None, digest), (size, None), (0, digest), (size, "x")):
             with self.subTest(size=size_value, digest=digest_value), self.assertRaisesRegex(Invalid, "contract missing"):
                 vc.read_template_original(path, size_value, digest_value)
@@ -235,7 +252,8 @@ class TemplateOriginalTests(unittest.TestCase):
         # With a broken shape the original does not matter: the earlier final stop stays.
         linked = self.text() + "[Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio] 1\n#link\n"
         self.assertEqual(self.decide(linked, original=OSError(5, "io"))["reason"], "template-mismatch")
-        # A readable template with DroidDeck's tail still decides on its own path.
+        # Also with a readable template with DroidDeck's tail: the original decides a prefix made before the
+        # tail, so its read error stops (retryable) instead of the release (Fable re-review N1, kept on purpose).
         self.assertEqual(self.decide(block(), original=OSError(5, "io"), tmpl=template(), tail="a" * 64)["reason"],
                          "template-unreadable:OSError")
 
@@ -273,6 +291,9 @@ class TemplateOriginalTests(unittest.TestCase):
         for extra in ({"keys": {}}, {"version": "x"}, {"reason": "template-mismatch"}, {"exit_code": 0}):
             with self.subTest(extra=extra), self.assertRaises(Invalid):
                 vc.validate_record({"state": "template-original", "values": 24, **extra})
+        for count in ({}, {"values": None}, {"values": 0}, {"values": 37}, {"values": True}):  # Codex code review L.
+            with self.subTest(count=count), self.assertRaises(Invalid):
+                vc.validate_record({"state": "template-original", **count})
 
 
 class DecisionTests(unittest.TestCase):
