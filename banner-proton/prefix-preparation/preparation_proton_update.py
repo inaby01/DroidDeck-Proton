@@ -628,7 +628,7 @@ def interactive_move(directory, renderer, config, *, input_stream=None, output_s
 REVERT_NOTE = "新しいProtonから前のProtonへ戻す向きは、実機ではまだ確かめていません。"
 REFUSED_TEXT = {
     "slot-manifest-missing": "照合情報がありません（このProtonを同梱した0.31.0以降のバンドルを一度実行すると作られます）",
-    "slot-manifest-broken": "照合情報を読めません（書き換えません。個別の操作の2で確かめてください）",
+    "slot-manifest-broken": "照合情報を読めません（書き換えません。status.sh で確かめてください）",
     "slot-manifest-mismatch": "同じ名前で別の中身の照合情報があります",
     "slot-manifest-rules-differ": "照合情報の照合規則の版が、このツールと違います",
     "slot-differs-from-saved-data": "今のslotの中身が、保存した照合情報と違います",
@@ -995,7 +995,7 @@ def interactive_revert(directory, renderer, config, *, input_stream=None, output
                                       {"scope": "private-binding-backup-record-and-note"},
                                       {"scope": "revert-target-caches-moved-to-private-store", "count": len(caches)}])
                 print("戻しました（" + selection._text(result["status"]) + "）。DroidDeckから起動してください。", file=output)
-                print("もう一度新しいProtonへ移すときは、個別の操作の5を使ってください。", file=output)
+                print("もう一度新しいProtonへ移すときは、recovery.sh の2を使ってください。", file=output)
     except (OSError, ValueError, TypeError, KeyError) as error:
         report = {"mode": "revert-result", "tool_version": VERSION, "stage": stage, **describe_error(error, stage),
                   "preparation_complete": False,

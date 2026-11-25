@@ -138,7 +138,7 @@ class ActionTableTests(unittest.TestCase):
         operational = {'probe_material': True, 'initialization_trial': True, 'placement_review': {}, 'game_preparation': {},
                        'dependency_installation': {}}
         earlier = {key: value for key, value in operational.items() if key != 'game_preparation'}
-        for config, again, menu9 in ((operational, 'もう一度 3（個別の操作）の1 ', '個別の操作の4（詳細メニュー）の9'), (earlier, 'もう一度 12 ', 'メニュー9')):
+        for config, again, menu9 in ((operational, 'もう一度 recovery.sh の1 ', 'recovery.sh の6'), (earlier, 'もう一度 12 ', 'メニュー9')):
             with self.subTest(again=again):
                 self.assertIn(again, one_pass.installation_next_step(None, config))
                 self.assertEqual(one_pass.installation_next_step({'status': 'failed', 'post_state': None}, config),
@@ -193,7 +193,7 @@ class OnePassTests(GAME['GamePrefixTests']):
 
     def test_menu_offers_one_pass_only_with_every_step_configured(self):
         _, _, output = self.entry_menu('q\n')
-        self.assertIn('1. 新しいゲームを準備', output)
+        self.assertIn('1. 1本だけ準備する', output)
         self.assertNotIn('12. ', output)
         _, _, output = self.detail_menu('q\n')
         self.assertIn('12. 新しいゲームを1回で準備', output)

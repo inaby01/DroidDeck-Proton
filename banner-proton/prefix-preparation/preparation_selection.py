@@ -53,15 +53,20 @@ def operational_layout(config):
             and all(name in config for name in ("placement_review", "game_preparation", "dependency_installation")))
 
 
+RECOVERY_NUMBERS = {8: 5, 9: 6, 10: 4}
+
+
 def menu_ref(config, number):
-    """How guidance names a menu of the earlier screen: inside the detailed menu (individual operation 4)
-    when the operational first screen is shown (design: Proton update 3.7)."""
-    return ("個別の操作の4（詳細メニュー）の" if operational_layout(config) else "メニュー") + str(number)
+    """How guidance names an earlier menu: its place in recovery.sh (1.0.0) when the operational
+    layout is used, else the earlier screen's number."""
+    if not operational_layout(config):
+        return "メニュー" + str(number)
+    return "recovery.sh の" + str(RECOVERY_NUMBERS[number]) if number in RECOVERY_NUMBERS else "recovery.sh"
 
 
 def one_pass_ref(config):
-    """How guidance names the one-pass preparation (individual operation 1, earlier screen 12)."""
-    return "3（個別の操作）の1" if operational_layout(config) else "12"
+    """How guidance names the one-pass preparation of one game (recovery.sh 1, earlier screen 12)."""
+    return "recovery.sh の1" if operational_layout(config) else "12"
 
 
 def _text(value):
@@ -79,9 +84,9 @@ def validate_selection_config(config):
     payload = config["payload"]
     fields(payload, ("archive", "sha512", "root", "mode"), ("alternate_relative_path", "tool_slot"))
     name = string(payload["archive"])
-    require(re.fullmatch(r"DroidDeck-Proton-11-12\.8-softdenchi[1-9][A-Za-z0-9.-]*-aarch64\.tar\.gz", name), "unsupported archive name")
+    require(re.fullmatch(r"DroidDeck-Proton-[0-9]{1,4}-[0-9]{1,4}\.[0-9]{1,4}-softdenchi-r[1-9][0-9]{0,3}-aarch64\.tar\.gz", name), "unsupported archive name")
     require(type(payload["sha512"]) is str and re.fullmatch(r"[0-9a-f]{128}", payload["sha512"]), "expected archive checksum required")
-    require(type(payload["mode"]) is str and payload["mode"] in ("off", "observe", "cleanup"), "invalid installation mode")
+    require(type(payload["mode"]) is str and payload["mode"] == "cleanup", "invalid installation mode")
     expected_root = "DroidDeck-Proton " + name.removeprefix("DroidDeck-Proton-").removesuffix("-aarch64.tar.gz")
     require(type(payload["root"]) is str and payload["root"] == expected_root,
             "archive root differs from filename")
@@ -580,11 +585,21 @@ def interactive_selection(directory, renderer, config=None, *, input_stream=None
     return 2, str(saved_path) if saved_path.parent != directory else saved_path.name
 
 
-def selection_script(config=None):
-    """Embed only trusted distribution sources and optional validated local data."""
+SCRIPT_ENTRIES = ("prepare", "status", "diagnose", "recovery")
+
+
+def selection_script(config=None, entry="prepare"):
+    """Embed only trusted distribution sources and optional validated local data.
+
+    ``entry`` is the use of the emitted script (1.0.0): prepare.sh, status.sh, diagnose.sh or
+    recovery.sh. Each script embeds the same sources and runs on its own. Only an operational
+    bundle has the four uses; any other bundle emits the earlier single screen as prepare.sh.
+    """
+    require(entry in SCRIPT_ENTRIES, "unknown script entry")
     if config is not None:
         validate_selection_config(config)
         require(len(json.dumps(config).encode()) <= MAX_REPORT, "bundle configuration too large")
+    require(entry == "prepare" or operational_layout(config), "script entries need an operational bundle")
     parent = Path(__file__).resolve().parent
     names = ("preparation_common", "preparation_assets", "preparation_vdf", "preparation_binding", "preparation_target",
              "preparation_payload", "preparation_runtime", "preparation_customization", "preparation_runtime_context",
@@ -592,7 +607,7 @@ def selection_script(config=None):
              "preparation_tool_writer", "preparation_store", "preparation_slot_manifest", "preparation_probe", "preparation_probe_recovery", "preparation_static_placement", "preparation_trial", "preparation_trial_audit", "preparation_recheck", "preparation_softdenchi_recipe",
              "preparation_dependency_state", "preparation_vc_record", "preparation_installer_log", "preparation_dependency_install", "preparation_prefix_dll", "preparation_game_prefix",
              "preparation_one_pass", "preparation_proton_update", "preparation_status", "preparation_batch",
-             "preparation_selection")
+             "preparation_diagnose", "preparation_selection")
     sources = {name: read_bytes(parent / (name + ".py")).decode("utf-8") for name in names}
     installer = parent.parent / "install-softdenchi.py"
     if not installer.exists():
@@ -607,7 +622,7 @@ def selection_script(config=None):
             "with os.fdopen(os.dup(3), 'r', encoding='utf-8') as selection_input:\n"
             "    status, _ = sys.modules['preparation_probe'].interactive_workflow(\n"
             "        sys.argv[1], sys.modules['preparation_distributed_installer'].render_installation,\n"
-            "        config=" + ascii(config) + ", input_stream=selection_input)\n"
+            "        config=" + ascii(config) + ", input_stream=selection_input, entry=" + ascii(entry) + ")\n"
             "raise SystemExit(status)\n")
     compile(code, "selection-launcher", "exec")
     delimiter = "DROIDDECK_SELECTION_" + hashlib.sha256(code.encode()).hexdigest()[:16]

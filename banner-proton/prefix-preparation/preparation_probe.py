@@ -513,8 +513,11 @@ def _verify_registered_context(record, marker, exe, key, source, steam, receipt_
 
 
 def interactive_workflow(directory, renderer, config=None, *, input_stream=None, output_stream=None, environment=None,
-                         steam=None, settings=None, home=None, runtime_root=Path("/")):
-    """Common short entry; material creation requires a separate concrete opt-in."""
+                         steam=None, settings=None, home=None, runtime_root=Path("/"), entry="prepare"):
+    """Common short entry; material creation requires a separate concrete opt-in.
+
+    ``entry`` is the script that started it (1.0.0): prepare, status, diagnose or recovery.
+    """
     import sys
 
     import preparation_selection as selection
@@ -528,9 +531,9 @@ def interactive_workflow(directory, renderer, config=None, *, input_stream=None,
         return selection.interactive_selection(directory, renderer, config, **options)
     selection.validate_selection_config(config)
     if selection.operational_layout(config):
-        # The first screen of 0.31.0 (design: Proton update 3); 0.30.0's entries are under 3 with the same numbers.
-        from preparation_batch import interactive_batch
-        return interactive_batch(directory, renderer, config, **options)
+        # One script per use (1.0.0); the batch run is prepare.sh.
+        from preparation_batch import interactive_entry
+        return interactive_entry(entry, directory, renderer, config, **options)
     return detailed_menu(directory, renderer, config, **options)
 
 
@@ -618,7 +621,7 @@ def detailed_menu(directory, renderer, config, *, input_stream=None, output_stre
         plan = plan_probe_material(archive, payload["sha512"], payload["root"], source, steam, directory)
         print("新しく作るフォルダー: " + selection._text(plan.record["destination"]), file=output)
         print(f"内容: {EXE}（{len(plan.raw):,} bytes）と {MARKER}", file=output)
-        print("Androidではprepare.shを置いたフォルダー内から、この新しいフォルダーを選びます。", file=output)
+        print("Androidではprepare.sh を置いたフォルダー内から、この新しいフォルダーを選びます。", file=output)
         print("元ファイル: 配布物内 " + MEMBER, file=output)
         print("私有記録: " + selection._text(home / ".local/state/droiddeck-prefix-preparation/probe-store"), file=output)
         print("私有記録・ロック・結果JSONも新規作成します。既存ファイルは上書きしません。", file=output)
@@ -635,9 +638,9 @@ def detailed_menu(directory, renderer, config, *, input_stream=None, output_stre
             with store.locked(key):
                 report = create_probe_material(plan, lambda: plan_probe_material(
                     archive, payload["sha512"], payload["root"], source, steam, directory, probe_id=plan.record["probe_id"]), store)
-        print("検証ファイルを作成しました。DroidDeckのEXE追加で、prepare.shを置いたフォルダーを開いてください。", file=output)
+        print("検証ファイルを作成しました。DroidDeckのEXE追加で、prepare.sh を置いたフォルダーを開いてください。", file=output)
         print("選ぶファイル: " + selection._text(report["selection_hint"]["relative_exe"]), file=output)
-        print("追加後も起動せず、このprepare.shの" + selection.menu_ref(config, 1) + "で新しい登録を検査してください。", file=output)
+        print("追加後も起動せず、このprepare.sh の" + selection.menu_ref(config, 1) + "で新しい登録を検査してください。", file=output)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
         report = {"mode": "probe-material-stopped", "stage": stage, "check": getattr(error, "preparation_check", stage), "error_class": type(error).__name__,
                   "errno": getattr(error, "errno", None), "writes": [], "partial_files_may_exist": started,

@@ -22,8 +22,19 @@ from preparation_store import PrivateStore
 
 class BatchFixture:
     def first_screen(self, text):
-        """The real first screen (no patched list), with the one-pass fixture's launch patches."""
-        status, report, output, _ = self.run_menu(text, self.menu)
+        """prepare.sh (no patched list), with the one-pass fixture's launch patches.
+
+        Inputs keep 0.31.0's first-screen numbers: 1 is "y", q is "n", 2 runs status.sh and 3 the
+        individual operations as mapped by entry_menu (1.0.0)."""
+        first, _, rest = text.partition('\n')
+        if first == '2':
+            menu, text = (lambda answer: self.script('status', answer)), rest
+        elif first == '3':
+            menu, text = self.entry_menu, rest
+        else:
+            menu = self.menu
+            text = '\n'.join({'1': 'y', 'q': 'n'}.get(line, line) for line in text.split('\n'))
+        status, report, output, _ = self.run_menu(text, menu)
         return status, report, output
 
     def forget_manifest(self):
@@ -50,8 +61,9 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
         self.assertIn('すること', output)
         self.assertIn('このProtonの照合情報を保存する', output)
         self.assertIn('[ID 42] を新しく準備する', output)
-        self.assertIn('使用許諾に同意したうえで導入します。下の1は、その同意を含みます。', output)
-        self.assertIn('1. すべて実行する', output)
+        self.assertIn('使用許諾に同意したうえで導入します。下の確認で y を選ぶと、その同意を含みます。', output)
+        self.assertIn('この内容で実行しますか？（y: はい / n: いいえ）', output)
+        self.assertNotIn('1. すべて実行する', output)
         self.assertIn('起動する前に prepare.sh を実行してください', output)
         self.assertFalse(self.game_compat.exists())
 
@@ -107,10 +119,12 @@ class NewGameBatchTests(BatchFixture, ONE['OnePassTests']):
     def test_payload_missing_offers_no_run(self):
         archive = next(self.f.fixture.source.root.glob('DroidDeck-Proton-*.tar.gz'))
         archive.rename(archive.with_suffix('.moved'))
-        _, _, output = self.first_screen('1\n')
+        status, _, output = self.first_screen('1\n')
+        self.assertEqual(status, 1)
         self.assertIn('配布物を照合できません', output)
-        self.assertNotIn('1. すべて実行する', output)
-        self.assertIn('取り消しました', output)
+        self.assertNotIn('この内容で実行しますか', output)
+        self.assertNotIn('することはありません', output)
+        self.assertIn('照合できなかったため、何も変更していません。', output)
 
     def test_interrupted_run_is_shown(self):
         with PrivateStore(self.f.store_root, create=True) as store, store.locked('e' * 64):
@@ -545,7 +559,7 @@ class MoveBatchTests(BatchFixture, UPDATE['MoveFixture'], ONE['OnePassTests']):
     def test_slot_not_replaced_by_this_bundle_is_not_moved(self):
         self.config['supersedes'] = []
         _, _, output = self.first_screen('1\n')
-        self.assertIn('置き換える版ではありません（個別の操作の5で移せます）', output)
+        self.assertIn('置き換える版ではありません（recovery.sh の2で移せます）', output)
         self.assertEqual(self.selection()['kind'], 'move')
 
     def test_status_shows_the_move_decision(self):
@@ -621,10 +635,11 @@ class MoveBatchTests(BatchFixture, UPDATE['MoveFixture'], ONE['OnePassTests']):
             output_stream=None, environment=self.environment, steam=self.f.steam, settings=self.f.settings,
             home=self.home, runtime_root=self.f.root)))
 
-    def test_individual_operations_5_and_6_are_reachable(self):
+    def test_recovery_offers_moving_one_game_and_reverting(self):
         _, _, output = self.first_screen('3\nq\n')
-        self.assertIn('5. ゲームを移す', output)
-        self.assertIn('6. 前のProtonへ戻す', output)
+        self.assertIn('2. ゲームを1本だけ新しいProtonへ移す', output)
+        self.assertIn('3. 前のProtonへ戻す', output)
+        self.assertNotIn('詳細メニュー', output)
         _, report, output = self.first_screen('3\n5\n1\n1\n')
         self.assertTrue(report['binding_written'], output)
 
@@ -645,6 +660,32 @@ class PlacementBatchTests(BatchFixture, ONE['OnePassTests']):
         self.assertIn('置く確認に使った登録: Example [ID 42]', output)
         self.assertIn('[ID 42] を新しく準備する', output.split('新しいProtonを置きました', 1)[1])
         self.assertIn('取り消しました（新しいProtonは置いたままです）', output)
+        self.assertFalse(self.game_compat.exists())
+
+    def test_a_stop_in_the_list_after_placement_is_saved_with_its_reason(self):
+        slot = self.f.steam / 'compatibilitytools.d' / update.bundle_directory(self.config)
+        shutil.rmtree(slot)
+        real = batch.build
+        calls = []
+
+        def build(ctx):
+            calls.append(1)
+            listing = real(ctx)
+            if len(calls) == 2:
+                listing['global'].update(slot='unverified', error={'check': 'batch-payload-and-slot',
+                                                                   'reason': 'runtime source/library/label changed since audit'})
+                listing['global'].pop('runtime', None)
+                listing['items'] = []
+            return listing
+
+        with unittest.mock.patch.object(batch, 'build', side_effect=build):
+            status, report, output = self.first_screen('1\n')
+        self.assertTrue(slot.is_dir(), output)
+        self.assertEqual(status, 2)
+        self.assertEqual((report['status'], report['stage'], report['reason']),
+                         ('stopped-after-placement', 'batch-payload-and-slot', 'runtime source/library/label changed since audit'))
+        self.assertIn('新しいProtonは置きました。そのあとの照合で止まったため', output)
+        self.assertNotIn('何も変更して', output)
         self.assertFalse(self.game_compat.exists())
 
     def context(self):

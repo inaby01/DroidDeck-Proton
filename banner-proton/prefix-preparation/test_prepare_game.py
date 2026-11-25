@@ -230,6 +230,11 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(rejected.returncode, 1)
         self.assertNotIn("SECRET", rejected.stderr)
         self.assertNotIn("\u001b", rejected.stderr)
+        for mode in ([], ["--plan"]):
+            entry = subprocess.run(command + mode + ["--script-entry", "status"], cwd=self.root, env=env,
+                                   capture_output=True, text=True, check=False)
+            self.assertEqual(entry.returncode, 1, mode)
+            self.assertIn("Input rejected", entry.stderr)
 
     def test_unknown_version_is_not_implicitly_supported(self):
         self.args.droiddeck_version = "future"

@@ -418,7 +418,7 @@ class ProbeWorkflowTests(unittest.TestCase):
         self.assertEqual(list((self.home / 'Games').iterdir()), [])
         self.assertEqual(Path(report['destination']).parent, self.f.directory)
         self.assertEqual(self.f.directory / report['selection_hint']['relative_exe'], Path(report['exe']))
-        self.assertIn('prepare.shを置いたフォルダー', output)
+        self.assertIn('prepare.sh を置いたフォルダー', output)
         # Adding the probe is an Android action; this script has not added it.
         self.assertEqual(len(json.loads(self.f.fixture.game.added.read_bytes())), 1)
 

@@ -78,8 +78,5 @@ launch binding are still required. This is not a completed game preparation flow
 
 ## Existing setup compatibility
 
-`setup-softdenchi.py` now exposes `prepare_tool` (add/reuse only) and `finish_binding`
-(the existing global selection/synchronization path). Its old `setup`/CLI behavior
-and result fields remain available, with regression coverage. The new preparation
-engine must use the target-only adapter, not call the legacy global finalizer.
-These APIs have not been connected to device prefix initialization yet.
+The earlier `setup-softdenchi.py` global finalizer was removed in 1.0.0; the preparation engine uses
+the target-only adapter only.

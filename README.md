@@ -339,28 +339,28 @@ This fork maintains the SoftDenchi compatibility patch and an optional process o
 Its commit and SHA-256 are recorded in `banner-proton/PINS` and build metadata. The patch changes
 `crypt32`, `imagehlp` and MSI COM registration; it does not install Windows runtimes or supply credentials.
 
-`PROTON_SOFTDENCHI_OBSERVE=1` records process observations. The experimental
-`PROTON_SOFTDENCHI_CLEANUP=1` additionally revalidates and sends SIGTERM to residual SdProxy
-processes after an observed game handoff and exit, once no game process has been seen for two
-seconds. Both are disabled by default. Cleanup requires
-pidfd support and confirmed process identity/origin; missing observations or unknown processes
-prevent cleanup. It does not terminate UCManSvc or reset authentication state.
+`PROTON_SOFTDENCHI_CLEANUP=1` revalidates and sends SIGTERM to residual SdProxy processes after an
+observed game handoff and exit, once no game process has been seen for two seconds; without it a
+game's exit does not return to DroidDeck while SdProxy remains. `PROTON_SOFTDENCHI_OBSERVE=1`
+starts the same observer without cleanup. Proton leaves both off by default; the prefix
+preparation tool turns cleanup on in its slot. Cleanup requires pidfd support and confirmed process
+identity/origin; missing observations or unknown processes prevent cleanup. It does not terminate
+UCManSvc or reset authentication state.
 
-Observation records (schema 5) carry wall-clock time. The final `stop` record adds when the Wine
+Observation records (schema 5) carry wall-clock time and go to stderr (DroidDeck's session log),
+and also to Proton's log when `PROTON_LOG=1` is set. The final `stop` record adds when the Wine
 launcher returned and the last completed process observation (bounded in size), so the time from
 game exit to the session ending can be split. No helper process or new `/proc` scan is added to the
 exit path; the `stop` record itself is still written synchronously, as before.
 
-`banner-proton/install-softdenchi.py` verifies the supplied archive's SHA-512 and installs it as
-`SoftDenchi-Proton`, outside DroidDeck's official-build replacement family. The generic
-`banner-proton/setup-softdenchi.py` accepts an explicit `--app-id` and `--mode`, installs or reuses
-the build, selects it, invokes DroidDeck's registration/synchronization and verifies the mapping.
-Stop games and Steam sessions first. Existing destinations with different metadata are rejected.
-Synchronization can apply other pending game selections as well; inspect those before using this
-helper. These tools do not create or reset game prefixes or install their dependencies. Proton may
-perform its usual prefix update when subsequently launched. The helpers target DroidDeck 0.7.1.
+Proton's debug log stays off in the preparation slot. To collect it for one game, add
+`PROTON_LOG=1` to that game's environment in DroidDeck; variables from the environment take
+precedence over the slot's `user_settings.py`.
 
-Use `banner-proton/check-softdenchi-selection.py --app-id <APP_ID>` for a limited selection report.
+Builds are named `<upstream version>-softdenchi-r<N>` (`r1` is the first operational build of that
+upstream version). `banner-proton/install-softdenchi.py` only renders the slot files for the
+preparation tool (`render_installation`); it installs nothing itself. The earlier manual installer
+and selection helpers were removed in prefix preparation 1.0.0.
 
 The separate [prefix preparation tool](banner-proton/prefix-preparation/README.md)
 supports explicit local registration inputs, offline inspection, blocked plans and

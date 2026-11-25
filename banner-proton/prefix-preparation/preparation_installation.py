@@ -100,7 +100,7 @@ def plan_installation(*, archive, sha512, archive_root, mode, runtime_root, runt
                       registrations, registration_id, exe_root, steam, renderer, parent_environment=None, tool_slot="legacy",
                       archive_from_folder=False, inventory=None):
     """``inventory``: the payload already read once from the asset folder (read-only lists only)."""
-    require(mode in ("off", "observe", "cleanup"), "unsupported installation mode")
+    require(mode == "cleanup", "unsupported installation mode")
     steam = safe_path(steam)
     target = checked("target-registration-exe", pin_registration, registrations, registration_id, exe_root, steam)
     if inventory is None:

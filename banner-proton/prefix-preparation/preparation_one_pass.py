@@ -354,7 +354,7 @@ def _dll_asset_stop(items, reasons):
     """The stop for prefix DLL assets missing or different in the asset folder."""
     return ("one-pass-precheck", ",".join(sorted(reasons)),
             "prefixに入れるDLL（" + "、".join(item["asset"]["filename"] for item in items) +
-            "）がprepare.shと同じフォルダーにないか、内容が違います。何も変更していません。")
+            "）がprepare.sh と同じフォルダーにないか、内容が違います。何も変更していません。")
 
 
 def pre_write_stops(*, profile, recipes, directory, record=None, softdenchi=None, installer=None):
@@ -386,7 +386,7 @@ def pre_write_stops(*, profile, recipes, directory, record=None, softdenchi=None
             problems.append("asset-not-recipe-bootstrap")
         if problems:
             return stage, ",".join(sorted(problems)), ("インストーラー（" + installer["filename"] +
-                                                      "）がprepare.shと同じフォルダーにないか、内容が違います。何も変更していません。")
+                                                      "）がprepare.sh と同じフォルダーにないか、内容が違います。何も変更していません。")
     if record is not None:
         return None
     dll_items = [recipes[dep] for dep in profile["dependencies"] if recipes[dep]["handler"] == PREFIX_DLL]

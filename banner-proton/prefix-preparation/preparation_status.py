@@ -119,6 +119,7 @@ def _slot(result, config, directory, renderer, steam, environment, runtime_root)
     result.update(payload="verified", inventory=inventory)
     runtime = plan_runtime_environment(runtime_root, config["runtime_reference"], environment)
     _require_live(runtime)
+    result["runtime"] = "verified"  # A later failure is the placed slot, not DroidDeck's runtime (1.0.0).
     payload = config["payload"]
     custom = plan_customizations(inventory, payload["archive"], payload["mode"], runtime_root / "usr/local/bin/steam-compatibility",
                                  renderer, label=runtime.label, umask=int(runtime.umask, 8), tool_slot="preparation")
@@ -135,11 +136,11 @@ def _slot(result, config, directory, renderer, steam, environment, runtime_root)
 
 MOVE_TEXT = {
     # Design: Proton update 4.9, the same wording as the first screen.
-    "move": "prepare.sh の1（すべて実行）で、{source} からこのバンドルの準備用Protonへ移します。",
-    "align": "prepare.sh の1（すべて実行）で、DroidDeckの画面で選んだ内容にほかの2つのファイルをそろえます（今: {source}）。",
-    "returned-from-this-slot": "別の準備用Proton（{source}）へ戻してあります。もう一度移すときは個別の操作の5を使ってください。",
-    "not-superseded-by-this-bundle": "このバンドルが置き換える版ではありません（今: {source}）。移すときは個別の操作の5を使ってください。",
-    "binding-note-missing": "割り当ての補足の記録が欠けています（今: {source}）。移すときは個別の操作の5を使ってください。",
+    "move": "prepare.sh で、{source} からこのバンドルの準備用Protonへ移します。",
+    "align": "prepare.sh で、DroidDeckの画面で選んだ内容にほかの2つのファイルをそろえます（今: {source}）。",
+    "returned-from-this-slot": "別の準備用Proton（{source}）へ戻してあります。もう一度移すときはrecovery.sh の2を使ってください。",
+    "not-superseded-by-this-bundle": "このバンドルが置き換える版ではありません（今: {source}）。移すときはrecovery.sh の2を使ってください。",
+    "binding-note-missing": "割り当ての補足の記録が欠けています（今: {source}）。移すときはrecovery.sh の2を使ってください。",
     "screen-chose-another-proton": "DroidDeckの画面で別のProton（{source}）を選択中です。ツールは書きません。",
 }
 
@@ -273,26 +274,30 @@ def interactive_status(directory, renderer, config, *, input_stream=None, output
         if unreadable:
             print(f"読めない初期化記録が{unreadable}件あります（どの登録のものか分からないため、表示に使いません）。", file=output)
         inventory, slot = None, {"payload": "unverified", "slot": "unverified", "directory": None}
-        if records:
-            stage = "status-payload-and-slot"
-            print("配布物・runtime・準備用Protonを照合しています。", file=output, flush=True)
-            try:
-                _slot(slot, config, directory, renderer, steam, environment, runtime_root)
-            except (OSError, ValueError, TypeError, KeyError) as error:
-                slot["error"] = describe_error(error, stage)
-            inventory = slot.pop("inventory", None)
-            slot.pop("customization", None)
-            report["global"] = slot
-            if slot["payload"] != "verified":
-                print("このバンドルのProtonの配布物を照合できません（" + text(str(slot["error"]["reason"] or slot["error"]["error_class"])) +
-                      "）。依存は判定できません。", file=output)
-            elif slot["slot"] == "absent":
-                print("このバンドルの準備用Protonはまだ置かれていません（先に prepare.sh の1で置いてください）。依存は判定できません。", file=output)
-            elif slot["slot"] != "verified":
-                print("このバンドルの準備用Protonを照合できません（" + text(str(slot["error"]["reason"] or slot["error"]["error_class"])) +
-                      "）。依存は判定できません。", file=output)
-            else:
-                print("準備用Proton: " + text(slot["directory"]) + "（配布物と一致）", file=output)
+        # Also without prepared games (1.0.0): prepare.sh points here for the slot and runtime state.
+        stage = "status-payload-and-slot"
+        print("配布物・runtime・準備用Protonを照合しています。", file=output, flush=True)
+        try:
+            _slot(slot, config, directory, renderer, steam, environment, runtime_root)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            slot["error"] = describe_error(error, stage)
+        inventory = slot.pop("inventory", None)
+        slot.pop("customization", None)
+        report["global"] = slot
+        if slot["payload"] != "verified":
+            print("このバンドルのProtonの配布物を照合できません（" + text(str(slot["error"]["reason"] or slot["error"]["error_class"])) +
+                  "）。依存は判定できません。", file=output)
+        elif slot["slot"] == "absent":
+            print("このバンドルの準備用Protonはまだ置かれていません（先に prepare.sh で置いてください）。依存は判定できません。", file=output)
+        elif slot["slot"] != "verified" and slot.get("runtime") != "verified":
+            print("DroidDeckの中の環境が、このツールの前提と違います（" +
+                  text(str(slot["error"]["reason"] or slot["error"]["error_class"])) + "）。依存は判定できません。"
+                  "DroidDeckを更新したあとなら、diagnose.sh を実行して、その結果を置いてください。", file=output)
+        elif slot["slot"] != "verified":
+            print("このバンドルの準備用Protonを照合できません（" + text(str(slot["error"]["reason"] or slot["error"]["error_class"])) +
+                  "）。依存は判定できません。", file=output)
+        else:
+            print("準備用Proton: " + text(slot["directory"]) + "（配布物と一致）", file=output)
         by_key = {}
         for item in records:
             by_key.setdefault(item["app_id"], []).append(item)
@@ -335,7 +340,7 @@ def _game(key, listed, title, context):
         entry["interrupted_revert"] = interrupted
         if interrupted["settings"] == "unchanged":
             print(f"  戻すときのキャッシュの退避が途中で止まりました（{interrupted['moved']}か所を移しました。場所: 私有記録の " +
-                  text(interrupted["destination"]) + "）。設定は変わっていません。個別の操作の6でもう一度戻せます。", file=output)
+                  text(interrupted["destination"]) + "）。設定は変わっていません。recovery.sh の3でもう一度戻せます。", file=output)
         else:
             print(f"  戻すときに、設定（3つのファイル）の書き換えが途中で止まりました（キャッシュは{interrupted['moved']}か所を"
                   "移しました。場所: 私有記録の " + text(interrupted["destination"]) + "）。設定が一部だけ書き換わっている"
@@ -352,19 +357,19 @@ def _game(key, listed, title, context):
         if title is None:
             entry.update(record="several" if len(listed) != 1 else listed[0]["status"],
                          next={"next": "not-listed", "reason": "registration-missing"})
-            print("  DroidDeckの登録が見つからないため、個別の操作の1（新しいゲームを準備）の一覧に出ません。", file=output)
+            print("  DroidDeckの登録が見つからないため、recovery.sh の1（1本だけ準備する）の一覧に出ません。", file=output)
             return entry
         # The same checks and stage names as menu 1 when the game is selected (profile-selection).
         if len(listed) != 1:
             entry.update(record="several", next={"next": "stop", "stage": "profile-selection",
                                                   "reason": "several game prefix records for this registration"})
-            print("  初期化の記録: 同じIDの記録が複数あります。個別の操作の1（新しいゲームを準備）はこのゲームで止まります。", file=output)
+            print("  初期化の記録: 同じIDの記録が複数あります。recovery.sh の1（1本だけ準備する）はこのゲームで止まります。", file=output)
             return entry
         item = listed[0]
         entry["record"] = item["status"]
         if item["status"] != "initialized-unverified":
             entry["next"] = {"next": "stop", "stage": "resume-state", "reason": "initialization-" + item["status"]}
-            print("  初期化の記録: 完了していません（" + text(item["status"]) + "）。個別の操作の1（新しいゲームを準備）はこのゲームで止まります"
+            print("  初期化の記録: 完了していません（" + text(item["status"]) + "）。recovery.sh の1（1本だけ準備する）はこのゲームで止まります"
                   "（作成物は削除せずに残しています）。", file=output)
             return entry
         print("  初期化の記録: 初期化済み / prefix: " + text(str(steam / "steamapps/compatdata" / key)), file=output)
@@ -373,7 +378,7 @@ def _game(key, listed, title, context):
         profile = context["profiles"].get(record["profile"]["profile_id"])
         if profile is None:
             entry["next"] = {"next": "stop", "stage": "profile-selection", "reason": "game profile changed since initialization"}
-            print("  作品プロファイル: このバンドルにありません。個別の操作の1（新しいゲームを準備）はこのゲームで止まります。", file=output)
+            print("  作品プロファイル: このバンドルにありません。recovery.sh の1（1本だけ準備する）はこのゲームで止まります。", file=output)
             return entry
         entry["profile_id"] = profile["profile_id"]
         print("  作品プロファイル: " + text(profile["title"]) + f"（改訂{profile['revision']}）", file=output)
@@ -420,7 +425,7 @@ def _game(key, listed, title, context):
                         entry["move"] = dict(move, blockers=blockers)
                         entry["next"] = {"next": "move-blocked", "decision": move, "blockers": blockers}
                         print("  次にすること: 移すと途中で止まる状態です（" + text(",".join(blockers)) + "）。"
-                              "表示された理由を解消してから、prepare.sh の1（すべて実行）を使ってください。", file=output)
+                              "表示された理由を解消してから、prepare.sh を使ってください。", file=output)
                         return entry
                 if text_ is not None:
                     entry["next"] = {"next": "move" if move["batch"] else "move-individually", "decision": move}
@@ -464,14 +469,14 @@ def _game(key, listed, title, context):
             doing = "・".join(text(action_text(action, recipes)) for action in evaluation["actions"])
             if _binding_verified(context, key) and [action for action in evaluation["actions"] if action != "binding"]:
                 # The batch run leaves a bound game that needs more than a move to individual operation 1 (design 3.2).
-                print("  次にすること: 個別の操作の1（新しいゲームを準備）で続きから進めます（" + doing + "）。"
-                      "割り当て済みのゲームなので、prepare.sh の1（すべて実行）では行いません。", file=output)
+                print("  次にすること: recovery.sh の1（1本だけ準備する）で続きから進めます（" + doing + "）。"
+                      "割り当て済みのゲームなので、prepare.sh では行いません。", file=output)
             else:
-                print("  次にすること: prepare.sh の1（すべて実行）で続きから進めます（" + doing + "）。", file=output)
+                print("  次にすること: prepare.sh で続きから進めます（" + doing + "）。", file=output)
         elif any(mark in evaluation["reason"] for mark in UNCLEAR):
             print("  確認できません（動作中または変化中）。ゲームとWineを終了してから、もう一度状態の確認を実行してください。", file=output)
         else:
-            print("  次にすること: 個別の操作の1（新しいゲームを準備）はここで止まります（" + text(evaluation["stage"] + " / " + evaluation["reason"]) + "）。", file=output)
+            print("  次にすること: recovery.sh の1（1本だけ準備する）はここで止まります（" + text(evaluation["stage"] + " / " + evaluation["reason"]) + "）。", file=output)
             if evaluation.get("next_step"):
                 print("  " + evaluation["next_step"], file=output)
     except (OSError, ValueError, TypeError, KeyError) as error:

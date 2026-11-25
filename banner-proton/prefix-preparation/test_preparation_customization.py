@@ -20,7 +20,7 @@ from preparation_vdf import Document
 
 PARENT = Path(__file__).resolve().parent.parent
 INSTALLER = runpy.run_path(str(next(p for p in (PARENT/"install-softdenchi.py",PARENT/"banner-proton/install-softdenchi.py") if p.exists())))
-VERSION = "11-12.8-softdenchi3-fixture"
+VERSION = "11-12.8-softdenchi-r9"
 ARCHIVE_NAME = "DroidDeck-Proton-"+VERSION+"-aarch64.tar.gz"
 ROOT = "DroidDeck-Proton "+VERSION
 
@@ -76,15 +76,19 @@ class CustomizationTests(unittest.TestCase):
         self.assertNotIn("user_settings=",repr(plan))
         self.assertNotIn("user_settings=",json.dumps(plan.summary()))
 
-    def test_expected_installer_outputs_match_real_fixture_installation(self):
+    def test_expected_outputs_match_an_extracted_fixture_tree(self):
         plan = self.plan()
         previous = os.umask(0o022)
         try:
-            directory = INSTALLER["install"](self.archive,self.root/"tools","cleanup")
+            with tarfile.open(self.archive,"r:gz") as package:
+                package.extractall(self.root/"tools",filter="data")
         finally:
             os.umask(previous)
+        directory = self.root/"tools"/ROOT
+        rendered = INSTALLER["render_installation"](self.archive.name,self.sha,"cleanup",(directory/"version").read_bytes(),
+                                                    (directory/"user_settings.py").read_bytes() if (directory/"user_settings.py").exists() else None)
         for name in ("user_settings.py","softdenchi-install.json"):
-            self.assertEqual((directory/name).read_bytes(),plan.files[name])
+            self.assertEqual(rendered[name],plan.files[name])
         # Simulate adoption using exactly the precomputed outputs, not measured expectations.
         for name,raw in plan.files.items():
             (directory/name).write_bytes(raw)
@@ -179,11 +183,24 @@ class CustomizationTests(unittest.TestCase):
             self.plan(tool_slot="../other-tool")
 
     def test_renderer_preserves_legacy_newline_and_custom_settings_behavior(self):
-        files = INSTALLER["render_installation"](self.archive.name,self.sha,"off",self.inventory.captured["version"],
+        files = INSTALLER["render_installation"](self.archive.name,self.sha,"cleanup",self.inventory.captured["version"],
                                                   b'user_settings={"CUSTOM":"preserve"}\r\n')
         self.assertNotIn(b"\r",files["user_settings.py"])
         self.assertIn(b'"CUSTOM":"preserve"',files["user_settings.py"])
-        self.assertIn(b"'PROTON_SOFTDENCHI_CLEANUP': '0'",files["user_settings.py"])
+        self.assertIn(b"'PROTON_SOFTDENCHI_CLEANUP': '1'",files["user_settings.py"])
+        self.assertNotIn(b"PROTON_LOG",files["user_settings.py"])
+        self.assertNotIn(b"PROTON_SOFTDENCHI_OBSERVE",files["user_settings.py"])
+
+    def test_renderer_refuses_unused_modes_and_generation_names(self):
+        version = self.inventory.captured["version"]
+        for mode in ("off","observe"):
+            with self.assertRaises(ValueError):
+                INSTALLER["render_installation"](self.archive.name,self.sha,mode,version)
+        for name in ("DroidDeck-Proton-11-12.8-softdenchi3-r1-aarch64.tar.gz",
+                     "DroidDeck-Proton-11-12.8-softdenchi-beta1-aarch64.tar.gz",
+                     "DroidDeck-Proton-11-12.8-softdenchi-r0-aarch64.tar.gz"):
+            with self.assertRaises(ValueError):
+                INSTALLER["render_installation"](name,self.sha,"cleanup",version)
 
 
 if __name__ == "__main__":

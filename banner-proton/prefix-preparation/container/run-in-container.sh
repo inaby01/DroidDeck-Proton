@@ -61,12 +61,12 @@ for test in \
     /input/prefix-preparation/test_preparation_status.py \
     /input/prefix-preparation/test_preparation_proton_update.py \
     /input/prefix-preparation/test_preparation_batch.py \
+    /input/prefix-preparation/test_preparation_diagnose.py \
     /input/prefix-preparation/test_preparation_folder_reads.py \
     /input/prefix-preparation/test_preparation_probe_recovery.py \
     /input/prefix-preparation/test_preparation_probe.py \
     /input/prefix-preparation/test_preparation_selection.py \
     /input/banner-proton/test-softdenchi-install.py \
-    /input/banner-proton/test-softdenchi-setup.py \
     /input/banner-proton/test-softdenchi-observer.py; do
     printf '\nRunning %s\n' "$test"
     /usr/bin/python3 -I -B "$test"

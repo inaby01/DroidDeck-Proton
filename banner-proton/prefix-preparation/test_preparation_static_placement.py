@@ -117,27 +117,48 @@ class StaticFixture(unittest.TestCase):
         report = json.loads((self.f.fixture.source.root / name).read_bytes()) if name else None
         return status, report, output.getvalue()
 
-    def entry_menu(self, text):
-        """0.30.0's operational entries, under 3 (individual operations) of the 0.31.0 first screen.
+    def script(self, entry, text):
+        """One of the 1.0.0 scripts (prepare, status, diagnose, recovery)."""
+        output = io.StringIO()
+        status, name = probe.interactive_workflow(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
+            input_stream=io.StringIO(text), output_stream=output, environment=self.environment, steam=self.f.steam,
+            settings=self.f.settings, home=self.home, runtime_root=self.f.root, entry=entry)
+        report = json.loads((self.f.fixture.source.root / name).read_bytes()) if name else None
+        return status, report, output.getvalue()
 
-        The first screen's list is replaced by an empty one here (it reads the whole payload and
-        plans every game); the list itself is tested in test_preparation_batch.py.
-        """
-        empty = {'global': {'payload': 'verified', 'slot': 'verified', 'directory': None}, 'manifest': 'same',
-                 'items': [], 'skipped': [], 'groups': {}, 'consent': None, 'bundle': 'SoftDenchi-Prep-Proton fixture'}
-        with patch('preparation_batch.build', return_value=empty):
-            status, report, output = self.menu('3\n' + text)
-        first, _, rest = output.partition('3. 個別の操作')
-        self.assertIn('することはありません', first)
-        self.assertIn('5. ゲームを移す', rest)
-        return status, report, output
+    def options(self, output, text):
+        return {'input_stream': io.StringIO(text), 'output_stream': output, 'environment': self.environment,
+                'steam': self.f.steam, 'settings': self.f.settings, 'home': self.home, 'runtime_root': self.f.root}
+
+    def direct(self, function, text):
+        output = io.StringIO()
+        status, name = function(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
+                                **self.options(output, text))
+        report = json.loads((self.f.fixture.source.root / name).read_bytes()) if name else None
+        return status, report, output.getvalue()
+
+    def entry_menu(self, text):
+        """0.31.0's individual operations, mapped to the 1.0.0 scripts: 1 is recovery.sh 1, 2 status.sh,
+        5 and 6 recovery.sh 2 and 3. 3 and 4 are no longer offered; their functions are called directly
+        until that code is removed (design: 1.0.0, 3)."""
+        first, _, rest = text.partition('\n')
+        if first == '1':
+            return self.script('recovery', '1\n' + rest)
+        if first == '2':
+            return self.script('status', rest)
+        if first in ('5', '6'):
+            return self.script('recovery', {'5': '2', '6': '3'}[first] + '\n' + rest)
+        if first == '3':
+            from preparation_static_placement import interactive_confirmed_placement
+            return self.direct(interactive_confirmed_placement, rest)
+        if first == '4':
+            return self.detail_menu(rest)
+        return self.script('recovery', text)
 
     def detail_menu(self, text):
-        """The earlier screen inside the detailed menu (3, then 4) of the operational entry; the entry screen comes first."""
-        status, report, output = self.entry_menu('4\n' + text)
-        self.assertIn('4. 詳細メニュー', output.split('詳細メニュー（番号は従来どおり）', 1)[0])
-        self.assertIn('詳細メニュー（番号は従来どおり）\n1. 登録済み対象の読み取り検査・計画', output)
-        return status, report, output
+        """The earlier screen (menus 1-12), no longer offered in the operational layout; called directly
+        until that code is removed."""
+        return self.direct(probe.detailed_menu, text)
 
 
 class StaticPlanTests(StaticFixture):

@@ -90,7 +90,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         entry = self.entry(report)
         self.assertEqual(entry['next'], {'next': 'continue', 'actions': ['softdenchi-silent', 'binding']})
         self.assertEqual(entry['assignment']['kind'], 'none')
-        self.assertIn('の1（すべて実行）で続きから進めます（ソフト電池を画面なしで入れる・準備用Protonに割り当てる）', output)
+        self.assertIn('prepare.sh で続きから進めます（ソフト電池を画面なしで入れる・準備用Protonに割り当てる）', output)
         _, menu, _, _ = self.run_menu('1\n1\n1\n')
         self.agrees(entry, menu)
 
@@ -147,7 +147,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         _, report, output = self.status()
         entry = self.entry(report)
         self.assertEqual(entry['next']['reason'], 'binding-blocked:dependency-not-verified:mfc42-game-folder')
-        self.assertIn('1（新しいゲームを準備）はここで止まります', output)
+        self.assertIn('recovery.sh の1（1本だけ準備する）はここで止まります', output)
         _, menu, _, _ = self.run_menu('1\n1\n1\n')
         self.agrees(entry, menu)
 
@@ -255,7 +255,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         with patch('preparation_processes.ProcessStopCheck.check', return_value={'clear_in_view': False}):
             _, menu, _, _ = self.run_menu('1\n1\n')
         self.assertEqual(menu['status'], 'stopped')
-        self.assertIn('ゲームとWineを終了してから、もう一度 3（個別の操作）の1 を実行', menu['next_step'])
+        self.assertIn('ゲームとWineを終了してから、もう一度 recovery.sh の1 を実行', menu['next_step'])
 
     def test_malformed_state_entry_stops_only_that_game(self):
         self.initialize()
@@ -287,7 +287,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
             slot.rmdir()
             moved.rename(slot)
         self.assertEqual(report['global']['slot'], 'absent')
-        self.assertIn('まだ置かれていません（先に prepare.sh の1で置いてください）', output)
+        self.assertIn('まだ置かれていません（先に prepare.sh で置いてください）', output)
         entry = self.entry(report)
         self.assertEqual(entry['next'], {'next': 'undetermined', 'reason': 'slot-absent'})
         self.assertEqual((entry['assignment']['kind'], entry['assignment']['current_tool']), ('undetermined', None))
@@ -326,6 +326,25 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         self.assertEqual((entry['assignment']['kind'], entry['next']['next']), ('undetermined', 'undetermined'))
         self.assertIn('判定できません', output)
         self.assertNotIn('対象外', output)
+
+    def test_a_changed_droiddeck_runtime_points_to_diagnose(self):
+        self.run_menu('1\n1\n1\n1\n')
+        import preparation_runtime_context as context
+        with patch.object(context, 'plan_runtime_environment',
+                          side_effect=status.require.__globals__['Invalid']('runtime source/library/label changed since audit')):
+            _, report, output = self.status()
+            listed_code, _, listed = self.script('prepare', 'y\n')
+        self.assertEqual((report['global']['payload'], report['global']['slot']), ('verified', 'unverified'))
+        self.assertNotIn('runtime', report['global'])
+        self.assertIn('DroidDeckの中の環境が、このツールの前提と違います（runtime source/library/label changed since audit）', output)
+        self.assertIn('diagnose.sh', output)
+        self.assertNotIn('このバンドルの準備用Protonを照合できません', output)
+        self.assertIn('diagnose.sh を実行して、その結果を置いてください', listed)
+        self.assertNotIn('置いてある準備用Protonが配布物と一致しません', listed)
+        self.assertNotIn('することはありません', listed)
+        self.assertNotIn('この内容で実行しますか', listed)
+        self.assertTrue(listed.endswith('照合できなかったため、何も変更していません。\n'), listed)
+        self.assertEqual(listed_code, 1)
 
     def test_unverified_slot_still_shows_disagreeing_files(self):
         self.initialize()
@@ -434,13 +453,13 @@ class EntryTests(StatusMixin, ONE['OnePassTests']):
     def test_other_input_on_either_screen_cancels_without_writing(self):
         self.initialize()
         before = self.state()
-        for answer in ('', 'q\n', '12\n', '7\n', 'x\n', '4\n', '4\nq\n', '4\n99\n', '4\nx\n'):
+        for answer in ('', 'q\n', '7\n', '12\n', 'x\n'):
             with self.subTest(answer=answer):
-                status_code, report, output = self.entry_menu(answer)
+                status_code, report, output = self.script('recovery', answer)
                 self.assertEqual((status_code, report), (0, None))
-                self.assertIn('1. 新しいゲームを準備', output)
+                self.assertIn('1. 1本だけ準備する', output)
                 self.assertTrue(output.endswith('取り消しました。\n'), output)
-                self.assertEqual('詳細メニュー（番号は従来どおり）' in output, answer.startswith('4'))
+                self.assertNotIn('詳細メニュー', output)
         self.assertEqual(before, self.state())
 
     def test_entry_2_is_the_status_check(self):
@@ -465,20 +484,35 @@ class EntryTests(StatusMixin, ONE['OnePassTests']):
         _, report, output, _ = self.run_menu('1\n1\n1\n1\nq\n')
         self.assertEqual(report['mode'], 'one-pass-game-preparation-result')
         self.assertEqual(report['reason'], 'installation-declined')
-        self.assertIn('もう一度 3（個別の操作）の1 を実行', report['next_step'])
-        self.assertIn('個別の操作の4（詳細メニュー）の8を使ってください', output)
-        self.assertNotIn('メニュー8', output.replace('個別の操作の4（詳細メニュー）の8', ''))
+        self.assertIn('もう一度 recovery.sh の1 を実行', report['next_step'])
+        self.assertIn('recovery.sh の5を使ってください', output)
+        self.assertNotIn('メニュー', output)
 
-    def test_embedded_script_shows_the_entry_screen_and_the_detailed_menu(self):
+    def test_each_embedded_script_runs_its_own_use(self):
         import subprocess
-        script = self.f.fixture.source.root / 'prepare.sh'
-        script.write_text(ONE['GAME']['DEP']['TRIAL']['BASE']['selection'].selection_script(self.config))
-        for answer, expected in (('q\n', '3. 個別の操作'), ('3\n4\nq\n', '12. 新しいゲームを1回で準備')):
-            result = subprocess.run(['bash', str(script)], input=answer, text=True, capture_output=True,
-                                    env={**os.environ, 'HOME': str(self.home)}, check=False)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(expected, result.stdout)
-        script.unlink()
+        selection = ONE['GAME']['DEP']['TRIAL']['BASE']['selection']
+        for entry, answer, expected, absent in (
+                ('prepare', 'n\n', '配布物・準備用Proton・登録済みのゲームを照合しています', '1. 1本だけ準備する'),
+                ('recovery', 'q\n', '1. 1本だけ準備する', 'この内容で実行しますか？'),
+                ('status', '', 'ゲームの状態を確認します', 'この内容で実行しますか？'),
+                ('diagnose', '', 'DroidDeckの中の環境を測り', 'この内容で実行しますか？')):
+            with self.subTest(entry=entry):
+                script = self.f.fixture.source.root / (entry + '.sh')
+                script.write_text(selection.selection_script(self.config, entry))
+                result = subprocess.run(['bash', str(script)], input=answer, text=True, capture_output=True,
+                                        env={**os.environ, 'HOME': str(self.home)}, check=False)
+                self.assertIn(result.returncode, (0, 1, 2), result.stderr)
+                self.assertIn(expected, result.stdout)
+                self.assertNotIn(absent, result.stdout)
+                self.assertNotIn('詳細メニュー', result.stdout)
+                script.unlink()
+        with self.assertRaises(Exception):
+            selection.selection_script(self.config, 'detailed')
+        earlier = {key: value for key, value in self.config.items() if key != 'game_preparation'}
+        self.assertTrue(selection.selection_script(earlier, 'prepare'))
+        for entry in ('status', 'diagnose', 'recovery'):
+            with self.subTest(earlier=entry), self.assertRaises(Exception):
+                selection.selection_script(earlier, entry)
 
 
 @own_tests_only

@@ -37,21 +37,21 @@ STAGE_TEXT = {
 }
 SKIP_TEXT = {
     "no-record-prefix-exists": "ツールの記録がなく、prefixがあります",
-    "non-ascii-path": "EXEのパスに日本語などが含まれます（まとめての実行では準備しません。個別の操作の1で準備できます）",
-    "profile-not-automatic": "自動で選べる作品プロファイルがありません（個別の操作の1で選んでください）",
-    "not-superseded-by-this-bundle": "このバンドルが置き換える版ではありません（個別の操作の5で移せます）",
-    "returned-from-this-slot": "このProtonから戻してあります（個別の操作の5で移せます）",
-    "binding-note-missing": "割り当ての補足の記録が欠けています（個別の操作の5で、理由を確かめてから移せます）",
+    "non-ascii-path": "EXEのパスに日本語などが含まれます（まとめての実行では準備しません。recovery.sh の1で準備できます）",
+    "profile-not-automatic": "自動で選べる作品プロファイルがありません（recovery.sh の1で選んでください）",
+    "not-superseded-by-this-bundle": "このバンドルが置き換える版ではありません（recovery.sh の2で移せます）",
+    "returned-from-this-slot": "このProtonから戻してあります（recovery.sh の2で移せます）",
+    "binding-note-missing": "割り当ての補足の記録が欠けています（recovery.sh の2で、理由を確かめてから移せます）",
     "screen-chose-another-proton": "DroidDeckの画面で別のProtonを選択中です",
-    "bound-needs-more": "割り当て済みのゲームで、移す以外のことが要ります（個別の操作の1で確かめてください）",
+    "bound-needs-more": "割り当て済みのゲームで、移す以外のことが要ります（recovery.sh の1で確かめてください）",
     "several-records": "このゲームの初期化の記録が複数あります",
     # Why a game assigned elsewhere is not moved (design 3.3, the same text as the status check).
     "not-a-preparation-slot": "準備用Proton以外に割り当てられています（ツールは移しません）",
     "slot-not-placed-by-this-tool": "ツールが置いた記録のない準備用Protonに割り当てられています（DroidDeckの画面と同期のコマンドで移せます）",
     "slot-folder-missing-or-unregistered": "割り当て先の準備用Protonのフォルダーがないか、登録を読めません（DroidDeckの画面と同期のコマンドで移せます）",
     "slot-tool-id-differs": "割り当て先の準備用Protonの名前が、フォルダーの登録と違います（DroidDeckの画面と同期のコマンドで移せます）",
-    "binding-running-record": "割り当ての書き換えが途中で止まった記録があります（個別の操作の2で確かめてください）",
-    "binding-failed-after-writing": "割り当ての書き換えが途中で失敗した記録があります（個別の操作の2で確かめてください）",
+    "binding-running-record": "割り当ての書き換えが途中で止まった記録があります（status.sh で確かめてください）",
+    "binding-failed-after-writing": "割り当ての書き換えが途中で失敗した記録があります（status.sh で確かめてください）",
     "no-verified-binding": "割り当てが完了した記録がありません",
     "not-assigned-to-a-placed-slot": "ツールが置いた準備用Protonに割り当てられていません（ツールは移しません）",
 }
@@ -269,13 +269,13 @@ def build(ctx):
 def _skip_text(reason, next_step=None):
     if reason.startswith("move-blocked:"):
         return ("移すと途中で止まる状態です（" + reason.removeprefix("move-blocked:") + "）。"
-                "個別の操作の2（状態の確認）で確かめてください")
+                "status.shで確かめてください")
     if reason.startswith("unreadable:"):
-        return "記録や設定を読めません（" + reason.removeprefix("unreadable:") + "）。個別の操作の2（状態の確認）で確かめてください"
+        return "記録や設定を読めません（" + reason.removeprefix("unreadable:") + "）。status.shで確かめてください"
     if reason in SKIP_TEXT:
         return SKIP_TEXT[reason]
     # A stop of menu 1's own checks: its reason and, when it has one, the same next step as the status check.
-    return "止まる理由があります（" + reason + "）" + ("。" + next_step if next_step else "。個別の操作の2（状態の確認）で確かめてください")
+    return "止まる理由があります（" + reason + "）" + ("。" + next_step if next_step else "。status.shで確かめてください")
 
 
 def show(ctx, listing):
@@ -288,14 +288,21 @@ def show(ctx, listing):
     if slot["payload"] != "verified":
         error = slot.get("error") or {}
         print("このバンドルのProtonの配布物を照合できません（" + _text(str(error.get("reason") or error.get("error_class"))) +
-              "）。NASのフォルダーの中身を、prepare.shと同じフォルダーへコピーしてください。", file=output)
+              "）。NASのフォルダーの中身を、prepare.sh と同じフォルダーへコピーしてください。", file=output)
+        return False
+    if slot["slot"] not in ("verified", "absent") and slot.get("runtime") != "verified":
+        error = slot.get("error") or {}
+        print("DroidDeckの中の環境が、このツールの前提と違います（" + _text(str(error.get("reason") or error.get("error_class"))) +
+              "）。", file=output)
+        print("DroidDeckを更新したあとなら、diagnose.sh を実行して、その結果を置いてください（何が変わったかを調べます）。",
+              file=output)
         return False
     if slot["slot"] not in ("verified", "absent"):
         error = slot.get("error") or {}
         print("置いてある準備用Protonが配布物と一致しません（" + _text(str(error.get("reason") or error.get("error_class"))) +
               "）。", file=output)
         print("配布物は照合できました。同じ名前で置いてある準備用Protonの中身が違います。ツールは置いてあるProtonを書き換えないため、"
-              "このバンドルでは準備も移すこともしません。違いは個別の操作の2（状態の確認）で確かめられます。", file=output)
+              "このバンドルでは準備も移すこともしません。違いはstatus.shで確かめられます。", file=output)
         return False
     print(file=output)
     items = listing["items"]
@@ -327,7 +334,7 @@ def show(ctx, listing):
                 print("     準備が終わったら起動して、ソフト電池の認証をしてください。", file=output)
             for title in item.get("also_matches", []):
                 print("     このゲームは" + _text(title) + "のプロファイルとも一致します。" + _text(profile["title"]) +
-                      "のプロファイルで準備します（ほかのプロファイルは個別の操作の1で選べます）。", file=output)
+                      "のプロファイルで準備します（ほかのプロファイルはrecovery.sh の1で選べます）。", file=output)
     if listing["consent"]:
         spec = config["dependency_installation"]["asset"]
         consent = listing["consent"]
@@ -335,10 +342,10 @@ def show(ctx, listing):
         print(f"ソフト電池を入れるゲーム: {len(consent['games'])}本（" + _text("、".join(consent["games"])) + "）", file=output)
         print("  インストーラー " + _text(spec["filename"]) + "（SHA-256 " + spec["expected_sha256"][:16] + "…）を画面なしで実行（" +
               " ".join(consent["asset"]["arguments"]) + "）", file=output)
-        print("  インストーラーに同梱された使用許諾に同意したうえで導入します。下の1は、その同意を含みます。", file=output)
-        print("  使用許諾を画面で読んでから導入したい場合は、qを選んで、個別の操作の4（詳細メニュー）の8を使ってください"
-              "（新しいゲームは、先に詳細メニューの10で初期化します）。", file=output)
-        print("  導入後にSdProxyが残った場合は、詳細メニューの8と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。",
+        print("  インストーラーに同梱された使用許諾に同意したうえで導入します。下の確認で y を選ぶと、その同意を含みます。", file=output)
+        print("  使用許諾を画面で読んでから導入したい場合は、下の確認で n を選んで、recovery.sh の5を使ってください"
+              "（新しいゲームは、先にrecovery.sh の4で初期化します）。", file=output)
+        print("  導入後にSdProxyが残った場合は、recovery.sh の5と同じ条件を満たすものだけにSIGTERMを送ります（強制終了はしません）。",
               file=output)
         from preparation_vc_record import RELEASE_TEXT
         print("  " + RELEASE_TEXT, file=output)
@@ -833,7 +840,7 @@ def _partial_lines(ctx, item, entry):
         lines.append("再実行では飛ばされます（設定の書き換えが途中で止まった状態は、もう一度実行しても書き換える前に止まるため）。")
     else:
         lines.append("再実行では続きから準備します（続きから行えない状態なら、一覧の「しないこと」に理由が出ます）。")
-    lines.append("このあとのゲームは実行していません。個別の操作の2（状態の確認）で確かめてください。")
+    lines.append("このあとのゲームは実行していません。status.shで確かめてください。")
     return lines
 
 
@@ -904,7 +911,7 @@ def place_automatically(ctx, preferred=()):
 
 def interactive_batch(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
                       steam=None, settings=None, home=None, runtime_root=Path("/"), recipe=None, silent_launch=None):
-    """The first screen (design 3.1). "1" runs everything listed; 2 is the status; 3 the individual operations."""
+    """prepare.sh (1.0.0): the list of design 3.1, then one yes/no confirmation runs everything listed."""
     import sys
 
     from preparation_dependency_install import describe_error
@@ -917,7 +924,7 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
                   settings=settings if settings is not None else home / ".local/share/droiddeck-compat", home=home,
                   runtime_root=runtime_root, recipe=recipe, silent_launch=silent_launch)
     protected = [ctx.steam, ctx.settings]
-    listing, offered, earlier = None, False, []
+    listing, offered, earlier, listed = None, False, [], False
     try:
         earlier = interrupted_runs(ctx)
         if earlier:
@@ -939,27 +946,23 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
                         if outcome == "partial":
                             extra = ("（設定はすべて書き換え済みで、最後の確認だけが済んでいません。"
                                      if details.get(app) == "final-check-only" else "（") + \
-                                "個別の操作の2（状態の確認）で確かめてください）"
+                                "status.shで確かめてください）"
                         print("  ID " + _text(str(app)) + ": " + OUTCOMES[outcome] + extra, file=output)
         print("配布物・準備用Proton・登録済みのゲームを照合しています（何も変更しません）。", file=output, flush=True)
         listing = build(ctx)
         offered = show(ctx, listing)
+        listed = True
     except (OSError, ValueError, TypeError, KeyError) as error:
         detail = describe_error(error, "batch-list")
         print("一覧を作れませんでした（" + _text(str(detail.get("reason") or detail.get("error_class"))) + "）。", file=output)
     print(file=output)
-    if offered:
-        print("1. すべて実行する", file=output)
-    print("2. ゲームの状態を詳しく見る（何も変更しません）", file=output)
-    print("3. 個別の操作（新しいゲーム・Protonを置く・ゲームを移す・前のProtonへ戻す・詳細メニュー）", file=output)
-    print("q. 取消", file=output)
-    answer = stream.readline(32).strip()
-    if answer == "2":
-        from preparation_status import interactive_status
-        return interactive_status(directory, renderer, config, **ctx.options(), recipe=recipe, silent_launch=silent_launch)
-    if answer == "3":
-        return individual(directory, renderer, config, ctx)
-    if answer != "1" or not offered:
+    if not (listed and _verified(listing)):
+        # Could not verify: never the same as "nothing to do" (1.0.0).
+        print("照合できなかったため、何も変更していません。", file=output)
+        return 1, None
+    if not offered:
+        return 0, None  # The list already said there is nothing to do.
+    if not confirm(stream, output, "この内容で実行しますか？"):
         print("取り消しました。", file=output)
         return 0, None
     report = {"mode": MODE, "tool_version": VERSION, "preparation_complete": False}
@@ -972,9 +975,14 @@ def interactive_batch(directory, renderer, config, *, input_stream=None, output_
             print("新しいProtonを置きました。移すゲーム・新しく準備するゲームを確かめています。", file=output, flush=True)
             listing = build(ctx)
             if not show(ctx, listing):
+                if not _verified(listing):
+                    # The slot is written; what follows could not be verified (1.0.0).
+                    error = listing["global"].get("error") or {}
+                    report.update(status="stopped-after-placement", stage=error.get("check"),
+                                  reason=error.get("reason") or error.get("error_class"))
+                    print("新しいProtonは置きました。そのあとの照合で止まったため、ゲームの準備・移動はしていません。", file=output)
                 return _finish(ctx, protected, report)
-            print("この内容で実行する場合は1、取消はq: ", end="", file=output, flush=True)
-            if stream.readline(32).strip() != "1":
+            if not confirm(stream, output, "この内容で実行しますか？"):
                 print("取り消しました（新しいProtonは置いたままです）。", file=output)
                 return _finish(ctx, protected, report)
         print("実行しています。操作が終わるまで、ゲームを起動しないでください。", file=output, flush=True)
@@ -1030,7 +1038,7 @@ def _offer_log_copies(ctx, protected, report, listing):
                   file=ctx.output)
             return
         copies = offer_shared_copies(views, statuses, saved=saved, shared_folder=ctx.directory, store_root=ctx.management,
-                                     home=ctx.home, stream=ctx.stream, output=ctx.output, text=_text, labels=labels)
+                                     home=ctx.home, stream=ctx.stream, output=ctx.output, text=_text, labels=labels, yes_no=True)
     except (OSError, ValueError, TypeError, KeyError) as error:
         print("導入のログを写す処理で止まりました（" + type(error).__name__ + "）。結果は保存済みです。", file=ctx.output)
         report["installer_log_copies_error"] = type(error).__name__
@@ -1094,35 +1102,64 @@ def _finish(ctx, protected, report):
     return 2, str(saved)
 
 
-def individual(directory, renderer, config, ctx):
-    """Individual operations: 0.30.0's entries 1-4 with the same numbers, then 5 and 6 (design 3.7)."""
-    output, stream = ctx.output, ctx.stream
-    print("1. 新しいゲームを準備（初期化→（プロファイルにあれば）DLL・ソフト電池→割り当て。途中からの再開も可）", file=output)
-    print("2. ゲームの状態を確認（何も変更しません）", file=output)
-    print("3. 新しいProtonを準備用slotに置く（起動しない）", file=output)
-    print("4. 詳細メニュー（検証用・手動の操作）", file=output)
-    print("5. ゲームを移す（このバンドルの準備用Protonへ）", file=output)
-    print("6. 前のProtonへ戻す（別の準備用Protonへ）", file=output)
+def _verified(listing):
+    """Whether the list could verify the payload, DroidDeck's runtime and the slot (or its absence)."""
+    slot = listing["global"]
+    return slot["payload"] == "verified" and slot["slot"] in ("verified", "absent")
+
+
+def confirm(stream, output, question):
+    """One yes/no answer (1.0.0); anything but y cancels."""
+    print(question + "（y: はい / n: いいえ）: ", end="", file=output, flush=True)
+    return stream.readline(32).strip() in ("y", "Y")
+
+
+ENTRIES = ("prepare", "status", "diagnose", "recovery")
+
+
+def interactive_entry(entry, directory, renderer, config, **options):
+    """The four scripts of 1.0.0, one use each."""
+    require(entry in ENTRIES, "unknown entry")
+    if entry == "prepare":
+        return interactive_batch(directory, renderer, config, **options)
+    if entry == "status":
+        from preparation_status import interactive_status
+        return interactive_status(directory, renderer, config, **options)
+    if entry == "diagnose":
+        from preparation_diagnose import interactive_diagnose
+        return interactive_diagnose(directory, renderer, config, **options)
+    return recovery(directory, renderer, config, **options)
+
+
+def recovery(directory, renderer, config, **options):
+    """recovery.sh: operations used rarely (1.0.0). The batch run does the usual ones."""
+    import sys
+    output = options.get("output_stream") or sys.stdout
+    stream = options.get("input_stream") or sys.stdin
+    print("めったに使わない操作です。ふだんの準備は prepare.sh で行います。", file=output)
+    print("1. 1本だけ準備する（まとめての実行で準備できないゲーム・途中からの再開）", file=output)
+    print("2. ゲームを1本だけ新しいProtonへ移す", file=output)
+    print("3. 前のProtonへ戻す", file=output)
+    print("4. 新しいゲームのprefixを初期化だけする（5の前に。ゲームは起動しません）", file=output)
+    print("5. ソフト電池を画面ありで入れる（使用許諾を画面で読む・画面なしの導入で入らなかったとき）", file=output)
+    print("6. ソフト電池の状態を見る（何も変更しません）", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
-    options = ctx.options()
     if answer == "1":
         from preparation_one_pass import interactive_one_pass
         return interactive_one_pass(directory, renderer, config, **options)
     if answer == "2":
-        from preparation_status import interactive_status
-        return interactive_status(directory, renderer, config, **options)
-    if answer == "3":
-        from preparation_static_placement import interactive_confirmed_placement
-        return interactive_confirmed_placement(directory, renderer, config, **options)
-    if answer == "4":
-        from preparation_probe import detailed_menu
-        return detailed_menu(directory, renderer, config, **options)
-    if answer == "5":
         from preparation_proton_update import interactive_move
         return interactive_move(directory, renderer, config, **options)
-    if answer == "6":
+    if answer == "3":
         from preparation_proton_update import interactive_revert
         return interactive_revert(directory, renderer, config, **options)
+    if answer == "4":
+        from preparation_game_prefix import interactive_game_prefix
+        return interactive_game_prefix(directory, renderer, config, **options)
+    if answer in ("5", "6"):
+        import preparation_dependency_install as dependency
+        action = dependency.interactive_dependency_install if answer == "5" else dependency.interactive_dependency_reinspect
+        return action(directory, renderer, config, **options)
     print("取り消しました。", file=output)
     return 0, None

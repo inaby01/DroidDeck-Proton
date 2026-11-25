@@ -23,6 +23,24 @@ from preparation_common import Invalid
 from preparation_installation import plan_installation
 
 
+
+def extract_fixture(archive, tools, mode):
+    """What the removed manual installer did before its own renames: extract the archive with the
+    data filter (keeping the process umask) and name the folder as SoftDenchi-Proton <version>."""
+    import tarfile
+    import tempfile
+    assert mode == "cleanup"
+    version = archive.name.removeprefix("DroidDeck-Proton-").removesuffix("-aarch64.tar.gz")
+    tools.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".fixture-extract-", dir=tools))
+    with tarfile.open(archive, "r:gz") as package:
+        package.extractall(staging, filter="data")
+    (root,) = list(staging.iterdir())
+    destination = tools / ("SoftDenchi-Proton " + version)
+    root.rename(destination)
+    staging.rmdir()
+    return destination
+
 class InstallationTests(unittest.TestCase):
     def setUp(self):
         self.source = CUSTOM["CustomizationTests"]()
@@ -72,7 +90,7 @@ class InstallationTests(unittest.TestCase):
         # Legacy data_filter extraction under 0077 is separately rejected below.
         previous = os.umask(0o022)
         try:
-            directory = CUSTOM["INSTALLER"]["install"](self.source.archive, directory.parent, "cleanup")
+            directory = extract_fixture(self.source.archive, directory.parent, "cleanup")
         finally:
             os.umask(previous)
         expected = customization.plan_customizations(plan.inventory, self.source.archive.name, "cleanup",
@@ -157,7 +175,7 @@ class InstallationTests(unittest.TestCase):
         plan = self.plan()
         previous = os.umask(0o077)
         try:
-            directory = CUSTOM["INSTALLER"]["install"](self.source.archive, Path(plan.summary()["destination"]).parent, "cleanup")
+            directory = extract_fixture(self.source.archive, Path(plan.summary()["destination"]).parent, "cleanup")
         finally:
             os.umask(previous)
         for name, raw in plan.customization.files.items():

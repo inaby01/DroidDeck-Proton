@@ -61,10 +61,12 @@ For each UID the harness runs the same tests without replacing assertions:
 | Internal tool staging/publication/failure contracts | 27 |
 | Runtime preflight / standalone / native capability probes | 21 |
 | Numbered selection / source pins / report storage/export / short launcher | 33 |
-| Existing installer | 5 |
-| Existing setup | 9 |
+| Slot file rendering (`install-softdenchi.py`) | 3 |
 | Existing observer/cleanup | 74 |
 | Total | 419 |
+
+These counts were recorded in an earlier version and are not kept up to date; each test file
+prints its own count when it runs (1.0.0 removed the manual installer and setup suites).
 
 The script stops at the first failing suite and preserves the raw console error.
 A zero script exit means both UID runs finished; it is not a device preparation

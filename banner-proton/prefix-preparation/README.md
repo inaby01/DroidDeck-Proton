@@ -1,4 +1,30 @@
-# Prefix preparation: offline planning, dependency planning, dedicated trial and managed dependency installation (0.23.0)
+# Prefix preparation (1.0.0, the first operational version)
+
+## Operation in 1.0.0
+
+The bundle emits four scripts instead of one numbered screen; each embeds the same sources and
+runs on its own (`prepare_game.py --emit-selection-script --script-entry <entry>`):
+
+| Script | Use | Writes |
+| --- | --- | --- |
+| `prepare.sh` | The list of 0.31.0's first screen, then one yes/no confirmation runs everything listed (placement, moves, new and resumed preparation). | yes |
+| `status.sh` | The game status check. | result JSON only |
+| `diagnose.sh` | Measures DroidDeck's runtime (OS, the pinned scripts, hook libraries, label, umask, environment presence) and lists each item next to the bundle's `runtime_reference`, with the runtime check's own verdict. For finding what a DroidDeck update changed. | result JSON only |
+| `recovery.sh` | Rare operations: prepare one game (non-ASCII paths, profile choice, resume), move one game, revert to the previous slot, initialize a new prefix only, install SoftDenchi with its screen, read the SoftDenchi state. | per operation |
+
+- Guidance names these scripts (`menu_ref`/`one_pass_ref` map the earlier menus 8, 9, 10 and 12
+  to `recovery.sh` 5, 6, 4 and 1).
+- Detailed menus 1-7 and 11 and the separate placement entry are no longer reachable; their code
+  is removed in the next version (a transition period, design `prefix-preparation-1.0.0-design`).
+- The slot's `user_settings.py` sets only `PROTON_SOFTDENCHI_CLEANUP=1`. Proton's debug log is
+  off; add `PROTON_LOG=1` to one game's environment in DroidDeck to collect it.
+- Only `cleanup` is accepted as installation mode, and only archives named
+  `DroidDeck-Proton-<upstream>-softdenchi-r<N>-aarch64.tar.gz`.
+- The installer log of a preparation is still collected privately (a preparation cannot be
+  repeated after a stop) and copied to the shared folder only after a stop and a confirmation.
+
+## Earlier versions
+
 
 `prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
 inputs without any writes. `--stage-local` separately opts into caching declared
@@ -310,7 +336,7 @@ blocked plan or local staging paused before preparation `2`. A successful
 inspection exit is not preparation completion.
 
 Primary local validation is the [Ubuntu 26.04/arm64 container](container/README.md),
-which runs these tests plus installer/setup/observer regressions as root and nonroot.
+which runs these tests plus the slot-file rendering and observer regressions as root and nonroot.
 From the repository root:
 
 ```bash

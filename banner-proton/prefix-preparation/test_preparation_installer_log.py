@@ -191,6 +191,17 @@ class CopyTests(unittest.TestCase):
         self.assertEqual((done[0]["copied"], done[0]["reason"]), (False, "not-copied:PermissionError"))
         self.assertEqual(list(self.shared.iterdir()), [])
 
+    def test_prepare_sh_asks_yes_or_no(self):
+        view = {"install_id": INSTALL_ID, "app_id": "42", "state": "final", "bytes": 21}
+        for answer, copied in (("1\n", False), ("n\n", False), ("y\n", True)):
+            with self.subTest(answer=answer):
+                output = io.StringIO()
+                done = log.offer_shared_copies([view], {INSTALL_ID: "partial"}, saved=self.shared / "plan-1.json",
+                                               shared_folder=self.shared, store_root=self.store_root, home=self.home,
+                                               stream=io.StringIO(answer), output=output, text=str, yes_no=True)
+                self.assertIn("写しますか？（y: はい / n: いいえ）", output.getvalue())
+                self.assertEqual(done[0]["copied"], copied)
+
     def test_the_game_is_named_in_the_prompt(self):
         view = {"install_id": INSTALL_ID, "app_id": "42", "state": "final", "bytes": 21}
         output = io.StringIO()

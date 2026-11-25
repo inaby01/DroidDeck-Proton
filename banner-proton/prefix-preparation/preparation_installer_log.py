@@ -540,7 +540,8 @@ def _copy_setup_log(folder_fd, source, install_id):
 COPY_LOCK = hashlib.sha256(b"droiddeck-installer-logs").hexdigest()  # One lock file for every shared copy.
 
 
-def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, home, stream, output, text, labels=None):
+def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, home, stream, output, text, labels=None,
+                        yes_no=False):
     """Ask, per eligible log, whether to copy it next to the shared result (design 3.7). Returns the copies made.
 
     ``saved`` must be the shared path of this result; a result kept privately is never accompanied by a copy.
@@ -561,12 +562,12 @@ def offer_shared_copies(views, statuses, *, saved, shared_folder, store_root, ho
         return [{"install_id": view["install_id"], "copied": False, "name": None, "reason": reason} for view in candidates]
     try:
         return _offer(candidates, (info.st_dev, info.st_ino), done, shared_folder, store_root, home, stream, output, text,
-                      labels)
+                      labels, yes_no)
     finally:
         os.close(held)  # Held through every copy, so a folder deleted and made again never matches (Fable medium).
 
 
-def _offer(candidates, confirmed, done, shared_folder, store_root, home, stream, output, text, labels):
+def _offer(candidates, confirmed, done, shared_folder, store_root, home, stream, output, text, labels, yes_no=False):
     from preparation_store import PrivateStore
     for view in candidates:
         install_id = view["install_id"]
@@ -578,8 +579,10 @@ def _offer(candidates, confirmed, done, shared_folder, store_root, home, stream,
               "-setup.log も一緒に写します。", file=output)
         print("端末のパス・ゲームのフォルダー名を含みます。共有のフォルダーに置いたものは、保存・複製された分を回収できません。",
               file=output)
-        print("写す場合は1、写さない場合はq: ", end="", file=output, flush=True)
-        if stream.readline(32).strip() != "1":
+        # prepare.sh's own questions are yes/no (1.0.0). Its rare fallbacks inside a game's preparation (the
+        # interactive installer after an empty silent run, waiting longer for initialization) keep 1/q, as recovery.sh does.
+        print("写しますか？（y: はい / n: いいえ）: " if yes_no else "写す場合は1、写さない場合はq: ", end="", file=output, flush=True)
+        if stream.readline(32).strip() not in (("y", "Y") if yes_no else ("1",)):
             done.append({"install_id": install_id, "copied": False, "reason": "declined"})
             continue
         try:

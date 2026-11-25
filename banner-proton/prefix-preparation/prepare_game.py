@@ -339,12 +339,15 @@ def main():
     parser.add_argument("--runtime-root", type=Path)
     parser.add_argument("--runtime-audit", type=Path)
     parser.add_argument("--probe-temporary", action="store_true", help="opt into temporary/native/GUI probes in preflight mode only")
-    parser.add_argument("--installation-mode", choices=("off", "observe", "cleanup"))
+    parser.add_argument("--installation-mode", choices=("cleanup",))
     parser.add_argument("--selection-config", type=Path)
+    parser.add_argument("--script-entry", choices=("prepare", "status", "diagnose", "recovery"),
+                        help="which script --emit-selection-script writes (1.0.0)")
     parser.add_argument("--selection-directory", type=Path)
     args = parser.parse_args()
     try:
         require(args.select_plan or args.emit_selection_script or args.selection_config is None, "selection config requires selection mode")
+        require(args.emit_selection_script or args.script_entry is None, "script entry requires script emission")
         require(args.select_plan or args.selection_directory is None, "selection directory requires selection mode")
         require(args.inspect_preflight or not args.probe_temporary, "temporary probes require preflight mode")
         require(args.plan_preparation or not any((args.runtime_audit, args.installation_mode)),
@@ -357,11 +360,11 @@ def main():
             require(all((args.assets, args.asset_root, args.dependency_handler, args.dependency_asset)), "dependency planning inputs required")
             result = plan_local_dependency(load_json(args.assets)[0], args.asset_root, args.dependency_asset, args.dependency_handler)
         elif args.select_plan or args.emit_selection_script:
-            allowed = {"select_plan", "emit_selection_script", "selection_config", "selection_directory"}
+            allowed = {"select_plan", "emit_selection_script", "selection_config", "selection_directory", "script_entry"}
             require(not any(value for key, value in vars(args).items() if key not in allowed), "selection is a separate mode")
             config = load_json(args.selection_config)[0] if args.selection_config is not None else None
             if args.emit_selection_script:
-                print(selection_script(config), end="")
+                print(selection_script(config, args.script_entry or "prepare"), end="")
                 return 0
             status, _ = interactive_selection(args.selection_directory or Path.cwd(), _installer_renderer(), config)
             return status
