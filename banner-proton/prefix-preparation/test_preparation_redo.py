@@ -163,7 +163,10 @@ class RedoTests(BATCH['NewGameBatchTests']):
         self.initialize()
         with unittest.mock.patch.object(PrivateStore, 'retire_record', side_effect=OSError('power')):
             _, report, output = self.redo('1\ny\n')
-        self.assertEqual((report['status'], report['prefix']), ('partial', 'moved'), output)
+        self.assertEqual((report['status'], report['prefix'], report['records']), ('partial', 'moved', 'kept'), output)
+        self.assertIn('ツールの記録を移す途中で止まりました', output)
+        self.assertIn('このゲームを選び直してください', output)
+        self.assertNotIn('prepare.sh で新しく準備できます', output)
         self.assertFalse(os.path.lexists(self.game_compat))
         self.assertTrue(self.records('game-prefixes'))
         _, report, output = self.redo('1\ny\n')

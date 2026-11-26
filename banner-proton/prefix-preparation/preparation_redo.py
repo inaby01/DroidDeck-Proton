@@ -331,6 +331,7 @@ def redo(ctx, key, confirmed_prefix):
                 kept = "retired-" + redo_id.removeprefix("redo-")
                 os.rename(work, work.parent / kept)
                 record["work"] = kept
+            record["records"] = "retired"  # Every record and the work folder of this ID are out of the way.
             digest = store.write_record(REDOS, redo_id + ".json", record, digest)
             if again["prefix"]:
                 gone = _remove_tree(moving)
@@ -345,7 +346,7 @@ def redo(ctx, key, confirmed_prefix):
         except FAILURES:
             pass  # The report below still says how far it got.
     report.update(status=record["status"], redo_id=redo_id, retired=record["retired"], prefix=record["prefix"],
-                  work=record.get("work"), **({"error_class": record["error_class"]} if "error_class" in record else {}),
+                  work=record.get("work"), records=record.get("records", "kept"), **({"error_class": record["error_class"]} if "error_class" in record else {}),
                   **({"leftover": str(moving)} if record["prefix"] in ("moved", "removal-incomplete") else {}))
     return report
 
@@ -415,13 +416,20 @@ def interactive_redo(directory, renderer, config, *, input_stream=None, output_s
     if report["status"] == "done":
         print("消しました。prepare.sh を実行すると、このゲームが新しく準備するゲームとして一覧に出ます"
               "（自動で準備できないゲームは、「しないこと」に理由と準備のしかたが出ます）。起動は準備のあとで。", file=output)
-    elif report["status"] == "partial" and report.get("leftover"):
+    elif report["status"] == "partial" and report.get("records") == "retired":
         print("ツールの記録は移しましたが、prefixを消しきれませんでした。残った場所: " + text(report["leftover"]), file=output)
         print("DroidDeckからは見えない名前に変えてあるので、prepare.sh で新しく準備できます。"
               "残りは、次に recovery.sh の7を開いたときにもう一度消します。", file=output)
     elif report["status"] == "partial":
-        print("ツールの記録は移しましたが、ファイルの操作に失敗して途中で止まりました（" + text(str(report.get("error_class"))) +
-              "）。prefixはそのままです。もう一度 recovery.sh の7を実行すると、続きから消します。", file=output)
+        # The records (and the work folder) are not all moved yet: 7 continues with them (1.0.0, 7.5).
+        if report.get("leftover"):
+            head = "prefixはDroidDeckから見えない名前に移しましたが、ツールの記録を移す途中で止まりました（"
+        else:
+            head = "ツールの記録を移す途中で止まりました（"
+        print(head + text(str(report.get("error_class"))) + "）。" +
+              ("prefixはそのままです。" if report.get("prefix") == "present" else "") +
+              "もう一度 recovery.sh の7を実行して、このゲームを選び直してください"
+              "（残ったフォルダーは、そのときに消します）。", file=output)
     else:
         reason = str(report.get("reason") or report.get("error_class"))
         if reason in REASON_TEXT:
