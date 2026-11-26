@@ -142,6 +142,66 @@ class RedoTests(BATCH['NewGameBatchTests']):
                 if not offered:
                     self.assertIn('[ID 42]（ツールが入れた記録のないソフト電池がprefixに入っています', output)
 
+    def test_an_installer_record_does_not_explain_a_prefix_made_again(self):
+        self.initialize()
+        with PrivateStore(self.f.store_root, create=True) as store, store.locked('e' * 64):
+            store.write_record('dependency-installs', 'install-ran.json',
+                               {'schema_version': 1, 'app_id': '42', 'installer': {'status': 'exited'}})
+        import shutil
+        shutil.rmtree(self.game_compat)
+        (self.game_compat / 'pfx/drive_c/windows/ucharge').mkdir(parents=True)  # Made again, set up by hand.
+        _, _, output = self.redo('q\n')
+        self.assertIn('[ID 42]（ツールが入れた記録のないソフト電池がprefixに入っています', output)
+
+    def test_every_softdenchi_trace_counts_and_links_are_not_followed(self):
+        import shutil
+        for trace in ('Program Files/SoftDenchi', 'windows/ucharge'):
+            with self.subTest(trace=trace):
+                (self.game_compat / 'pfx/drive_c' / trace).mkdir(parents=True)
+                _, _, output = self.redo('q\n')
+                self.assertIn('[ID 42]（ツールが入れた記録のないソフト電池がprefixに入っています', output)
+                shutil.rmtree(self.game_compat)
+        elsewhere = self.f.root / 'elsewhere'
+        (elsewhere / 'drive_c').mkdir(parents=True)
+        self.game_compat.mkdir()
+        (self.game_compat / 'pfx').symlink_to(elsewhere)
+        _, _, output = self.redo('q\n')
+        self.assertIn('[ID 42]（prefixの中を読めません', output)
+
+    def test_a_game_started_right_before_the_move_is_not_removed_while_it_runs(self):
+        self.initialize()
+        clear, busy = {'clear_in_view': True}, {'clear_in_view': False}
+        with unittest.mock.patch('preparation_processes.ProcessStopCheck.check', side_effect=[clear, busy]):
+            _, report, output = self.redo('1\ny\n')
+        self.assertEqual((report['status'], report['prefix'], report['records']), ('partial', 'in-use', 'retired'), output)
+        leftover = Path(report['leftover'])
+        self.assertTrue(leftover.is_dir())
+        self.assertIn('ゲームを終了してから recovery.sh の7を開くと、残りを消します', output)
+        with unittest.mock.patch('preparation_processes.ProcessStopCheck.check', return_value=busy):
+            _, _, output = self.redo('q\n')
+        self.assertIn('前回消しきれなかったprefixが残っています', output)
+        self.assertTrue(leftover.is_dir())
+        _, _, output = self.redo('q\n')
+        self.assertIn('前回消しきれなかったprefixを消しました（1件）', output)
+        self.assertFalse(os.path.lexists(leftover))
+
+    def test_a_failed_save_after_moving_the_records_is_reported(self):
+        self.initialize()
+        import shutil
+        shutil.rmtree(self.game_compat)
+        original, calls = PrivateStore.write_record, []
+
+        def failing(store, directory, *args, **kwargs):
+            if directory == redo.REDOS:
+                calls.append(directory)
+                if len(calls) >= 2:
+                    raise OSError('full')
+            return original(store, directory, *args, **kwargs)
+        with unittest.mock.patch.object(PrivateStore, 'write_record', failing):
+            status, report, output = self.redo('1\ny\n')
+        self.assertEqual((status, report['status'], report['records']), (2, 'partial', 'retired'), output)
+        self.assertIn('やり直しの記録を保存できませんでした', output)
+
     def test_a_prefix_that_cannot_be_inspected_is_refused(self):
         (self.game_compat / 'pfx/drive_c').mkdir(parents=True)
         (self.game_compat / 'pfx/drive_c/Program Files (x86)').write_text('not a folder')
@@ -168,8 +228,15 @@ class RedoTests(BATCH['NewGameBatchTests']):
     def test_only_a_folder_named_by_a_redo_record_is_removed_as_a_leftover(self):
         backup = self.game_compat.parent / (redo.REMOVING + 'backup')
         backup.mkdir(parents=True)
+        stopped = self.game_compat.parent / (redo.REMOVING + '2' * 32)
+        stopped.mkdir()
+        with PrivateStore(self.f.store_root, create=True) as store, store.locked('e' * 64):
+            store.write_record(redo.REDOS, 'redo-' + '2' * 32 + '.json',
+                               {'schema_version': 1, 'redo_id': 'redo-' + '2' * 32, 'app_id': '42',
+                                'status': 'stopped', 'prefix': 'present', 'prefix_name': '42'})
         _, _, output = self.redo('q\n')
         self.assertTrue(backup.is_dir())
+        self.assertTrue(stopped.is_dir())
         self.assertNotIn('前回消しきれなかった', output)
 
     def test_an_interruption_after_moving_the_prefix_can_be_redone(self):
