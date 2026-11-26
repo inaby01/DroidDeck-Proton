@@ -30,13 +30,15 @@ REASON_TEXT = {
     "binding-started": "設定の書き換えを始めた記録があります（書き換えが途中で止まった可能性があるため、やり直しません。"
                        "status.sh で確かめてください）",
     "assigned-to-softdenchi-proton": "ソフト電池用のProtonが選ばれています（認証済みの可能性があるため、やり直しません）",
-    "softdenchi-in-unprepared-prefix": "ツールの記録がないprefixにソフト電池が入っています（手作業で準備した可能性があるため、やり直しません）",
+    "softdenchi-in-unprepared-prefix": "ツールが入れた記録のないソフト電池がprefixに入っています（手作業で準備した可能性があるため、やり直しません）",
     "settings-unreadable": "DroidDeckの設定を読めません",
     "records-unreadable": "読めない記録があり、このゲームのものか判断できません",
     "not-a-directory": "prefixの場所がフォルダーではありません",
     "several-prefixes": "このゲームのprefixが、IDの書き方違いで2つあります（どちらのものか判断できないため、やり直しません）",
     "work-folder-unexpected": "このゲームの作業用フォルダーが想定外の形です",
     "game-or-wine-running": "このゲームかWineが動いています。終了してからもう一度実行してください",
+    "changed-since-confirmation": "確認したあとで、このゲームのprefixが変わりました（起動したなど）。もう一度 recovery.sh の7を実行してください",
+    "prefix-unreadable": "prefixの中を読めません（ソフト電池が入っているか確かめられないため、やり直しません）",
 }
 
 
@@ -74,17 +76,21 @@ def _softdenchi_choice(files, key):
 
 
 def _has_softdenchi(compatdata):
-    """Whether SoftDenchi's program folder exists in a prefix (read-only, no links followed)."""
+    """Whether SoftDenchi's program folder exists in a prefix (read-only, no links followed); None when a
+    folder on the way exists but cannot be read (the caller refuses: never treated as absent)."""
     folder = compatdata / "pfx/drive_c"
     for part in ("Program Files (x86)", "SoftDenchi"):
         try:
             with os.scandir(folder) as entries:
-                match = next((entry for entry in entries if entry.name.casefold() == part.casefold()
-                              and entry.is_dir(follow_symlinks=False)), None)
-        except OSError:
+                match = next((entry for entry in entries if entry.name.casefold() == part.casefold()), None)
+        except FileNotFoundError:
             return False
+        except OSError:
+            return None
         if match is None:
             return False
+        if not match.is_dir(follow_symlinks=False):
+            return None  # A link or a file under that name: not what an installer makes.
         folder = folder / match.name
     return True
 
@@ -150,9 +156,16 @@ def candidate(ctx, key, title, files):
     if tool is not None:
         item.update(reason="assigned-to-softdenchi-proton", tool=tool)
         return item
-    if item["prefix"] and not item["records"] and _has_softdenchi(compatdata):
-        item["reason"] = "softdenchi-in-unprepared-prefix"
-        return item
+    if item["prefix"] and not item["records"].get("dependency-installs"):
+        # SoftDenchi that no installation record of the tool explains may have been set up (and authenticated)
+        # by hand, also in a prefix the tool initialized.
+        found = _has_softdenchi(compatdata)
+        if found is None:
+            item["reason"] = "prefix-unreadable"
+            return item
+        if found:
+            item["reason"] = "softdenchi-in-unprepared-prefix"
+            return item
     item["eligible"] = True
     return item
 
@@ -220,25 +233,52 @@ def _remove_tree(path):
 
 
 def remove_leftovers(ctx):
-    """Prefixes an earlier redo renamed but could not remove (hidden ``.prefix-preparation-removing-*``,
-    our own directories in compatdata). Returns (removed, remaining) names."""
+    """Prefixes an earlier redo renamed out of view but did not remove (power loss, a failure, an incomplete
+    removal). Only the hidden folder a ``redos`` record names is removed, under that game's lock.
+    Returns (removed, remaining) names."""
+    from preparation_store import PrivateStore
     parent = safe_path(ctx.steam / "steamapps/compatdata", ctx.steam)
     removed, remaining = [], []
-    try:
-        names = sorted(name for name in os.listdir(parent) if name.startswith(REMOVING))
-    except OSError:
+    if not os.path.lexists(ctx.management):
         return removed, remaining
-    for name in names:
-        path = parent / name
-        if not _own_directory(path):
-            remaining.append(name)
-            continue
-        (removed if _remove_tree(path) else remaining).append(name)
+    with PrivateStore(ctx.management) as store:
+        try:
+            with store.directory((REDOS,)) as fd:
+                names = sorted(store._names(fd))
+        except FileNotFoundError:
+            return removed, remaining
+        for name in names:
+            if name.startswith("tmp-") or not name.endswith(".json"):
+                continue
+            try:
+                record, _ = store.read_record(REDOS, name)
+                moving, key = record["moving"], record["app_id"]
+                require(type(moving) is str and moving.startswith(REMOVING) and os.sep not in moving and
+                        type(key) is str and key.isdigit(), "redo record unexpected")
+            except FAILURES:
+                continue
+            if record.get("prefix") in ("removed", "absent") or not os.path.lexists(parent / moving):
+                continue
+            try:
+                with store.locked(hashlib.sha256(str(parent / key).encode()).hexdigest()):
+                    record, digest = store.read_record(REDOS, name)
+                    path = parent / moving
+                    if not _own_directory(path) or not _remove_tree(path):
+                        remaining.append(moving)
+                        continue
+                    record["prefix"] = "removed"
+                    record.pop("leftover", None)
+                    store.write_record(REDOS, name, record, digest)
+                    removed.append(moving)
+            except FAILURES:
+                remaining.append(moving)
     return removed, remaining
 
 
-def redo(ctx, key):
-    """Under the game's lock: check again, retire the records and the work folder, then remove the prefix.
+def redo(ctx, key, confirmed_prefix):
+    """Under the game's lock: check again, move the prefix out of view, retire the records and the work
+    folder, then remove the prefix. ``confirmed_prefix`` is the prefix name the user confirmed (None for
+    none); a different one now stops before any write.
 
     Returns the report; after the first write it always names the redo ID and how far it got."""
     from preparation_processes import ProcessStopCheck
@@ -257,19 +297,28 @@ def redo(ctx, key):
         if not again["eligible"]:
             report.update(reason=again["reason"])
             return report
+        if again.get("prefix_name") != confirmed_prefix:
+            report.update(reason="changed-since-confirmation")
+            return report
         if again["prefix"]:
             prefix = parent / again["prefix_name"]  # The ID or, for a large ID, its signed form.
         if again["prefix"] and not ProcessStopCheck(prefix).check()["clear_in_view"]:
             report.update(reason="game-or-wine-running")
             return report
         redo_id = "redo-" + secrets.token_hex(16)
+        moving = parent / (REMOVING + redo_id.removeprefix("redo-"))
         record = {"schema_version": 1, "tool_version": VERSION, "redo_id": redo_id, "app_id": key,
                   "created_ns": time.time_ns(), "status": "running", "retired": {},
-                  "prefix": "present" if again["prefix"] else "absent"}
+                  "prefix": "present" if again["prefix"] else "absent", "moving": moving.name}
         digest = store.write_record(REDOS, redo_id + ".json", record)
-        moving = parent / (REMOVING + redo_id.removeprefix("redo-"))
         try:
-            # Records first: an interruption then leaves a prefix without records, which can be redone again.
+            # The prefix first, right after the process check: a game started later gets no prefix of the old
+            # setup, and an interruption leaves the records and a hidden folder this record names (the next
+            # opening of 7 removes the folder, and the records alone can be redone).
+            if again["prefix"]:
+                os.rename(prefix, moving)
+                record["prefix"] = "moved"
+                digest = store.write_record(REDOS, redo_id + ".json", record, digest)
             for directory in RETIRED:
                 names, _ = _records_of(store, directory, key)
                 for name in names:
@@ -284,9 +333,6 @@ def redo(ctx, key):
                 record["work"] = kept
             digest = store.write_record(REDOS, redo_id + ".json", record, digest)
             if again["prefix"]:
-                os.rename(prefix, moving)  # Out of DroidDeck's view first, in the same folder.
-                record["prefix"] = "moved"
-                digest = store.write_record(REDOS, redo_id + ".json", record, digest)
                 gone = _remove_tree(moving)
                 record["prefix"] = "removed" if gone else "removal-incomplete"
                 if not gone:
@@ -361,7 +407,7 @@ def interactive_redo(directory, renderer, config, *, input_stream=None, output_s
         return 0, None
     protected = [ctx.steam, ctx.settings]
     try:
-        report = redo(ctx, chosen["app_id"])
+        report = redo(ctx, chosen["app_id"], chosen.get("prefix_name"))
     except FAILURES as error:
         from preparation_dependency_install import describe_error
         report = {"mode": MODE, "tool_version": VERSION, "app_id": chosen["app_id"], "status": "stopped",

@@ -26,21 +26,25 @@ runs on its own (`prepare_game.py --emit-selection-script --script-entry <entry>
   with a prefix (its ID, or for a large ID the signed form), tool records or a private work folder
   of its ID, when there is no binding record of that ID (it never reached "ready"). Not offered when
   a record that may belong to it cannot be read, when DroidDeck's settings cannot be read or choose
-  a SoftDenchi Proton for it, when a prefix without tool records holds SoftDenchi (it may have been
-  prepared by hand), when both prefix forms exist, or when the prefix or the work folder is not our
-  own directory. A running game or Wine in the prefix stops it, rechecked under the lock. After one
-  confirmation the tool's records of that ID move to `retired/<redo id>/` in the private store
-  (never deleted), the private work folder is renamed to `retired-<id>`, and the prefix is renamed
-  out of DroidDeck's view and removed without following links; a leftover is removed again the next
-  time 7 is opened. The next `prepare.sh` lists the game as new. Saves in the game folder are not
-  touched; the SoftDenchi authentication inside the prefix is gone. Guidance that used to say
-  "register again under another name" points here.
+  a SoftDenchi Proton for it, when the prefix holds SoftDenchi that no installation record of the
+  tool explains (it may have been set up by hand) or cannot be inspected, when both prefix forms
+  exist, or when the prefix or the work folder is not our own directory. Under the lock it checks
+  again, stops if the prefix differs from the one confirmed or a game or Wine runs in it, then
+  renames the prefix out of DroidDeck's view, moves the tool's records of that ID to
+  `retired/<redo id>/` in the private store (never deleted), renames the private work folder to
+  `retired-<id>`, and removes the prefix without following links. A hidden folder that a `redos`
+  record names and that is still there is removed the next time 7 is opened; an interruption
+  before the records moved leaves the records alone, which 7 offers again. The next `prepare.sh`
+  lists the game as new. Saves in the game folder are not touched; the SoftDenchi authentication
+  inside the prefix is gone. Guidance that used to say "register again under another name" points
+  here.
 - An interrupted placement of the bundle slot (an installation record left `running` or
   `needs-inspection`) is listed by `prepare.sh` as "finish the placement record". Under the slot
-  lock the tree is verified again, then each record is finished on its own: a `publish-intent` or
-  `published` record becomes `installed-tree-verified` when its staging wrapper is gone or empty; a
-  `publish-intent` record whose tree is still in staging, and an earlier running record, become
-  `failed` (staging kept). The slot then counts as placed, so a later Proton update can move games
+  lock the tree is verified again, then each record is finished on its own: a `publish-intent`,
+  `published` or `post-verified` record becomes `installed-tree-verified` when its staging wrapper
+  is gone or empty; a `publish-intent` record whose tree is still in staging, and an earlier
+  running record, become `failed` (staging kept). A run that finishes only some records shows
+  them as partly finished and goes on. The slot then counts as placed, so a later Proton update can move games
   from it. A matching slot with no record that this tool placed it is not finished; the list names
   it under "しないこと".
 

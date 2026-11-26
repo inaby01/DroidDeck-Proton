@@ -657,11 +657,12 @@ def _finish_placement_locked(ctx, listing):
                     # The tree never left its staging folder: this record did not publish (the slot in place is
                     # another placement's). Its staging folder is kept, as on any failure.
                     record.update(status="failed", phase="tree-verified", published=False)
-                elif record["phase"] in ("publish-intent", "published") and not holds_tree:
+                elif record["phase"] in ("publish-intent", "published", "post-verified") and not holds_tree:
+                    # post-verified: the writer's last save failed and its retry kept needs-inspection.
                     if os.path.lexists(staging):
                         os.rmdir(staging)  # Only the empty wrapper the placement would have removed last.
                     record.update(status="installed-tree-verified", phase="post-verified", published=True)
-                elif record["phase"] in ("publish-intent", "published"):
+                elif record["phase"] in ("publish-intent", "published", "post-verified"):
                     left += 1  # Published, yet its staging folder is not empty: left for inspection.
                     continue
                 else:
@@ -900,7 +901,10 @@ def show_outcomes(ctx, report, listing):
         reason = entry.get("reason") or (entry.get("error") or {}).get("reason") or \
             (entry.get("error") or {}).get("error_class") or ",".join(entry.get("blockers", []))
         reason = OUTCOME_TEXT.get(reason, reason)
-        print("  " + label + ": " + OUTCOMES[entry["outcome"]] + (f"（{_text(str(reason))}）" if reason else ""), file=output)
+        state = OUTCOMES[entry["outcome"]]
+        if item["kind"] == "finish-placement" and entry.get("state") == "partial":
+            state = "一部だけ仕上げ・要確認"  # Some records were finished; the run goes on (the slot is verified).
+        print("  " + label + ": " + state + (f"（{_text(str(reason))}）" if reason else ""), file=output)
         if entry.get("run_stopped"):
             print("    このゲームによらない理由で止まったため、このあとのゲームは実行していません。", file=output)
         if entry["outcome"] in ("partial", "running"):

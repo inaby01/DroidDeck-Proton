@@ -123,6 +123,54 @@ class RedoTests(BATCH['NewGameBatchTests']):
         self.assertTrue(signed.is_dir() and self.game_compat.is_dir())
         shutil.rmtree(signed)
 
+    def test_softdenchi_in_an_initialized_prefix_without_an_install_record_is_refused(self):
+        self.initialize()
+        (self.game_compat / 'pfx/drive_c/Program Files (x86)/SoftDenchi').mkdir(parents=True)
+        _, _, output = self.redo('q\n')
+        self.assertIn('[ID 42]（ツールが入れた記録のないソフト電池がprefixに入っています', output)
+
+    def test_a_prefix_that_cannot_be_inspected_is_refused(self):
+        (self.game_compat / 'pfx/drive_c').mkdir(parents=True)
+        (self.game_compat / 'pfx/drive_c/Program Files (x86)').write_text('not a folder')
+        _, _, output = self.redo('q\n')
+        self.assertIn('[ID 42]（prefixの中を読めません', output)
+        self.assertTrue(self.game_compat.is_dir())
+
+    def test_a_prefix_that_appears_after_the_confirmation_is_not_removed(self):
+        self.initialize()
+        import shutil
+        shutil.rmtree(self.game_compat)
+        import preparation_batch as batch_module
+        original = batch_module.confirm
+
+        def launched(*args):
+            self.game_compat.mkdir()  # The game was started and closed before the answer.
+            return original(*args)
+        with unittest.mock.patch.object(batch_module, 'confirm', side_effect=launched):
+            _, report, output = self.redo('1\ny\n')
+        self.assertEqual((report['status'], report['reason']), ('stopped', 'changed-since-confirmation'), output)
+        self.assertTrue(self.game_compat.is_dir())
+        self.assertTrue(self.records('game-prefixes'))
+
+    def test_only_a_folder_named_by_a_redo_record_is_removed_as_a_leftover(self):
+        backup = self.game_compat.parent / (redo.REMOVING + 'backup')
+        backup.mkdir(parents=True)
+        _, _, output = self.redo('q\n')
+        self.assertTrue(backup.is_dir())
+        self.assertNotIn('前回消しきれなかった', output)
+
+    def test_an_interruption_after_moving_the_prefix_can_be_redone(self):
+        self.initialize()
+        with unittest.mock.patch.object(PrivateStore, 'retire_record', side_effect=OSError('power')):
+            _, report, output = self.redo('1\ny\n')
+        self.assertEqual((report['status'], report['prefix']), ('partial', 'moved'), output)
+        self.assertFalse(os.path.lexists(self.game_compat))
+        self.assertTrue(self.records('game-prefixes'))
+        _, report, output = self.redo('1\ny\n')
+        self.assertIn('前回消しきれなかったprefixを消しました（1件）', output)
+        self.assertEqual((report['status'], report['prefix'], report['retired']), ('done', 'absent', {'game-prefixes': 1}))
+        self.assertFalse([path for path in self.game_compat.parent.iterdir() if path.name.startswith(redo.REMOVING)])
+
     def test_cancel_and_a_running_game_change_nothing(self):
         self.initialize()
         before = self.records('game-prefixes')
@@ -158,7 +206,7 @@ class RedoTests(BATCH['NewGameBatchTests']):
     def test_softdenchi_setups_are_never_offered(self):
         (self.game_compat / 'pfx/drive_c/Program Files (x86)/SoftDenchi').mkdir(parents=True)
         _, _, output = self.redo('q\n')
-        self.assertIn('[ID 42]（ツールの記録がないprefixにソフト電池が入っています', output)
+        self.assertIn('[ID 42]（ツールが入れた記録のないソフト電池がprefixに入っています', output)
         import preparation_proton_update as update_module
         chosen = {'config': 'SoftDenchi-Proton-11-12.8-softdenchi3-cleanup2', 'games': None, 'applied': None}
         with unittest.mock.patch.object(update_module, 'current_selection', return_value=chosen):
@@ -208,7 +256,8 @@ class FinishPlacementTests(BATCH['NewGameBatchTests']):
 
     def interrupt(self, phase, status='running', staging=None):
         """Leave a placement record of the bundle slot as an interrupted run would."""
-        record = UPDATE['installation_record'](self.bundle(), status=status, published=phase == 'published', phase=phase)
+        record = UPDATE['installation_record'](self.bundle(), status=status,
+                                                published=phase in ('published', 'post-verified'), phase=phase)
         with PrivateStore(self.f.store_root, create=True) as store, store.locked('e' * 64):
             store.write_record('installations', record['installation_id'] + '.json', record)
         if staging is not None:
@@ -288,6 +337,20 @@ class FinishPlacementTests(BATCH['NewGameBatchTests']):
         self.first_screen('1\n')
         _, _, listed = self.first_screen('q\n')
         self.assertNotIn('ツールが置いた記録がありません', listed)
+
+    def test_a_post_verified_record_left_for_inspection_is_finished(self):
+        record = self.interrupt('post-verified', status='needs-inspection')
+        status, report, output = self.first_screen('1\n')
+        self.assertEqual(report['items'][0]['outcome'], 'done', output)
+        self.assertEqual(self.record(record)['status'], 'installed-tree-verified')
+        self.assertIsNotNone(self.placed())
+
+    def test_a_partly_finished_placement_is_shown_as_such(self):
+        self.interrupt('published', staging=True)
+        self.interrupt('published', staging=False)
+        status, report, output = self.first_screen('1\n')
+        self.assertEqual(report['items'][0]['state'], 'partial', output)
+        self.assertIn('置いた記録の仕上げ: 一部だけ仕上げ・要確認', output)
 
     def test_a_changed_slot_is_never_finished(self):
         record = self.interrupt('published')
