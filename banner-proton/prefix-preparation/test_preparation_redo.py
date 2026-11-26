@@ -207,10 +207,27 @@ class RedoTests(BATCH['NewGameBatchTests']):
         with unittest.mock.patch.object(redo, '_fsync_directory', side_effect=OSError('io')):
             _, report, output = self.redo('1\ny\n')
         self.assertEqual((report['status'], report['prefix'], report['records']), ('partial', 'moved', 'kept'), output)
-        self.assertTrue(Path(report['leftover']).is_dir())
+        leftover = Path(report['leftover'])
+        self.assertTrue(leftover.is_dir())
         self.assertNotIn('prefixはそのままです', output)
+        self.assertIn('見えない名前に移しましたが、そのあと途中で止まりました', output)
+        self.assertIn('（残ったフォルダーを消します）', output)
         _, report, output = self.redo('1\ny\n')
+        self.assertIn('前回消しきれなかったprefixを消しました（1件）', output)
+        self.assertFalse(os.path.lexists(leftover))
         self.assertEqual(report['status'], 'done', output)
+
+    def test_a_failed_sync_for_a_prefix_without_records_leaves_nothing_to_choose(self):
+        (self.game_compat / 'pfx').mkdir(parents=True)  # Made by a launch before any preparation.
+        with unittest.mock.patch.object(redo, '_fsync_directory', side_effect=OSError('io')):
+            _, report, output = self.redo('1\ny\n')
+        self.assertEqual((report['status'], report['prefix'], report['retired']), ('partial', 'moved', {}), output)
+        self.assertNotIn('選び直して', output)
+        _, report, output = self.redo('q\n')
+        self.assertIn('前回消しきれなかったprefixを消しました（1件）', output)
+        self.assertFalse([line for line in output.splitlines() if line[:1].isdigit() and '[ID 42]' in line], output)
+        self.assertNotIn('[ID 42]', output)
+        self.assertFalse(os.path.lexists(self.game_compat))
 
     def test_a_prefix_that_cannot_be_inspected_is_refused(self):
         (self.game_compat / 'pfx/drive_c').mkdir(parents=True)
@@ -254,8 +271,8 @@ class RedoTests(BATCH['NewGameBatchTests']):
         with unittest.mock.patch.object(PrivateStore, 'retire_record', side_effect=OSError('power')):
             _, report, output = self.redo('1\ny\n')
         self.assertEqual((report['status'], report['prefix'], report['records']), ('partial', 'moved', 'kept'), output)
-        self.assertIn('ツールの記録を移す途中で止まりました', output)
-        self.assertIn('このゲームを選び直してください', output)
+        self.assertIn('見えない名前に移しましたが、そのあと途中で止まりました', output)
+        self.assertIn('一覧にこのゲームがまた出たら、選んで続きを行ってください', output)
         self.assertNotIn('prepare.sh で新しく準備できます', output)
         self.assertFalse(os.path.lexists(self.game_compat))
         self.assertTrue(self.records('game-prefixes'))

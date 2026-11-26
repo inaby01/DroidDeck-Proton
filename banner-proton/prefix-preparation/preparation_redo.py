@@ -493,14 +493,17 @@ def interactive_redo(directory, renderer, config, *, input_stream=None, output_s
               text(str(report.get("error_class"))) + "）。prepare.sh で新しく準備できます。", file=output)
     elif report["status"] == "partial":
         # The records (and the work folder) are not all moved yet: 7 continues with them (1.0.0, 7.5).
+        # Whether the game is listed again depends on what is left (records or the work folder), so the
+        # guidance does not promise it.
         if report.get("leftover"):
-            head = "prefixはDroidDeckから見えない名前に移しましたが、ツールの記録を移す途中で止まりました（"
+            head = "prefixはDroidDeckから見えない名前に移しましたが、そのあと途中で止まりました（"
         else:
             head = "ツールの記録を移す途中で止まりました（"
         print(head + text(str(report.get("error_class"))) + "）。" +
               ("prefixはそのままです。" if report.get("prefix") == "present" else "") +
-              "もう一度 recovery.sh の7を実行して、このゲームを選び直してください"
-              "（残ったフォルダーは、そのときに消します）。", file=output)
+              "もう一度 recovery.sh の7を開いてください" +
+              ("（残ったフォルダーを消します）。" if report.get("leftover") else "。") +
+              "一覧にこのゲームがまた出たら、選んで続きを行ってください。", file=output)
     else:
         reason = str(report.get("reason") or report.get("error_class"))
         if reason in REASON_TEXT:
