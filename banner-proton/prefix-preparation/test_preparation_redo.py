@@ -202,6 +202,16 @@ class RedoTests(BATCH['NewGameBatchTests']):
         self.assertEqual((status, report['status'], report['records']), (2, 'partial', 'retired'), output)
         self.assertIn('やり直しの記録を保存できませんでした', output)
 
+    def test_a_failed_sync_after_the_move_still_names_the_hidden_folder(self):
+        self.initialize()
+        with unittest.mock.patch.object(redo, '_fsync_directory', side_effect=OSError('io')):
+            _, report, output = self.redo('1\ny\n')
+        self.assertEqual((report['status'], report['prefix'], report['records']), ('partial', 'moved', 'kept'), output)
+        self.assertTrue(Path(report['leftover']).is_dir())
+        self.assertNotIn('prefixはそのままです', output)
+        _, report, output = self.redo('1\ny\n')
+        self.assertEqual(report['status'], 'done', output)
+
     def test_a_prefix_that_cannot_be_inspected_is_refused(self):
         (self.game_compat / 'pfx/drive_c').mkdir(parents=True)
         (self.game_compat / 'pfx/drive_c/Program Files (x86)').write_text('not a folder')

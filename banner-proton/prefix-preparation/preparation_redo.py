@@ -375,8 +375,8 @@ def redo(ctx, key, confirmed_prefix):
             # opening of 7 removes the folder, and the records alone can be redone).
             if again["prefix"]:
                 os.rename(prefix, moving)
+                record["prefix"] = "moved"  # Before the sync: a failed sync still reports the hidden folder.
                 _fsync_directory(parent)  # Before the records move: a rolled-back rename would leave them gone.
-                record["prefix"] = "moved"
                 digest = store.write_record(REDOS, redo_id + ".json", record, digest)
             for directory in RETIRED:
                 names, _ = _records_of(store, directory, key)
