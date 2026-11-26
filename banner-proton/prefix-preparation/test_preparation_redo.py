@@ -129,6 +129,19 @@ class RedoTests(BATCH['NewGameBatchTests']):
         _, _, output = self.redo('q\n')
         self.assertIn('[ID 42]（ツールが入れた記録のないソフト電池がprefixに入っています', output)
 
+    def test_only_a_run_of_the_tool_installer_explains_softdenchi_in_the_prefix(self):
+        self.initialize()
+        (self.game_compat / 'pfx/drive_c/Program Files (x86)/SoftDenchi').mkdir(parents=True)
+        for installer, offered in (('staged', False), ('exited', True)):
+            with self.subTest(installer=installer):
+                with PrivateStore(self.f.store_root, create=True) as store, store.locked('e' * 64):
+                    store.write_record('dependency-installs', 'install-' + installer + '.json',
+                                       {'schema_version': 1, 'app_id': '42', 'installer': {'status': installer}})
+                _, _, output = self.redo('q\n')
+                self.assertEqual('1. Example [ID 42]' in output, offered, output)
+                if not offered:
+                    self.assertIn('[ID 42]（ツールが入れた記録のないソフト電池がprefixに入っています', output)
+
     def test_a_prefix_that_cannot_be_inspected_is_refused(self):
         (self.game_compat / 'pfx/drive_c').mkdir(parents=True)
         (self.game_compat / 'pfx/drive_c/Program Files (x86)').write_text('not a folder')
@@ -310,6 +323,8 @@ class FinishPlacementTests(BATCH['NewGameBatchTests']):
         entry = report['items'][0]
         self.assertEqual((entry['kind'], entry['outcome'], entry['reason']),
                          ('finish-placement', 'skipped', 'placement-record-not-finished'), output)
+        self.assertEqual(entry['state'], 'not-finished')
+        self.assertIn('置いた記録の仕上げ: 書き込み前に中止', output)
         self.assertEqual(self.record(record)['status'], 'running')
 
     def test_a_publish_intent_whose_tree_is_still_staged_did_not_publish(self):

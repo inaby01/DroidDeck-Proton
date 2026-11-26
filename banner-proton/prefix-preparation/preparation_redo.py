@@ -128,7 +128,7 @@ def candidate(ctx, key, title, files):
     if os.path.lexists(work) and not _own_directory(work):
         item["reason"] = "work-folder-unexpected"
         return item
-    unreadable = 0
+    unreadable, installer_ran = 0, False
     if os.path.lexists(ctx.management):
         with PrivateStore(ctx.management) as store:
             bindings, unreadable = _records_of(store, BINDINGS, key)
@@ -146,6 +146,15 @@ def candidate(ctx, key, title, files):
                 unreadable += more
                 if names:
                     item["records"][directory] = len(names)
+                if directory == "dependency-installs":
+                    for name in names:
+                        try:
+                            installer = store.read_record(directory, name)[0]["installer"]["status"]
+                        except FAILURES:
+                            unreadable += 1
+                            continue
+                        # "running" is saved before the installer is spawned (preparation_dependency_install).
+                        installer_ran |= installer not in ("not-started", "staged")
     if unreadable:
         item["reason"] = "records-unreadable"
         return item
@@ -156,9 +165,9 @@ def candidate(ctx, key, title, files):
     if tool is not None:
         item.update(reason="assigned-to-softdenchi-proton", tool=tool)
         return item
-    if item["prefix"] and not item["records"].get("dependency-installs"):
-        # SoftDenchi that no installation record of the tool explains may have been set up (and authenticated)
-        # by hand, also in a prefix the tool initialized.
+    if item["prefix"] and not installer_ran:
+        # SoftDenchi that no run of the tool's installer explains may have been set up (and authenticated)
+        # by hand, also in a prefix the tool initialized or a tool install that stopped before its installer.
         found = _has_softdenchi(compatdata)
         if found is None:
             item["reason"] = "prefix-unreadable"
@@ -300,17 +309,23 @@ def redo(ctx, key, confirmed_prefix):
         if again.get("prefix_name") != confirmed_prefix:
             report.update(reason="changed-since-confirmation")
             return report
-        if again["prefix"]:
-            prefix = parent / again["prefix_name"]  # The ID or, for a large ID, its signed form.
-        if again["prefix"] and not ProcessStopCheck(prefix).check()["clear_in_view"]:
-            report.update(reason="game-or-wine-running")
-            return report
         redo_id = "redo-" + secrets.token_hex(16)
         moving = parent / (REMOVING + redo_id.removeprefix("redo-"))
         record = {"schema_version": 1, "tool_version": VERSION, "redo_id": redo_id, "app_id": key,
                   "created_ns": time.time_ns(), "status": "running", "retired": {},
                   "prefix": "present" if again["prefix"] else "absent", "moving": moving.name}
+        # Written before the process check, so nothing but the check stands between it and the rename.
         digest = store.write_record(REDOS, redo_id + ".json", record)
+        if again["prefix"]:
+            prefix = parent / again["prefix_name"]  # The ID or, for a large ID, its signed form.
+            if not ProcessStopCheck(prefix).check()["clear_in_view"]:
+                record.update(status="stopped", reason="game-or-wine-running")
+                try:
+                    store.write_record(REDOS, redo_id + ".json", record, digest)
+                except FAILURES:
+                    pass
+                report.update(reason="game-or-wine-running")
+                return report
         try:
             # The prefix first, right after the process check: a game started later gets no prefix of the old
             # setup, and an interruption leaves the records and a hidden folder this record names (the next

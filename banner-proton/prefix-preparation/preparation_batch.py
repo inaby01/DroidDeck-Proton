@@ -643,7 +643,7 @@ def _finish_placement_locked(ctx, listing):
     with PrivateStore(ctx.management, create=True) as store, \
             store.locked(hashlib.sha256(str(tool).encode()).hexdigest()):
         verify_fex_runtime_tree(tool, listing["inventory"], listing["customization"].overlays)
-        left = 0
+        left = changed = 0
         for name, record, digest in unfinished_placements(store, bundle):
             try:
                 staging = tools / record["staging_name"]
@@ -669,10 +669,11 @@ def _finish_placement_locked(ctx, listing):
                     record.update(status="failed")
                 validate_installation_record(record, any_version=True)
                 store.write_record("installations", name, record, digest)
+                changed += 1
             except (OSError, Invalid, TypeError, KeyError, ValueError):
                 left += 1  # The other records are still finished.
     if left:
-        return "partial"
+        return "partial" if changed else "not-finished"
     return "finished"
 
 
