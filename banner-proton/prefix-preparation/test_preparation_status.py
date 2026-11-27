@@ -378,7 +378,12 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
             listed = store.inventory()['game_prefixes']
         self.assertEqual(len(listed), 1)
         games = json.loads(self.f.added.read_bytes())
-        self.f.added.write_text(json.dumps([game for game in games if game['appid'] != 42]))
+        other = self.f.root / 'other-game' / 'Other.exe'
+        other.parent.mkdir()
+        other.write_bytes(self.f.exe.read_bytes() + b'other')
+        # Another registration stays, so the list itself is not empty.
+        self.f.added.write_text(json.dumps([game for game in games if game['appid'] != 42] +
+                                           [{'appid': 77, 'exe': str(other), 'name': 'Other'}]))
         _, report, output = self.status()
         self.assertEqual(self.entry(report)['next'], {'next': 'not-listed', 'reason': 'registration-missing'})
         self.assertIn('（登録が見つかりません）', output)
@@ -408,11 +413,10 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
 
     def test_archive_is_read_once_and_the_inventory_is_only_for_game_prefixes(self):
         self.initialize()
-        with patch.object(recheck, 'inspect_archive_from_folder', wraps=recheck.inspect_archive_from_folder) as loose, \
-                patch.object(recheck, 'inspect_archive', wraps=recheck.inspect_archive) as strict:
+        with patch.object(recheck, 'inspect_archive_from_folder', wraps=recheck.inspect_archive_from_folder) as loose:
             _, report, _ = self.status()
         self.assertEqual(self.entry(report)['next']['next'], 'continue')
-        self.assertEqual((loose.call_count, strict.call_count), (1, 0))
+        self.assertEqual(loose.call_count, 1)
         with patch.object(recheck, 'inspect_archive_from_folder', wraps=recheck.inspect_archive_from_folder) as loose:
             _, menu, _, _ = self.run_menu('1\n1\nq\n')
         self.assertIsNone(menu)
@@ -422,8 +426,6 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         common = {'config': self.config, 'directory': self.f.fixture.source.root, 'renderer': self.f.fixture.options['renderer'],
                   'source': source, 'games': games, 'steam': self.f.steam, 'settings': self.f.settings, 'home': self.home,
                   'environment': self.environment, 'runtime_root': self.f.root}
-        with self.assertRaisesRegex(status.require.__globals__['Invalid'], 'probe trials read their archive themselves'):
-            recheck.plan_recheck(record=self.trial_record, record_sha256=self.trial_digest, inventory=inventory, **common)
         record, digest = self.game_record()
         other = dataclasses.replace(inventory, archive_sha512='0' * 128)
         with self.assertRaisesRegex(status.require.__globals__['Invalid'], 'payload inventory differs'):
@@ -571,18 +573,12 @@ class DllStatusTests(StatusMixin, ONE['PrefixDllOnePassTests']):
         archive = self.f.fixture.source.archive.name
         self.assertTrue({archive, 'mfc42.dll', 'sdrt-fixture.exe'} <= set(touched), touched)
 
-    def test_resume_passes_while_asset_timestamps_change_and_the_probe_recheck_stays_strict(self):
+    def test_resume_passes_while_asset_timestamps_change(self):
         self.initialize()
         with FOLDER['touching_asset_folder'](self.f.fixture.source.root) as touched:
             _, report, output, _ = self.run_menu('1\n1\n1\n')
             self.assertEqual(report['status'], 'ready-to-launch', output)
             self.assertIn(self.f.fixture.source.archive.name, touched)
-            source, _, games = ONE['GAME']['DEP']['TRIAL']['BASE']['selection'].registration_catalog(self.environment)
-            with self.assertRaisesRegex(status.require.__globals__['Invalid'], r'input changed during read \(mtime_ns'):
-                recheck.plan_recheck(record=self.trial_record, record_sha256=self.trial_digest, config=self.config,
-                    directory=self.f.fixture.source.root, renderer=self.f.fixture.options['renderer'], source=source,
-                    games=games, steam=self.f.steam, settings=self.f.settings, home=self.home, environment=self.environment,
-                    runtime_root=self.f.root)
 
     def test_a_binding_that_cannot_follow_stops_before_the_dll_and_softdenchi_are_written(self):
         self.use_folder_dependency()

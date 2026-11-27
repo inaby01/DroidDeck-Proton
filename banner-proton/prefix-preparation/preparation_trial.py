@@ -35,7 +35,6 @@ from preparation_payload import runtime_writes, verify_fex_runtime_tree
 from preparation_processes import ProcessStopCheck
 from preparation_static_placement import _private_xalia_context
 
-SCOPE = "dedicated-new-prefix-initialization-trial"
 RESERVE = 1024**3
 
 
@@ -50,7 +49,7 @@ class TrialPlan:
     baseline_bytes: int
 
     def summary(self):
-        return {"scope": SCOPE, "input_digest": self.digest, "app_id": self.placement.installation.target.registration_id,
+        return {"input_digest": self.digest, "app_id": self.placement.installation.target.registration_id,
                 "command": list(OPERATIONS["initialize"]), "prefix": str(self.compatdata),
                 "work": str(self.work), "home": str(self.private_home), "baseline_bytes": self.baseline_bytes,
                 "growth_reserve_bytes": RESERVE, "growth_upper_bound_known": False,
@@ -90,7 +89,8 @@ def _new_private(path, anchor):
         os.close(fd)
 
 
-def validate_trial_record(record, scope=SCOPE, id_prefix="trial-"):
+def validate_trial_record(record, scope, id_prefix):
+    """A registered-game prefix initialization record (``scope``, ``id_prefix`` of preparation_game_prefix)."""
     fields(record, ("schema_version", "tool_version", "scope", "trial_id", "app_id", "input_digest", "status", "phase",
                     "exit_code", "prefix_version_sha256", "runtime_execution_verified", "device_namespace_verified",
                     "preparation_complete"),
@@ -99,23 +99,20 @@ def validate_trial_record(record, scope=SCOPE, id_prefix="trial-"):
     if "vc_runtime_fingerprint" in record:
         from preparation_vc_record import validate_initial
         validate_initial(record["vc_runtime_fingerprint"])
-    require(("profile" in record) == (scope != SCOPE), "game records require a profile; probe trials carry none")
-    if "profile" in record:
-        fields(record["profile"], ("profile_id", "revision", "profile_digest", "exe_sha256", "exe_size", "selection",
-                                   "exe_path_sha256", "title_sha256"))
-        require(all(type(record["profile"][name]) is str and SHA256.fullmatch(record["profile"][name]) for name in
-                    ("exe_sha256", "profile_digest", "exe_path_sha256", "title_sha256")) and
-                type(record["profile"]["exe_size"]) is int and record["profile"]["exe_size"] > 0 and
-                record["profile"]["selection"] in ("operator-selected-unverified", "profile-hash-matched"),
-                "invalid game profile binding")
-        # The created prefix directory is recorded before spawn and is required from then on.
-        require(("prefix_identity" in record) == (record["phase"] in ("spawn", "waiting", "deadline-child-not-killed",
-                                                                      "post-checks")), "game prefix identity inconsistent")
-        # The WINEPREFIX identity is recorded with a successful initialization only.
-        require(("wineprefix_identity" in record) == (record["status"] == "initialized-unverified"),
-                "game Wine prefix identity inconsistent")
-    else:
-        require("prefix_identity" not in record and "wineprefix_identity" not in record, "probe trials carry no prefix identity")
+    require("profile" in record, "game records require a profile")
+    fields(record["profile"], ("profile_id", "revision", "profile_digest", "exe_sha256", "exe_size", "selection",
+                               "exe_path_sha256", "title_sha256"))
+    require(all(type(record["profile"][name]) is str and SHA256.fullmatch(record["profile"][name]) for name in
+                ("exe_sha256", "profile_digest", "exe_path_sha256", "title_sha256")) and
+            type(record["profile"]["exe_size"]) is int and record["profile"]["exe_size"] > 0 and
+            record["profile"]["selection"] in ("operator-selected-unverified", "profile-hash-matched"),
+            "invalid game profile binding")
+    # The created prefix directory is recorded before spawn and is required from then on.
+    require(("prefix_identity" in record) == (record["phase"] in ("spawn", "waiting", "deadline-child-not-killed",
+                                                                  "post-checks")), "game prefix identity inconsistent")
+    # The WINEPREFIX identity is recorded with a successful initialization only.
+    require(("wineprefix_identity" in record) == (record["status"] == "initialized-unverified"),
+            "game Wine prefix identity inconsistent")
     for name in ("prefix_identity", "wineprefix_identity"):
         if name in record:
             fields(record[name], ("device", "inode"))
@@ -147,8 +144,8 @@ class TrialSession:
     all created paths. Existing trials are never adopted or automatically retried.
     """
 
-    # Subclasses reuse the same guarded flow for another explicit scope and journal.
-    scope, records, id_prefix = SCOPE, "trials", "trial-"
+    # The subclass (preparation_game_prefix.GamePrefixSession) names its scope and journal.
+    scope = records = id_prefix = None
 
     def __init__(self, plan, store, refresh, confirmed_digest, stop_check):
         self.plan, self.store, self.refresh = plan, store, refresh

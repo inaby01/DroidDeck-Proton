@@ -1,8 +1,7 @@
 """Registered game: initialize a never-launched new prefix with the reviewed preparation slot.
 
-This is the game-registration counterpart of the dedicated probe trial. It reuses
-the same guarded session (fixed builtin initialization, no forced termination, no
-retry, no adoption of existing prefixes). Existing prefixes stay read-only. A game
+It uses the guarded session of preparation_trial (fixed builtin initialization, no forced
+termination, no retry, no adoption of existing prefixes). Existing prefixes stay read-only. A game
 profile is bound to the record; dependencies and binding are separate steps.
 """
 
@@ -46,7 +45,7 @@ ID_PREFIX = "gprefix-"
 HANDLERS = ("softdenchi-interactive", "mfc-local", "game-folder-file", "prefix-dll")
 # Handlers whose recipes may be declared ready: the guarded SoftDenchi installer, a read-only
 # check of a file already in the registered game's folder (nothing is copied or installed), and
-# one declared x86 DLL placed into the prefix's syswow64 (menu 12). ``mfc-local`` stays reserved.
+# one declared x86 DLL placed into the prefix's syswow64 (one-pass preparation). ``mfc-local`` stays reserved.
 READY_HANDLERS = ("softdenchi-interactive", "game-folder-file", "prefix-dll")
 GAME_FOLDER_FILE_LIMIT = 64 * 1024 * 1024
 NON_ASCII_NOTE = ("注意: 登録EXEのパスにASCII以外の文字（日本語など）が含まれます。"
@@ -208,7 +207,7 @@ def exe_path_ascii(exe):
 
 @dataclass(frozen=True)
 class GamePlacement:
-    """The attributes the shared initialization session needs; no probe material."""
+    """The attributes the shared initialization session needs."""
     digest: str
     installation: object = field(repr=False)
     review: dict = field(repr=False)
@@ -254,8 +253,6 @@ def plan_game_prefix(*, config, directory, renderer, source, games, key, profile
     profile = profiles[profile_id]
     require(key in games, "selected registration absent")
     exe = safe_path(games[key]["exe"])
-    from preparation_probe import EXE
-    require(exe.name != EXE, "probe registrations use the dedicated trial scope")
     payload = config["payload"]
     require(payload.get("tool_slot") == "preparation" and "placement_review" in config, "reviewed preparation slot required")
     review = validate_build_review(config["placement_review"])
@@ -344,7 +341,6 @@ def interactive_game_prefix(directory, renderer, config, *, input_stream=None, o
 
     import preparation_selection as selection
     from preparation_binding import droiddeck_lock
-    from preparation_probe import EXE
 
     stream = sys.stdin if input_stream is None else input_stream
     output = sys.stdout if output_stream is None else output_stream
@@ -360,7 +356,7 @@ def interactive_game_prefix(directory, renderer, config, *, input_stream=None, o
         source, _, games = selection.registration_catalog(environment)
         protected.extend(Path(game["exe"]).parent for game in games.values())
         base = steam / "steamapps/compatdata"
-        candidates = [key for key, game in games.items() if Path(game["exe"]).name != EXE and
+        candidates = [key for key, game in games.items() if
                       not os.path.lexists(base / key) and not (int(key) >= 2**31 and os.path.lexists(base / str(int(key) - 2**32)))]
         require(candidates, "no registered game without a prefix")
         for number, key in enumerate(candidates, 1):

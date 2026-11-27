@@ -7,7 +7,6 @@ import io
 import json
 import os
 import runpy
-import subprocess
 import sys
 import tarfile
 import unittest
@@ -67,12 +66,6 @@ class PayloadTests(unittest.TestCase):
 
     def inspect(self, **kwargs):
         return payload.inspect_archive(kwargs.get("path",self.archive),kwargs.get("sha",self.sha),kwargs.get("root",ROOT))
-
-    def cli(self, *extra):
-        script = Path(__file__).with_name("prepare_game.py")
-        return subprocess.run([sys.executable,"-I","-B",str(script),"--inspect-payload",
-                               "--payload-archive",str(self.archive),"--payload-sha512",self.sha,
-                               "--payload-root",ROOT,*extra],capture_output=True,text=True,check=False)
 
     def fex_fixture(self):
         self.installed.chmod(0o755)

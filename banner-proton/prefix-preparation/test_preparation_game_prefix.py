@@ -156,6 +156,8 @@ class ConfigTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == 'linux', 'requires Linux filesystem/native fixture; not device Wine')
 class GamePrefixTests(DEP['InstallTests']):
+    origin_in_setup = False  # These tests initialize game 42 themselves.
+
     def setUp(self):
         super().setUp()
         # The fixture Proton links only cmd.exe into syswow64; use it as the x86 layout reference
@@ -184,7 +186,7 @@ class GamePrefixTests(DEP['InstallTests']):
             record, digest = store.read_record(game.RECORDS, result['trial_id'] + '.json')
         return record, digest
 
-    def test_plan_is_read_only_binds_profile_and_refuses_probe_or_existing_prefix(self):
+    def test_plan_is_read_only_binds_profile_and_refuses_an_existing_prefix(self):
         before = self.protected()
         with patch('subprocess.Popen', side_effect=AssertionError('plan never executes')):
             plan = self.game_plan()
@@ -195,8 +197,6 @@ class GamePrefixTests(DEP['InstallTests']):
         self.assertFalse(summary['binding_written'])
         self.assertEqual(before, self.protected())
         self.assertFalse(self.game_compat.exists())
-        with self.assertRaisesRegex(Invalid, 'probe registrations'):
-            self.game_plan(key='43')
         self.game_compat.mkdir()
         with self.assertRaisesRegex(Invalid, 'existing prefix is read-only'):
             self.game_plan()
@@ -521,8 +521,11 @@ class GamePrefixTests(DEP['InstallTests']):
                        {**record, 'profile': {k: v for k, v in record['profile'].items() if k != 'title_sha256'}}):
             with self.subTest(broken=sorted(broken)), self.assertRaises(Invalid):
                 trial.validate_trial_record(broken, game.SCOPE, game.ID_PREFIX)
+        # A record of another scope (such as a removed probe trial) is refused, and a profile is required.
         with self.assertRaises(Invalid):
-            trial.validate_trial_record({**record, 'scope': trial.SCOPE, 'trial_id': 'trial-' + record['trial_id'][8:]})
+            trial.validate_trial_record({**record, 'scope': 'dedicated-new-prefix-initialization-trial'}, game.SCOPE, game.ID_PREFIX)
+        with self.assertRaises(Invalid):
+            trial.validate_trial_record({k: v for k, v in record.items() if k != 'profile'}, game.SCOPE, game.ID_PREFIX)
 
     def registration(self, key):
         _source, _, games = DEP['TRIAL']['BASE']['selection'].registration_catalog(self.environment)
@@ -652,14 +655,14 @@ class GamePrefixTests(DEP['InstallTests']):
             plan = self.binding_plan(record, digest)
         self.assertEqual(plan.blockers, ('dependency-not-verified:softdenchi-runtime', game.PROCESS_BLOCKER))
 
-    def test_dependency_menu_lists_game_prefixes_beside_probe_trials(self):
+    def test_dependency_menu_lists_game_prefixes(self):
         self.initialize()
         with patch.object(dep, 'softdenchi_recipe', return_value=self.recipe), \
                 patch('subprocess.Popen', side_effect=AssertionError('listing only')):
             status, report, output = self.detail_menu('9\nq\n')
         self.assertEqual((status, report), (0, None))
         self.assertIn('実ゲーム example-game / ID 42', output)
-        self.assertIn('検証用 / ID 43', output)
+        self.assertNotIn('検証用', output)
 
 
 for _name in dir(DEP['InstallTests']):

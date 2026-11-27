@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dedicated initialization scope using a harmless native fixture, never Wine."""
+"""The guarded initialization session (registered-game prefixes) with a harmless native fixture, never Wine."""
 
 import copy
 import io
@@ -15,14 +15,20 @@ from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 BASE = runpy.run_path(str(HERE / 'test_preparation_static_placement.py'))
-import fixture_legacy_builders as legacy
 import preparation_execution as execution
+import preparation_game_prefix as game
 import preparation_recheck as recheck
 import preparation_trial as trial
 import preparation_dependency_install as dependency
 from preparation_common import Invalid
 from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore
+
+SESSION_GAME = {'profiles': [{'profile_id': 'session-fixture', 'revision': 1, 'title': 'Synthetic session profile',
+                              'edition': 'unconfirmed edition', 'edition_status': 'unconfirmed', 'dependencies': [],
+                              'exe_sha256': None}],
+                'recipes': [{'dependency_id': 'mfc42-candidate', 'revision': 1, 'handler': 'mfc-local', 'status': 'blocked',
+                             'reason': 'synthetic blocked recipe'}]}
 
 FAKE = b'''#!/usr/bin/python3
 import os
@@ -66,9 +72,16 @@ class TrialTests(BASE['StaticFixture']):
         self.live_requirement = trial._live_runtime
         patch.object(trial, '_live_runtime', return_value=None).start()
         patch.object(trial, 'RESERVE', 1024 * 1024).start()
+        self.config['game_preparation'] = copy.deepcopy(SESSION_GAME)
+        self.config['initialization_trial'] = True  # Required by the operational layout.
 
     def trial_plan(self):
-        return legacy.plan_trial(self.plan(), self.home)
+        """A plan of the shared session: registered game 42 without a prefix."""
+        source, _, games = BASE['selection'].registration_catalog(self.environment)
+        return game.plan_game_prefix(config=self.config, directory=self.f.fixture.source.root,
+            renderer=self.f.fixture.options['renderer'], source=source, games=games, key='42',
+            profile_id=self.config['game_preparation']['profiles'][0]['profile_id'], steam=self.f.steam,
+            settings=self.f.settings, home=self.home, environment=self.environment, runtime_root=self.f.root)
 
     def launch_fixture(self, **kwargs):
         # A native surrogate has no DroidDeck hooks or real Wine dependencies.
@@ -77,11 +90,11 @@ class TrialTests(BASE['StaticFixture']):
         return execution.plan_launch(**kwargs)
 
     def session(self, plan, store, **kwargs):
-        return trial.TrialSession(plan, store, kwargs.get('refresh', self.trial_plan),
+        return game.GamePrefixSession(plan, store, kwargs.get('refresh', self.trial_plan),
             kwargs.get('confirmation', plan.digest), kwargs.get('stop', ProcessStopCheck(plan.compatdata, self.f.proc)))
 
     def record(self):
-        files = list((self.f.store_root / 'trials').glob('trial-*.json'))
+        files = list((self.f.store_root / game.RECORDS).glob(game.ID_PREFIX + '*.json'))
         return json.loads(files[-1].read_bytes())
 
     def test_plan_is_read_only_and_never_asserts_runtime_readiness(self):
@@ -90,7 +103,7 @@ class TrialTests(BASE['StaticFixture']):
             plan = self.trial_plan()
         self.assertEqual(before, self.protected())
         self.assertFalse(plan.compatdata.exists())
-        self.assertFalse(plan.work.parent.exists())
+        self.assertFalse(plan.trial.work.parent.exists())
         self.assertFalse(plan.summary()['execution_authorized'])
         self.assertFalse(plan.summary()['runtime_execution_verified'])
 
@@ -107,8 +120,8 @@ class TrialTests(BASE['StaticFixture']):
 
     def test_existing_private_trial_root_is_preserved(self):
         plan = self.trial_plan()
-        plan.work.parent.mkdir(parents=True)
-        marker = plan.work.parent / 'DUMMY_PRIVATE'
+        plan.trial.work.parent.mkdir(parents=True)
+        marker = plan.trial.work.parent / 'DUMMY_PRIVATE'
         marker.write_text('preserve')
         with self.assertRaises(Invalid):
             self.trial_plan()
@@ -123,20 +136,20 @@ class TrialTests(BASE['StaticFixture']):
         with self.f.store() as store, self.assertRaises(Invalid):
             self.session(plan, store, confirmation='0' * 64).start()
         self.assertFalse(plan.compatdata.exists())
-        self.assertFalse(plan.work.exists())
+        self.assertFalse(plan.trial.work.exists())
 
     def test_active_and_unknown_view_refuse_before_creating_paths(self):
         for observation in ({'clear_in_view': False, 'active_count': 1}, {'clear_in_view': False, 'unknown_count': 1}):
             plan = self.trial_plan()
             with self.f.store() as store, patch.object(ProcessStopCheck, 'check', return_value=observation), self.assertRaises(Invalid):
                 self.session(plan, store).start()
-            self.assertFalse(plan.work.exists())
+            self.assertFalse(plan.trial.work.exists())
             self.assertFalse(plan.compatdata.exists())
 
     def test_changed_inputs_refuse_before_mutation(self):
         plan = self.trial_plan()
         with self.f.store() as store, self.assertRaises(Invalid):
-            self.session(plan, store, refresh=lambda: replace(plan, digest='0' * 64)).start()
+            self.session(plan, store, refresh=lambda: replace(plan, trial=replace(plan.trial, digest='0' * 64))).start()
         self.assertFalse(plan.compatdata.exists())
 
     def test_native_fixture_initializes_and_preserves_all_protected_inputs(self):
@@ -150,11 +163,11 @@ class TrialTests(BASE['StaticFixture']):
         self.assertFalse(record['runtime_execution_verified'])
         self.assertFalse(record['preparation_complete'])
         self.assertEqual(before, self.protected())
-        self.assertEqual(plan.work.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(plan.trial.work.stat().st_mode & 0o777, 0o700)
         self.assertTrue((plan.compatdata / 'pfx/user.reg').exists())
         self.assertNotIn('PROOT_FP_KEY', json.dumps(record))
         with PrivateStore(self.f.store_root) as store:
-            found = store.inventory()['trials']
+            found = store.inventory()['game_prefixes']
         self.assertEqual(found[0]['status'], 'initialized-unverified')
         self.assertTrue(found[0]['reinspection_required'])
 
@@ -163,7 +176,7 @@ class TrialTests(BASE['StaticFixture']):
         plan = self.trial_plan()
         with PrivateStore(self.f.store_root) as store, self.assertRaises(Invalid):
             self.session(plan, store).start()
-        self.assertFalse(plan.work.exists())
+        self.assertFalse(plan.trial.work.exists())
         self.assertFalse(plan.compatdata.exists())
 
     def test_lingering_services_get_bounded_grace_without_forced_termination(self):
@@ -197,7 +210,7 @@ class TrialTests(BASE['StaticFixture']):
             (session.launch.spec['tool'] / 'version').write_bytes(b'changed-after-launch')
             self.assertEqual(session.wait(1)['status'], 'failed')
         self.assertTrue(plan.compatdata.exists())
-        self.assertTrue(plan.work.exists())
+        self.assertTrue(plan.trial.work.exists())
 
     def test_prefix_measurement_does_not_follow_drive_links_or_read_values(self):
         root = self.home / 'measure-fixture'
@@ -213,18 +226,23 @@ class TrialTests(BASE['StaticFixture']):
         self.assertNotIn('DUMMY', json.dumps(result))
 
     def recheck_origin(self):
-        self.config['initialization_trial'] = True
         plan = self.trial_plan()
         with self.f.store() as store, patch.object(trial, 'plan_launch', side_effect=self.launch_fixture):
             session = self.session(plan, store).start()
             session.wait(10)
-            record, digest = store.read_record('trials', session.record['trial_id'] + '.json')
-        directory = session.launch.spec['tool'] / 'files/share/fex-emu/AppConfig'
-        directory.mkdir(mode=0o700)
+            record, digest = store.read_record(game.RECORDS, session.record['trial_id'] + '.json')
+        return record, digest, self.recheck_ready()
+
+    def recheck_ready(self):
+        """FEX's one empty AppConfig directory in the slot (as after a first run) and a live-root double."""
+        directory = Path(self.plan().installation.summary()['destination']) / 'files/share/fex-emu/AppConfig'
+        if not directory.exists():
+            directory.mkdir(mode=0o700)
         self.addCleanup(patch.stopall)
-        self.recheck_live_requirement = recheck._require_live
-        patch.object(recheck, '_require_live', return_value=None).start()
-        return record, digest, directory
+        if not hasattr(self, 'recheck_live_requirement'):
+            self.recheck_live_requirement = recheck._require_live
+            patch.object(recheck, '_require_live', return_value=None).start()
+        return directory
 
     def recheck_plan(self, record, digest):
         source, _, games = BASE['selection'].registration_catalog(self.environment)
@@ -232,25 +250,6 @@ class TrialTests(BASE['StaticFixture']):
             directory=self.f.fixture.source.root, renderer=self.f.fixture.options['renderer'],
             source=source, games=games, steam=self.f.steam, settings=self.f.settings, home=self.home,
             environment=self.environment, runtime_root=self.f.root)
-
-    def test_recheck_native_command_retains_old_history_and_existing_prefix(self):
-        record, digest, directory = self.recheck_origin()
-        plan = self.recheck_plan(record, digest)
-        sentinel = plan.compatdata / 'DUMMY_PRESERVE'
-        sentinel.write_text('preserve')
-        protected = self.protected()
-        with self.f.store() as store, patch.object(recheck, 'plan_launch', side_effect=self.launch_fixture):
-            session = recheck.RecheckSession(plan, store, lambda: self.recheck_plan(record, digest),
-                plan.digest, ProcessStopCheck(plan.compatdata, self.f.proc)).start()
-            result = session.wait(10)
-            self.assertEqual(store.read_record('trials', record['trial_id'] + '.json')[1], digest)
-            self.assertTrue(store.inventory()['rechecks'][0]['reinspection_required'])
-        self.assertEqual(result['status'], 'probe-exited-unverified')
-        self.assertFalse(result['old_trial_record_updated'])
-        self.assertFalse(result['preparation_complete'])
-        self.assertEqual(sentinel.read_text(), 'preserve')
-        self.assertEqual(protected, self.protected())
-        self.assertTrue(directory.exists())
 
     def test_recheck_refuses_config_in_runtime_directory_and_changed_origin(self):
         record, digest, directory = self.recheck_origin()
@@ -261,67 +260,6 @@ class TrialTests(BASE['StaticFixture']):
         file.unlink()
         with self.assertRaises(Invalid):
             self.recheck_plan(record, '0' * 64)
-
-    def test_existing_probe_inspection_does_not_enable_normal_new_prefix_verification(self):
-        record, digest, _directory = self.recheck_origin()
-        plan = self.recheck_plan(record, digest)
-        with self.assertRaises(Invalid):
-            BASE['probe'].verify_probe_registration(plan.target.exe, plan.record['app_id'], plan.target.source,
-                                                   plan.target.steam, plan.probe_store)
-
-    def test_recheck_active_view_and_wrong_confirmation_never_launch(self):
-        record, digest, _ = self.recheck_origin()
-        plan = self.recheck_plan(record, digest)
-        with self.f.store() as store, patch('subprocess.Popen', side_effect=AssertionError('no child')):
-            with self.assertRaises(Invalid):
-                recheck.RecheckSession(plan, store, lambda: self.recheck_plan(record, digest), '0' * 64,
-                    ProcessStopCheck(plan.compatdata, self.f.proc)).start()
-            with patch.object(ProcessStopCheck, 'check', return_value={'clear_in_view': False, 'unknown_count': 1}), self.assertRaises(Invalid):
-                recheck.RecheckSession(plan, store, lambda: self.recheck_plan(record, digest), plan.digest,
-                    ProcessStopCheck(plan.compatdata, self.f.proc)).start()
-        self.assertFalse((self.f.store_root / 'rechecks').exists())
-
-    def test_recheck_timeout_can_resume_wait_without_forced_termination(self):
-        record, digest, _ = self.recheck_origin()
-        plan = self.recheck_plan(record, digest)
-        fake = unittest.mock.Mock()
-        fake.wait.side_effect = [subprocess.TimeoutExpired('DUMMY_PRIVATE', 1), 0]
-        with self.f.store() as store, patch.object(recheck, 'plan_launch', side_effect=self.launch_fixture), patch.object(recheck.subprocess, 'Popen', return_value=fake):
-            session = recheck.RecheckSession(plan, store, lambda: self.recheck_plan(record, digest), plan.digest,
-                ProcessStopCheck(plan.compatdata, self.f.proc)).start()
-            self.assertEqual(session.wait(1)['status'], 'needs-user')
-            result = session.wait(1)
-            self.assertEqual(result['status'], 'probe-exited-unverified')
-            fake.kill.assert_not_called()
-            fake.terminate.assert_not_called()
-            self.assertNotIn('DUMMY_PRIVATE', json.dumps(result))
-
-    def test_recheck_detects_settings_change_without_repair(self):
-        record, digest, _ = self.recheck_origin()
-        plan = self.recheck_plan(record, digest)
-        with self.f.store() as store, patch.object(recheck, 'plan_launch', side_effect=self.launch_fixture):
-            session = recheck.RecheckSession(plan, store, lambda: self.recheck_plan(record, digest), plan.digest,
-                ProcessStopCheck(plan.compatdata, self.f.proc)).start()
-            session.process.wait(timeout=10)
-            self.games_config.write_text('{"DUMMY_EXTERNAL_CHANGE": true}')
-            result = session.wait(1)
-        self.assertEqual(result['status'], 'failed')
-        self.assertFalse(result['settings_identity_unchanged'])
-        self.assertIn('DUMMY_EXTERNAL_CHANGE', self.games_config.read_text())
-
-    def test_failed_tree_mismatch_origin_retains_immutable_history(self):
-        record, digest, _ = self.recheck_origin()
-        record.update(status='failed', tool_version='0.19.0', error={'check': 'trial-post-checks', 'error_class': 'TreeMismatch', 'errno': None})
-        with self.f.store() as store:
-            digest = store.write_record('trials', record['trial_id'] + '.json', record, expected_hash=digest)
-        plan = self.recheck_plan(record, digest)
-        with self.f.store() as store, patch.object(recheck, 'plan_launch', side_effect=self.launch_fixture):
-            session = recheck.RecheckSession(plan, store, lambda: self.recheck_plan(record, digest), plan.digest,
-                ProcessStopCheck(plan.compatdata, self.f.proc)).start()
-            self.assertEqual(session.wait(10)['status'], 'probe-exited-unverified')
-            old, current = store.read_record('trials', record['trial_id'] + '.json')
-        self.assertEqual(current, digest)
-        self.assertEqual(old['status'], 'failed')
 
     def test_recheck_requires_live_runtime_and_private_prefix_ancestors(self):
         record, digest, _ = self.recheck_origin()
@@ -337,7 +275,7 @@ class TrialTests(BASE['StaticFixture']):
         plan = self.trial_plan()
         with self.f.store() as store, patch.object(trial, 'plan_launch', side_effect=Invalid('DUMMY_SECRET')), self.assertRaises(Invalid):
             self.session(plan, store).start()
-        self.assertTrue(plan.work.exists())
+        self.assertTrue(plan.trial.work.exists())
         self.assertFalse(plan.compatdata.exists())
         record = self.record()
         self.assertEqual(record['status'], 'failed')

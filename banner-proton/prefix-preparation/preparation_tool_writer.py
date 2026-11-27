@@ -221,11 +221,10 @@ def validate_installation_record(record, any_version=False):
 
 
 def _write_installation_tree(plan, refresh, store, settings, check_ready, private_xalia=None):
-    """Shared filesystem transaction; callers enforce their own strict scope.
+    """The filesystem transaction of a slot placement; the caller enforces its scope.
 
-    apply_installation requires full execution readiness. The static new-slot
-    caller separately requires an explicitly approved, absent preparation slot
-    and verified probe; it never authorizes a launch, prefix write or binding.
+    The caller (apply_static_placement) requires an explicitly approved, absent preparation
+    slot and a confirmation registration; it never authorizes a launch, prefix write or binding.
     """
     steam = safe_path(plan.target.steam)
     if private_xalia is not None:

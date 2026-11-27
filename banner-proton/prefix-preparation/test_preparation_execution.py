@@ -95,6 +95,24 @@ class ExecutionTests(unittest.TestCase):
         self.assertNotIn(":7", json.dumps(plan.summary()))
         self.assertEqual(plan.summary()["writes"], [])
 
+    def test_tool_launches_never_read_bytecode_caches_from_the_tool(self):
+        prefix = self.work / execution.BYTECODE_PREFIX
+        prefix.mkdir()
+        with self.assertRaisesRegex(Invalid, "bytecode cache prefix present"):
+            self.plan()
+        prefix.rmdir()
+        plan = self.plan()
+        self.assertEqual(plan.environment["PYTHONPYCACHEPREFIX"], str(prefix))
+        self.assertEqual(plan.environment["PYTHONDONTWRITEBYTECODE"], "1")
+        execution.require_no_bytecode_cache(plan)
+        self.assertFalse(os.path.lexists(prefix))
+
+    def test_bytecode_prefix_appearing_after_planning_blocks_the_spawn(self):
+        plan = self.plan()
+        (self.work / execution.BYTECODE_PREFIX).mkdir()
+        with self.assertRaisesRegex(Invalid, "bytecode cache prefix present"):
+            execution.require_no_bytecode_cache(plan)
+
     def test_low_app_id_environment_matches_steam_identity(self):
         self.write_json(self.added,[{"appid":42,"exe":str(self.exe)}])
         pin = pin_registration(self.added,"42",self.exe_root,self.steam)

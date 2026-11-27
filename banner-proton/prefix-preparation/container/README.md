@@ -60,10 +60,11 @@ UIDs, tmpfs and ordinary Linux syscalls differ from Android/proot and device
 storage. GUI, graphics/audio drivers, Wine, actual installer behavior,
 authentication, Steam binding and game operation are outside these tests.
 
-The launch-contract suite executes a disposable Python substitute with fixed
-arguments, selected environment and synthetic prefix files. It tests process
-handling and rejection paths, including timeout without termination. It does not
-run Wine or an installer, verify the real payload, or establish runtime equivalence.
+The launch suite only plans launches (no child process). The trial, game-prefix and
+dependency-installation suites execute a disposable Python substitute with fixed arguments,
+selected environment and synthetic prefix files. They test process handling and rejection
+paths, including timeout without termination. They do not run Wine or an installer, verify the
+real payload, or establish runtime equivalence.
 
 Payload tests generate tiny archives and installed trees in temporary storage.
 Real NAS archives and runtime binaries are excluded from the Docker build context.

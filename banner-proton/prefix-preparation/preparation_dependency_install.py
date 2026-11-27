@@ -53,7 +53,7 @@ from preparation_processes import (
     process_start_time,
     xalia_images,
 )
-from preparation_recheck import RecheckSession, plan_recheck, validate_recheck_record
+from preparation_recheck import RecheckSession, plan_recheck
 from preparation_softdenchi_recipe import (
     HANDLER,
     bind_asset,
@@ -462,27 +462,6 @@ def capacity_needs(base, spec, home, installer_log=False):
     return needs + ((base.work.parent, LOG_BUDGET),) if installer_log else needs
 
 
-def _records_of(record):
-    """Journal of a managed origin record: probe trials or registered-game new prefixes."""
-    from preparation_game_prefix import SCOPE as GAME_SCOPE
-    return "game-prefixes" if record.get("scope") == GAME_SCOPE else "trials"
-
-
-def _recheck_evidence(store_root, record, prefix_version):
-    with PrivateStore(store_root) as store:
-        candidates = []
-        for item in store.inventory()["rechecks"]:
-            if item.get("trial_id") != record["trial_id"] or item.get("status") != "probe-exited-unverified":
-                continue
-            full, digest = store.read_record("rechecks", item["recheck_id"] + ".json")
-            validate_recheck_record(full)
-            if (full["exit_code"] == 0 and full.get("settings_identity_unchanged") is True and
-                    full["app_id"] == record["app_id"] and full["prefix_version_sha256"] == prefix_version):
-                candidates.append((full["recheck_id"], digest))
-    require(candidates, "matching successful managed recheck required")
-    return max(candidates)
-
-
 def _installations(store_root, key):
     """Valid records of this registration (oldest first) and the count of unreadable records."""
     with PrivateStore(store_root) as store:
@@ -594,17 +573,13 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
     dependency = validate_dependency_config(config.get("dependency_installation"))
     require(dependency["recipe_revision"] == recipe["revision"], "configured recipe revision differs")
     progress.append("managed-recheck-plan")
-    records = _records_of(record)
     base = plan_recheck(record=record, record_sha256=record_sha256, config=config, directory=directory, renderer=renderer,
                         source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
-                        runtime_root=runtime_root, records=records, inventory=inventory)
+                        runtime_root=runtime_root, inventory=inventory)
     progress.append("recheck-evidence")
-    if records == "trials":
-        recheck_id, recheck_sha256 = _recheck_evidence(base.store_root, record, base.prefix_version)
-    else:
-        # A registered-game prefix carries its own initialization evidence (initialized-unverified,
-        # exit 0, unchanged settings), revalidated by the managed plan above.
-        recheck_id, recheck_sha256 = record["trial_id"], record_sha256
+    # A registered-game prefix carries its own initialization evidence (initialized-unverified,
+    # exit 0, unchanged settings), revalidated by the managed plan above.
+    recheck_id, recheck_sha256 = record["trial_id"], record_sha256
     progress.append("asset-inspection")
     spec = dependency["asset"]
     directory = safe_path(directory)
@@ -619,14 +594,13 @@ def _plan_dependency_install(progress, *, record, record_sha256, config, directo
     pre = inspect_dependency_state(base.compatdata, recipe)
     if pre["state"] != "absent":
         blockers.append("dependency-state-" + pre["state"] + "-preserve-and-inspect")
-    if records != "trials":
-        # Design: Proton update 4.4. A game prefix still linked into another slot is not run with this Proton.
-        progress.append("prefix-layout")
-        from preparation_prefix_dll import require_own_layout
-        try:
-            require_own_layout(base.compatdata, base.inventory, _tool_directory(base))
-        except (OSError, Invalid):
-            blockers.append("prefix-layout-not-this-proton")
+    # Design: Proton update 4.4. A game prefix still linked into another slot is not run with this Proton.
+    progress.append("prefix-layout")
+    from preparation_prefix_dll import require_own_layout
+    try:
+        require_own_layout(base.compatdata, base.inventory, _tool_directory(base))
+    except (OSError, Invalid):
+        blockers.append("prefix-layout-not-this-proton")
     progress.append("installation-history")
     previous, invalid = _installations(base.store_root, record["app_id"])
     latest = previous[-1] if previous else None
@@ -662,7 +636,7 @@ class DependencyInstallSession:
         self.plan, self.store, self.refresh, self.confirmation, self.stop = plan, store, refresh, confirmation, stop_check
         # Reuse the managed recheck guard: trial history, payload/FEX tree, runtime,
         # target, prefix version, settings identity and private paths.
-        self.base_guard = RecheckSession(plan.recheck, store, None, None, stop_check)
+        self.base_guard = RecheckSession(plan.recheck, store, stop_check)
         self.process, self.hash, self.staged = None, None, None
         self.log, self.log_record = None, None  # Diagnostic installer log (design: installer log).
         p = plan.recheck
@@ -690,8 +664,7 @@ class DependencyInstallSession:
 
     def _guard(self):
         self.base_guard._guard()
-        evidence = "rechecks" if self.plan.recheck.records == "trials" else self.plan.recheck.records
-        require(self.store.read_record(evidence, self.plan.recheck_id + ".json")[1] == self.plan.recheck_sha256,
+        require(self.store.read_record(self.plan.recheck.records, self.plan.recheck_id + ".json")[1] == self.plan.recheck_sha256,
                 "managed recheck evidence changed")
 
     def _fail(self, check, error):
@@ -701,10 +674,9 @@ class DependencyInstallSession:
 
     def _launch(self):
         p = self.plan.recheck
-        if p.records != "trials":
-            # Checked again right before every Wine start, winver included (design: Proton update 4.4).
-            from preparation_prefix_dll import require_own_layout
-            require_own_layout(p.compatdata, p.inventory, _tool_directory(p))
+        # Checked again right before every Wine start, winver included (design: Proton update 4.4).
+        from preparation_prefix_dll import require_own_layout
+        require_own_layout(p.compatdata, p.inventory, _tool_directory(p))
         entries = {**p.inventory.entries, **p.customization.overlays}
         hashes = {name: entries[name]["sha256"] if name in entries else None for name in ("proton", "version", "user_settings.py")}
         return plan_launch(tool=_tool_directory(p),
@@ -849,7 +821,7 @@ class DependencyInstallSession:
         """Operator-confirmed: SIGTERM only to SdProxy explained by proxy_stop_targets, then post-checks.
 
         ``confirmation`` records how the operator agreed: at the prompt (menu 8), or in the
-        one-pass confirmation before the run (menu 12). The targets and conditions are the same.
+        one-pass confirmation before the run (recovery.sh 1 or prepare.sh). The targets and conditions are the same.
         """
         require(confirmation in ("operator-prompt", "one-pass-preapproved"), "invalid stop confirmation")
         require(self.record["phase"] == "installer-exited" and self.record["installer"]["status"] == "exited-processes-remain",
@@ -1341,7 +1313,7 @@ class DependencyInstallSession:
 def inspect_managed_dependency(plan_base, store, stop_check, recipe=None):
     """Read-only reinspection under the managed locks; never starts Wine or installs."""
     recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
-    guard = RecheckSession(plan_base, store, None, None, stop_check)
+    guard = RecheckSession(plan_base, store, stop_check)
     guard._guard()
     before = stop_check.check()
     if not before["clear_in_view"]:
@@ -1382,7 +1354,6 @@ def collect_diagnostics(*, record, config, directory, renderer, environment, ste
     The dependency state is read without a process stop observation and is diagnostic only.
     """
     import preparation_selection as selection
-    from preparation_execution import _prefix
 
     recipe = softdenchi_recipe() if recipe is None else validate_recipe(recipe)
     directory, steam, settings, home = map(safe_path, (directory, steam, settings, home))
@@ -1403,24 +1374,11 @@ def collect_diagnostics(*, record, config, directory, renderer, environment, ste
     def recheck_plan():
         source, _, games = selection.registration_catalog(environment)
         with PrivateStore(store_root) as store:
-            digest = store.read_record(_records_of(record), record["trial_id"] + ".json")[1]
-        plan_recheck(record=record, record_sha256=digest, config=config, directory=directory, renderer=renderer, records=_records_of(record),
+            digest = store.read_record("game-prefixes", record["trial_id"] + ".json")[1]
+        plan_recheck(record=record, record_sha256=digest, config=config, directory=directory, renderer=renderer,
                      source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
                      runtime_root=runtime_root)
         return {}
-
-    def rechecks():
-        version = _prefix(compatdata)
-        summary = []
-        with PrivateStore(store_root) as store:
-            items = [item for item in store.inventory()["rechecks"] if item.get("trial_id") == record["trial_id"]]
-            for item in items:
-                full, _ = store.read_record("rechecks", item["recheck_id"] + ".json")
-                validate_recheck_record(full)
-                summary.append({"recheck_id": full["recheck_id"], "status": full["status"], "exit_code": full["exit_code"],
-                                "settings_identity_unchanged": full.get("settings_identity_unchanged"),
-                                "prefix_version_matches_live": full["prefix_version_sha256"] == version})
-        return {"records": summary}
 
     def asset():
         spec = config["dependency_installation"]["asset"]
@@ -1453,17 +1411,16 @@ def collect_diagnostics(*, record, config, directory, renderer, environment, ste
 
     checks = {name: _isolated(function) for name, function in (
         ("environment-presence", presence), ("registration", registration), ("managed-recheck-plan", recheck_plan),
-        ("recheck-records", rechecks), ("asset-file", asset), ("dependency-state", state), ("installation-history", history))}
+        ("asset-file", asset), ("dependency-state", state), ("installation-history", history))}
     return {"scope": "independent-read-only-diagnostics", "checks": checks, "wine_started": False, "writes": []}
 
 
 def _select_trial(store, stream, output, prompt):
     listed = store.inventory()
-    records = [("trials", item) for item in listed["trials"] if item["status"] != "invalid"]
-    records += [("game-prefixes", item) for item in listed["game_prefixes"] if item["status"] != "invalid"]
+    records = [("game-prefixes", item) for item in listed["game_prefixes"] if item["status"] != "invalid"]
     require(records, "no managed prefix records")
     for index, (kind, item) in enumerate(records, 1):
-        label = "検証用" if kind == "trials" else "実ゲーム " + str(item.get("profile_id"))
+        label = "実ゲーム " + str(item.get("profile_id"))
         print(f"{index}. {label} / ID {item['app_id']} / {item['status']} / {item['trial_id']}", file=output)
     print(prompt, end="", file=output, flush=True)
     answer = stream.readline(32).strip()
@@ -1723,7 +1680,7 @@ def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sende
         return entry
     entry["stop"] = {"result": "sending", "planned": len(targets), "signals": [], "signal": "SIGTERM", "forced_kill": False}
     try:
-        RecheckSession(base, store, None, None, stop)._guard()
+        RecheckSession(base, store, stop)._guard()
         entry["stop"]["sent"] = signal_proxies(base.compatdata, targets, stop.proc_root, sender, entry["stop"]["signals"],
                                                scope, entry["stop"])
     except (OSError, ValueError) as error:
@@ -1786,7 +1743,6 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
         protected.extend(Path(game["exe"]).parent for game in games.values())
         print("Wineを起動せず、決まった登録キーとファイルだけを読み取ります。", file=output, flush=True)
         base = plan_recheck(record=record, record_sha256=digest, config=config, directory=directory, renderer=renderer,
-                            records=_records_of(record),
                             source=source, games=games, steam=steam, settings=settings, home=home, environment=environment,
                             runtime_root=runtime_root)
         selection._private_report_directory(home, protected)

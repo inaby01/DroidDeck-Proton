@@ -21,7 +21,8 @@ TRIAL = runpy.run_path(str(HERE / 'test_preparation_trial.py'))
 PE = runpy.run_path(str(HERE / 'test_prepare_game.py'))['pe']
 import preparation_dependency_install as dep
 import preparation_dependency_state as state
-import preparation_recheck as recheck
+import preparation_game_prefix as game_module
+import preparation_prefix_dll as prefix_dll
 from preparation_common import Invalid
 from preparation_processes import ProcessStopCheck
 from preparation_softdenchi_recipe import softdenchi_recipe, validate_recipe
@@ -394,6 +395,7 @@ class InstallTests(TRIAL['TrialTests']):
             package.addfile(member, io.BytesIO(b'x'))
 
     VC_BLOCK = None  # The inherited VC record the fake initialization writes (design: inherited VC record).
+    origin_in_setup = True  # Subclasses that initialize their own game prefix set False.
 
     def setUp(self):
         super().setUp()
@@ -401,13 +403,17 @@ class InstallTests(TRIAL['TrialTests']):
             (self.f.steam / 'steamapps/compatdata/vc-block.reg').write_text(self.VC_BLOCK)
         patch.object(dep, 'RESERVE', 1024 * 1024).start()
         patch.object(dep, 'STOP_GRACE', 1).start()
-        self.trial_record, self.trial_digest, _ = self.recheck_origin()
-        plan = self.recheck_plan(self.trial_record, self.trial_digest)
-        with self.f.store() as store, patch.object(recheck, 'plan_launch', side_effect=self.launch_fixture):
-            session = recheck.RecheckSession(plan, store, lambda: self.recheck_plan(self.trial_record, self.trial_digest),
-                                             plan.digest, ProcessStopCheck(plan.compatdata, self.f.proc)).start()
-            self.assertEqual(session.wait(10)['status'], 'probe-exited-unverified')
-            self.recheck_id = session.record['recheck_id']
+        # The fixture Proton links only cmd.exe into syswow64; use it as the x86 layout reference
+        # (SoftDenchi checks the layout before running Wine in a game prefix since 0.31.0).
+        patch.object(prefix_dll, 'REFERENCE', 'cmd.exe').start()
+        if self.origin_in_setup:
+            # The managed origin: registered game 42 initialized by the shared session.
+            self.trial_record, self.trial_digest, _ = self.recheck_origin()
+            self.recheck_id = self.trial_record['trial_id']
+            # As before 1.0.1, these tests use a bundle without game profiles (the menus 8 and 9 directly).
+            self.config.pop('game_preparation')
+        else:
+            self.recheck_ready()
         self.use_installer(installer())
 
     def use_installer(self, data, **changes):
@@ -441,7 +447,7 @@ class InstallTests(TRIAL['TrialTests']):
                 return session.record, spawned
             session.start_installer()
             result = session.wait_installer(10)
-            self.assertEqual(store.read_record('trials', self.trial_record['trial_id'] + '.json')[1], self.trial_digest)
+            self.assertEqual(store.read_record(game_module.RECORDS, self.trial_record['trial_id'] + '.json')[1], self.trial_digest)
             return result, spawned
 
     def test_plan_is_read_only_and_binds_only_the_recipe_bootstrap(self):
@@ -491,7 +497,6 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertNotIn('DUMMY_SECRET', json.dumps(result))
         with self.f.store() as store:
             listed = store.inventory()['dependency_installs']
-            self.assertEqual(store.read_record('rechecks', self.recheck_id + '.json')[0]['status'], 'probe-exited-unverified')
         self.assertEqual([item['status'] for item in listed], ['present-verified'])
         self.assertTrue(listed[0]['reinspection_required'])
 
@@ -796,7 +801,7 @@ class InstallTests(TRIAL['TrialTests']):
         folder.mkdir()
         tail = ['S', str(parent)] + ['0'] * 17 + [str(started)] + ['0'] * 5
         (folder / 'stat').write_text(f'{pid} (fake) ' + ' '.join(tail))
-        compat = self.f.steam / 'steamapps/compatdata/43'
+        compat = self.f.steam / 'steamapps/compatdata/42'
         if environ is None:
             environ = (b'STEAM_COMPAT_DATA_PATH=' + str(compat).encode() + b'\0WINEPREFIX=' + str(compat / 'pfx').encode() +
                        b'\0DUMMY_SECRET=1\0')
@@ -1204,7 +1209,7 @@ class InstallTests(TRIAL['TrialTests']):
         self.clear_fake()
 
     def test_conflicting_prefix_environment_or_executable_identity_refuses_the_stop(self):
-        compat = self.f.steam / 'steamapps/compatdata/43'
+        compat = self.f.steam / 'steamapps/compatdata/42'
         cases = ({'environ': b'STEAM_COMPAT_DATA_PATH=' + str(compat).encode() + b'\0WINEPREFIX=/DUMMY_OTHER/pfx\0'},
                  {'exe': 'other-loader'}, {'exe': None})
         reasons = ('conflicting prefix environment', 'executable identity not confirmed', 'executable identity not confirmed')
@@ -1380,7 +1385,7 @@ class InstallTests(TRIAL['TrialTests']):
 
     def test_target_change_before_signal_and_remaining_processes_are_not_success(self):
         targets = self.lingering_tree()
-        compat = self.f.steam / 'steamapps/compatdata/43'
+        compat = self.f.steam / 'steamapps/compatdata/42'
         with self.assertRaises(Invalid):
             dep.signal_proxies(compat, [(targets[0][0], 999)], self.f.proc, sender=lambda key: self.fail('signalled'))
         self.clear_fake()
@@ -1494,8 +1499,7 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(checks['managed-recheck-plan']['check'], 'recheck-fex-tool-tree')
         self.assertEqual(checks['dependency-state']['state'], 'absent')
         self.assertIs(checks['asset-file']['recipe_bootstrap'], True)
-        self.assertEqual(checks['recheck-records']['records'][0]['status'], 'probe-exited-unverified')
-        self.assertTrue(checks['recheck-records']['records'][0]['prefix_version_matches_live'])
+        self.assertNotIn('recheck-records', checks)
         self.assertEqual(checks['registration']['registered'], True)
         self.assertFalse(report['diagnostics']['wine_started'])
         self.assertNotIn('DUMMY_SECRET', json.dumps(report))

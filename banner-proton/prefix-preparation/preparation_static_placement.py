@@ -22,7 +22,6 @@ from preparation_common import (
 )
 from preparation_installation import InstallationPlan
 from preparation_payload import verify_tree
-from preparation_probe import verify_probe_registration
 from preparation_slot_manifest import save_after_verification
 from preparation_tool_writer import _PrivateXaliaModes, _write_installation_tree
 
@@ -48,22 +47,17 @@ class StaticPlacementPlan:
     digest: str
     installation: object = field(repr=False)
     review: dict = field(repr=False)
-    probe: dict = field(repr=False)
+    # An ordinary registered game, only read (design: operational entry 4); the dedicated probe
+    # registration that earlier versions could use instead was removed in 1.0.1.
+    confirmation: dict = field(repr=False)
     store_root: object = field(repr=False)
-    probe_store_root: object = field(repr=False)
     settings: object = field(repr=False)
-    # "probe": a verified registration probe (detailed menu 4); "confirmation": an ordinary registered game,
-    # only read, standing in for the probe in the operational entry (design: operational entry 4).
-    witness: str = "probe"
-
-    def _witness_key(self):
-        return "probe_registration" if self.witness == "probe" else "confirmation_registration"
 
     def summary(self):
         summary = self.installation.summary()
         return {"mode": "static-preparation-tool-plan", "input_digest": self.digest, "scope": "static-preparation-slot-only",
                 "action": summary["action"], "destination": summary["destination"], "capacity": summary["capacity"],
-                "review": dict(self.review), self._witness_key(): dict(self.probe),
+                "review": dict(self.review), "confirmation_registration": dict(self.confirmation),
                 "planned_writes": summary["planned_writes"] + ([] if summary["action"] == "reuse-verified-tree" else [
                     {"path": str(self.store_root), "action": "private-installation-journal-and-locks"},
                     {"path": str(self.settings / "lock"), "action": "cooperative-settings-lock-only"}]),
@@ -75,20 +69,13 @@ class StaticPlacementPlan:
                 "preparation_complete": False, "writes": []}
 
 
-def _signature(installation, review, proof, store_root, probe_store_root, settings, witness="probe"):
+def _signature(installation, review, confirmation, store_root, settings):
     report = installation.summary()
     fixed = {name: report[name] for name in ("action", "destination", "mode", "tool_slot", "prefix")}
     fixed["capacity"] = {name: report["capacity"][name] for name in ("scope", "estimated_additional_bytes", "reserve_bytes")}
     return digest_json({"tool_version": VERSION, "scope": "static-preparation-slot-only", "installation": installation.digest,
                        "fixed_plan": fixed,
-                       "review": review, "probe": proof, "store": str(store_root), "probe_store": str(probe_store_root), "settings": str(settings),
-                       **({} if witness == "probe" else {"witness": witness})})
-
-
-def _proof(installation, probe_store_root):
-    target = installation.target
-    return checked("placement-probe-registration", verify_probe_registration, target.exe, target.registration_id,
-                   target.source, target.steam, probe_store_root)
+                       "review": review, "confirmation": confirmation, "store": str(store_root), "settings": str(settings)})
 
 
 def game_folder_apart(folder, roots):
@@ -103,10 +90,8 @@ def _confirmation(installation, settings, store_root):
     ones DroidDeck records (pinned), and exactly one registration points at that EXE. Placement neither reads
     nor writes the game's prefix, so its presence does not matter (design: operational entry 4.2)."""
     from preparation_common import load_json
-    from preparation_probe import EXE
     from preparation_target import registrations
     target = installation.target
-    require(target.exe.name != EXE, "probe registrations use the detailed placement")
     game_folder_apart(target.exe.parent, (target.steam, settings, store_root))
     target.verify()
     games = registrations(load_json(target.source)[0])
@@ -121,11 +106,6 @@ def _confirmation(installation, settings, store_root):
     return {"kind": "confirmation-registration", "app_id": target.registration_id, "registration_pin": target.digest,
             "source_archive_sha512": installation.inventory.archive_sha512,
             "source_inventory_digest": installation.inventory.digest}
-
-
-def _witness(plan_or_kind, installation, probe_store_root, settings, store_root):
-    kind = plan_or_kind if isinstance(plan_or_kind, str) else plan_or_kind.witness
-    return _proof(installation, probe_store_root) if kind == "probe" else _confirmation(installation, settings, store_root)
 
 
 def _private_xalia_context(installation, review):
@@ -151,8 +131,8 @@ def reviewed_payload_permissions(inventory, steam, review):
 
 
 def plan_confirmed_placement(installation, review, store_root, settings):
-    """Placement for the operational entry: the confirmation registration replaces the probe."""
-    return _plan_placement(installation, review, store_root, None, settings, "confirmation")
+    """Placement of the bundle slot, confirmed by an ordinary registered game that is only read."""
+    return _plan_placement(installation, review, store_root, settings)
 
 
 MANIFEST_TEXT = {
@@ -165,49 +145,44 @@ MANIFEST_TEXT = {
 }
 
 
-def _plan_placement(installation, review, store_root, probe_store_root, settings, witness):
+def _plan_placement(installation, review, store_root, settings):
     require(isinstance(installation, InstallationPlan), "trusted installation plan required")
     review = copy.deepcopy(validate_build_review(review))
     store_root, settings = safe_path(store_root), safe_path(settings)
-    probe_store_root = None if probe_store_root is None else safe_path(probe_store_root)
     report = installation.summary()
     require(report["tool_slot"] == "preparation" and installation.customization.summary()["tool_slot"] == "preparation" and
             installation.inventory.archive_sha512 == review["archive_sha512"] and report["payload"]["archive_sha512"] == review["archive_sha512"],
             "reviewed preparation slot required")
-    if witness == "probe":
-        # The dedicated probe trial needs a registration without a prefix; placement itself does not.
-        require(not report["prefix"]["exists"], "new prefix required")
     require(settings.is_dir(), "existing settings directory required")
     steam = safe_path(installation.target.steam)
     expected_destination = safe_path(steam / "compatibilitytools.d" / installation.customization.directory, steam)
     require(report["destination"] == str(expected_destination), "placement destination differs from generated slot")
     require(steam != settings and not steam.is_relative_to(settings) and not settings.is_relative_to(steam), "settings overlap Steam")
-    for root in (steam, settings, installation.target.exe.parent, *([] if probe_store_root is None else [probe_store_root])):
+    for root in (steam, settings, installation.target.exe.parent):
         require(not (store_root == root or store_root.is_relative_to(root) or root.is_relative_to(store_root)), "placement store overlaps inputs")
     if installation.runtime.view != "current-root":
         require(all(path != installation.runtime.root and path.is_relative_to(installation.runtime.root) for path in
-                    (steam, settings, store_root, *([] if probe_store_root is None else [probe_store_root]),
-                     safe_path(installation.target.source), installation.target.exe)),
+                    (steam, settings, store_root, safe_path(installation.target.source), installation.target.exe)),
                 "snapshot placement must remain inside snapshot")
     else:
         require(str(installation.runtime.root) == "/", "live root required")
     _private_xalia_context(installation, review)
-    proof = _witness(witness, installation, probe_store_root, settings, store_root)
-    require(proof["source_archive_sha512"] == review["archive_sha512"] and
-            proof["source_inventory_digest"] == installation.inventory.digest, "probe and placement archive identities differ")
+    confirmation = _confirmation(installation, settings, store_root)
+    require(confirmation["source_archive_sha512"] == review["archive_sha512"] and
+            confirmation["source_inventory_digest"] == installation.inventory.digest, "confirmation and placement archive identities differ")
     installation.target.verify()
     installation.runtime.verify()
-    digest = _signature(installation, review, proof, store_root, probe_store_root, settings, witness)
-    return StaticPlacementPlan(digest, installation, review, proof, store_root, probe_store_root, settings, witness)
+    digest = _signature(installation, review, confirmation, store_root, settings)
+    return StaticPlacementPlan(digest, installation, review, confirmation, store_root, settings)
 
 
 def _same_plan(current, expected):
     if not isinstance(current, StaticPlacementPlan):
         return False
     a, b = current.installation, expected.installation
-    return (current.digest == expected.digest and current.review == expected.review and current.probe == expected.probe and
-            current.store_root == expected.store_root and current.probe_store_root == expected.probe_store_root and
-            current.settings == expected.settings and current.witness == expected.witness and a.digest == b.digest and a.target == b.target and
+    return (current.digest == expected.digest and current.review == expected.review and current.confirmation == expected.confirmation and
+            current.store_root == expected.store_root and
+            current.settings == expected.settings and a.digest == b.digest and a.target == b.target and
             a.inventory == b.inventory and a.customization == b.customization and a.runtime.identity_digest == b.runtime.identity_digest and
             a.archive == b.archive)
 
@@ -216,8 +191,8 @@ def apply_static_placement(plan, refresh, store, confirmed_digest):
     """Only this narrow operation can omit launch readiness; it cannot launch."""
     require(isinstance(plan, StaticPlacementPlan) and callable(refresh), "trusted static placement plan required")
     store._guard()
-    require(confirmed_digest == plan.digest and plan.digest == _signature(plan.installation, plan.review, plan.probe,
-            plan.store_root, plan.probe_store_root, plan.settings, plan.witness), "exact placement confirmation required")
+    require(confirmed_digest == plan.digest and plan.digest == _signature(plan.installation, plan.review, plan.confirmation,
+            plan.store_root, plan.settings), "exact placement confirmation required")
     installation = plan.installation
     private_xalia = _private_xalia_context(installation, plan.review)
     compatdata = safe_path(installation.target.steam / "steamapps/compatdata" / installation.target.registration_id,
@@ -237,8 +212,8 @@ def apply_static_placement(plan, refresh, store, confirmed_digest):
         store._guard()
         if private_xalia is not None and private_xalia.parent.exists():
             private_xalia.guard()
-        require(_witness(plan, installation, plan.probe_store_root, plan.settings, plan.store_root) == plan.probe,
-                "placement probe changed")
+        require(_confirmation(installation, plan.settings, plan.store_root) == plan.confirmation,
+                "placement confirmation changed")
         installation.target.verify()
         installation.runtime.verify()
         destination = safe_path(installation.summary()["destination"])
@@ -256,7 +231,7 @@ def apply_static_placement(plan, refresh, store, confirmed_digest):
                      store, plan.settings, ready, private_xalia)
     return {"mode": "static-preparation-tool-installed", "scope": "static-preparation-slot-only", "installation": result,
             "destination": installation.summary()["destination"], "review_digest": digest_json(plan.review),
-            plan._witness_key(): plan.probe, "material_installed_now": True,
+            "confirmation_registration": plan.confirmation, "material_installed_now": True,
             "private_xalia_context": plan.summary()["private_xalia_context"],
             "writes": [{"path": installation.summary()["destination"], "scope": "new-static-preparation-tool-tree"},
                        {"path": str(store.root), "scope": "private-installation-journal-and-locks"},
@@ -268,7 +243,6 @@ def apply_static_placement(plan, refresh, store, confirmed_digest):
 
 def _confirmation_candidates(games, steam, settings, management):
     """(selectable, excluded) registrations for the operational placement; excluded ones carry a reason."""
-    from preparation_probe import EXE
     selectable, excluded = [], []
     base = steam / "steamapps/compatdata"
     # One executable registered twice is ambiguous for the confirmation (the plan would stop); list it as such.
@@ -282,8 +256,6 @@ def _confirmation_candidates(games, steam, settings, management):
     shared = {key for keys in identities.values() if len(keys) > 1 for key in keys}
     for key, game in games.items():
         exe = Path(game["exe"])
-        if exe.name == EXE:
-            continue  # probe registrations belong to the detailed menu
         if key in shared:
             excluded.append((key, "ambiguous confirmation registration"))
             continue

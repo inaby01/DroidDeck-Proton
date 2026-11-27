@@ -5,8 +5,9 @@ preparation Proton slot (`SoftDenchi-Prep-Proton <upstream>-softdenchi-r<N>`), c
 prefix for each registered game, puts the game's declared dependencies into it (prefix DLLs,
 the SoftDenchi runtime), and assigns the game to the slot in DroidDeck's settings. It runs on
 the device inside DroidDeck's Ubuntu runtime. Everything is read-only until the operator
-confirms what was listed; nothing the user owns is overwritten or deleted, and existing
-prefixes are never adopted.
+confirms what was listed. The confirmed steps write only their own new files, the game's own
+entries in DroidDeck's three settings files (with backups), and, for `recovery.sh` 7 only, the
+removal of that game's prefix; existing prefixes are never adopted.
 
 Current version: 1.0.1 (`VERSION` in `preparation_common.py`). The on-screen text is Japanese.
 
@@ -260,8 +261,7 @@ stops part way. Right before every SoftDenchi installer run the tool checks the 
   plans the interactive installer and asks for a separate confirmation.
 - `recovery.sh` 5 runs the interactive installer: a Wine `winver` window is shown first, then
   the bootstrap from a private copy with no arguments. The licence is accepted, or not, by the
-  operator in the installer window. It lists the managed prefixes (game prefixes, and dedicated
-  trial prefixes recorded by earlier versions).
+  operator in the installer window. It lists the game prefixes this tool initialized.
 - Installation runs only when the live state is `absent`. A failed or completed installer
   record, or an unreadable one, blocks a new attempt for review; nothing is repaired, upgraded,
   removed or retried on another prefix.
@@ -321,7 +321,9 @@ bytes; JSON files keep unrelated values (formatting can change). Unknown formats
 - Read-only until confirmed; each write step plans again under its locks and stops on any
   difference from what was confirmed.
 - Existing prefixes are never adopted, overwritten or removed (except by `recovery.sh` 7 after
-  its own confirmation). Existing files are never replaced.
+  its own confirmation). Existing files are never replaced, except DroidDeck's three settings
+  files by the binding (atomically, after a backup) and the `__pycache__` directories a revert
+  moves into the private store.
 - No SIGKILL and no `wineserver -k`; timeouts never kill.
 - Records are kept, never deleted; unreadable records stop instead of being guessed.
 - No authentication is performed and no game is launched.
@@ -392,6 +394,7 @@ files). Per-game work folders: `~/.local/share/droiddeck-preparation-work/<id>`.
 
 | Directory | Contents |
 | --- | --- |
+| `assets` | Private copies of the installer assets, with a receipt. |
 | `installations` | Placement of a slot. |
 | `slot-manifests` | Slot verification data. |
 | `game-prefixes` | Prefix initialization (profile, EXE hash, identities, VC++ fingerprint). |
@@ -403,9 +406,9 @@ files). Per-game work folders: `~/.local/share/droiddeck-preparation-work/<id>`.
 | `batch-runs` | Progress of `prepare.sh` runs. |
 | `redos`, `retired` | `recovery.sh` 7 records and the records it moved aside. |
 
-Records of removed features (probe receipts, dedicated trials, rechecks) may still exist in a
-store and are read and validated, never written. Backups and logs contain private data and
-device paths; do not share them.
+Records of removed features (probe receipts, dedicated trials, rechecks, launches, local runs)
+may still exist in a store written by an earlier version; the tool no longer reads them. Backups
+and logs contain private data and device paths; do not share them.
 
 ## Diagnostic log of the SoftDenchi installer
 
@@ -521,10 +524,6 @@ It builds a test image from an allowlisted snapshot and runs every suite as uid:
 must be added to both `run-tests.sh` (copy list) and `run-in-container.sh` (run list). See
 [container/README.md](container/README.md). Host runs on macOS are supplementary.
 
-`fixture_legacy_builders.py` holds test-only builders copied from 1.0.0 (`dfd3eb81`): the
-dedicated registration probe, its trial and the legacy slot writer. The tests still build their
-disposable worlds this way; it is never part of an emitted script.
-
 The tests do not run Wine or a real installer and do not establish device equivalence; GUI,
 Wine, authentication and game operation are outside them.
 
@@ -545,10 +544,14 @@ Wine, authentication and game operation are outside them.
 The last version containing these is commit `dfd3eb81` (tool 1.0.0); read them with
 `git show dfd3eb81:banner-proton/prefix-preparation/<file>`.
 
-- The numbered menus 1-12 and the operational entry screen, and the plan-only selection screen.
-- Probe material creation, its recovery (`preparation_probe_recovery.py`), the probe
-  initialization trial menu, the post-trial audit (`preparation_trial_audit.py`), the FEX recheck
-  menu and binding-only menu 11.
+- The earlier numbered screen (menus 1-12) and the plan-only selection screen.
+- The dedicated registration probe: material creation, its recovery (`preparation_probe_recovery.py`),
+  its verification and placement through it (`preparation_probe.py`), the probe initialization
+  trial and its records, the post-trial audit (`preparation_trial_audit.py`), the recheck command
+  and its records, and binding-only menu 11. A registration whose EXE is the probe file is now
+  listed like any other registration.
+- The full-readiness slot writer (`apply_installation`) and the launch records of the earlier
+  ordinary launcher.
 - The standalone placement entries.
 - Measured dependency plans (`preparation_dependencies.py`) and the runtime preflight
   (`preparation_preflight.py`).

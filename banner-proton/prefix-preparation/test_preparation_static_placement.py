@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reviewed new-slot placement; full legacy readiness remains mandatory elsewhere."""
+"""Reviewed new-slot placement, confirmed by an ordinary registered game that is only read."""
 
 import copy
 import hashlib
@@ -15,8 +15,7 @@ from unittest.mock import patch
 HERE = Path(__file__).resolve().parent
 FIX = runpy.run_path(str(HERE / 'test_preparation_tool_writer.py'))
 FOLDER = runpy.run_path(str(HERE / 'test_preparation_folder_reads.py'))
-import fixture_legacy_builders as legacy
-import preparation_probe as probe
+import preparation_batch as batch
 import preparation_selection as selection
 import preparation_static_placement as placement
 import preparation_tool_writer as writer
@@ -36,7 +35,6 @@ class StaticFixture(unittest.TestCase):
         self.home.mkdir(mode=0o700)
         selection._private_report_directory(self.home, [])
         f.store_root = self.home / '.local/state/droiddeck-prefix-preparation/tool-store'
-        self.probe_store = self.home / '.local/state/droiddeck-prefix-preparation/probe-store'
         source = f.fixture.source
         with tarfile.open(source.archive, 'r:gz') as original:
             entries = [(copy.copy(m), original.extractfile(m).read() if m.isfile() else None) for m in original]
@@ -49,7 +47,8 @@ class StaticFixture(unittest.TestCase):
                 member = tarfile.TarInfo(root + '/' + name)
                 member.type, member.mode = tarfile.DIRTYPE, 0o755
                 package.addfile(member)
-            member = tarfile.TarInfo(root + '/' + probe.MEMBER)
+            # The fixture Wine's x86 cmd.exe (used as the x86 layout reference by the game-prefix tests).
+            member = tarfile.TarInfo(root + '/files/lib/wine/i386-windows/cmd.exe')
             member.size, member.mode = len(data), 0o444
             package.addfile(member, io.BytesIO(data))
             if self.writable_xalia:
@@ -67,20 +66,8 @@ class StaticFixture(unittest.TestCase):
         source.sha = hashlib.sha512(source.archive.read_bytes()).hexdigest()
         f.fixture.options['sha512'] = source.sha
         f.fixture.options['tool_slot'] = 'preparation'
-        base = f.root / 'shared-probe'
-        base.mkdir()
-        material = legacy.plan_probe_material(source.archive, source.sha, root, f.added, f.steam, base)
-        with PrivateStore(self.probe_store, create=True) as store, store.locked(hashlib.sha256(material.record['destination'].encode()).hexdigest()):
-            legacy.create_probe_material(material, lambda: legacy.plan_probe_material(source.archive, source.sha, root,
-                f.added, f.steam, base, probe_id=material.record['probe_id']), store)
-        self.exe = Path(material.record['destination']) / probe.EXE
-        games = json.loads(f.added.read_bytes())
-        games.append({'appid': 43, 'exe': str(self.exe), 'name': 'New registration probe'})
-        f.added.write_text(json.dumps(games))
-        f.fixture.options.update(registration_id='43', exe_root=self.exe.parent)
-        f.compatdata = f.steam / 'steamapps/compatdata/43'
-        f.lock_key = hashlib.sha256(str(f.compatdata).encode()).hexdigest()
-        f.stop_check = ProcessStopCheck(f.compatdata, f.proc)
+        # The ordinary registered game 42 confirms the placement (only read); later tests prepare it.
+        self.exe = f.exe
         (f.steam / 'config').mkdir()
         self.steam_config = f.steam / 'config/config.vdf'
         self.steam_config.write_bytes(f.fixture.game.config.read_bytes())
@@ -97,7 +84,8 @@ class StaticFixture(unittest.TestCase):
         self.environment = {**f.environment, 'BL_ADDED_GAMES': str(f.added)}
 
     def plan(self):
-        return legacy.plan_static_placement(self.f.plan(), self.review, self.f.store_root, self.probe_store, self.f.settings)
+        return placement.plan_confirmed_placement(self.f.fixture.plan(archive_from_folder=True), self.review,
+                                                  self.f.store_root, self.f.settings)
 
     def apply(self, plan=None, refresh=None):
         plan = self.plan() if plan is None else plan
@@ -105,7 +93,7 @@ class StaticFixture(unittest.TestCase):
             return placement.apply_static_placement(plan, self.plan if refresh is None else refresh, store, plan.digest)
 
     def protected(self):
-        paths = [self.exe, self.exe.parent / probe.MARKER, self.f.added, self.steam_config, self.games_config]
+        paths = [self.exe, self.f.added, self.steam_config, self.games_config]
         return {str(p): (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ino) for p in paths}
 
     def menu(self, text):
@@ -114,7 +102,7 @@ class StaticFixture(unittest.TestCase):
         if not selection.operational_layout(self.config):
             return self.detail_menu(text)
         output = io.StringIO()
-        status, name = probe.interactive_workflow(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
+        status, name = batch.interactive_workflow(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
             input_stream=io.StringIO(text), output_stream=output, environment=self.environment, steam=self.f.steam,
             settings=self.f.settings, home=self.home, runtime_root=self.f.root)
         report = json.loads((self.f.fixture.source.root / name).read_bytes()) if name else None
@@ -123,7 +111,7 @@ class StaticFixture(unittest.TestCase):
     def script(self, entry, text):
         """One of the 1.0.0 scripts (prepare, status, diagnose, recovery)."""
         output = io.StringIO()
-        status, name = probe.interactive_workflow(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
+        status, name = batch.interactive_workflow(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
             input_stream=io.StringIO(text), output_stream=output, environment=self.environment, steam=self.f.steam,
             settings=self.f.settings, home=self.home, runtime_root=self.f.root, entry=entry)
         report = json.loads((self.f.fixture.source.root / name).read_bytes()) if name else None
@@ -194,40 +182,10 @@ class StaticPlanTests(StaticFixture):
         with self.assertRaises(Invalid):
             self.plan()
 
-    def test_unready_receipt_is_not_eligible(self):
-        with PrivateStore(self.probe_store) as store:
-            directory = next((self.probe_store / 'probe-runs').glob('*.json'))
-            record, digest = store.read_record('probe-runs', directory.name)
-            key = hashlib.sha256(record['destination'].encode()).hexdigest()
-            with store.locked(key):
-                record['status'] = 'probe-failed'
-                store.write_record('probe-runs', directory.name, record, digest)
-        with self.assertRaises(Invalid):
-            self.plan()
-
-    def test_probe_source_archive_must_match_reviewed_placement_source(self):
-        with PrivateStore(self.probe_store) as store:
-            path = next((self.probe_store / 'probe-runs').glob('*.json'))
-            record, digest = store.read_record('probe-runs', path.name)
-            key = hashlib.sha256(record['destination'].encode()).hexdigest()
-            with store.locked(key):
-                record['archive_sha512'] = '0' * 128
-                store.write_record('probe-runs', path.name, record, digest)
-        (self.exe.parent / probe.MARKER).write_text(json.dumps(probe._marker(record)))
-        with self.assertRaises(Invalid):
-            self.plan()
-
-    def test_existing_prefix_refused_before_any_tool_write(self):
-        self.f.compatdata.mkdir(parents=True)
-        # Menu 4 keeps its own check (reported as prefix-already-exists); the probe proof also refuses it.
-        with self.assertRaisesRegex(Invalid, 'new prefix required'):
-            self.plan()
-        self.assertFalse(self.f.destination().exists())
-
     def test_snapshot_cannot_write_outside_snapshot(self):
         outside = self.f.fixture.source.root / 'outside-management'
         with self.assertRaises(Invalid):
-            legacy.plan_static_placement(self.f.plan(), self.review, outside, self.probe_store, self.f.settings)
+            placement.plan_confirmed_placement(self.f.fixture.plan(archive_from_folder=True), self.review, outside, self.f.settings)
 
     def test_review_must_match_emitted_bundle_payload(self):
         altered = copy.deepcopy(self.config)
@@ -422,7 +380,7 @@ class PrivateModeNativeTests(StaticFixture):
 
 
 class ConfirmedFixture(StaticFixture):
-    """Operational entry 3: an ordinary registered game (42) stands in for the probe and is only read."""
+    """Placement confirmed by an ordinary registered game (42), which is only read."""
 
     def confirmed_plan(self, key='42', exe_root=None):
         installation = self.f.fixture.plan(registration_id=key, exe_root=exe_root or self.f.exe_root, archive_from_folder=True)
@@ -463,10 +421,6 @@ class ConfirmedPlanTests(ConfirmedFixture):
         self.assertEqual(self.confirmed_plan().summary()['confirmation_registration']['app_id'], '42')
         self.assertEqual(before, self.f.fixture.snapshot())
 
-    def test_probe_registration_is_refused(self):
-        with self.assertRaisesRegex(Invalid, 'probe registrations use the detailed placement'):
-            self.confirmed_plan('43', self.exe.parent)
-
     def test_two_registrations_of_one_executable_are_ambiguous(self):
         games = json.loads(self.f.added.read_bytes())
         games.append({'appid': 44, 'exe': str(self.f.exe), 'name': 'Duplicate'})
@@ -485,21 +439,13 @@ class ConfirmedPlanTests(ConfirmedFixture):
         with self.assertRaisesRegex(Invalid, 'game folder overlaps tool folders'):
             self.confirmed_plan('45', inside)
 
-    def test_witness_is_part_of_the_confirmation_digest(self):
-        plan = self.confirmed_plan()
-        installation = plan.installation
-        args = (installation, plan.review, plan.probe, plan.store_root, None, plan.settings)
-        self.assertEqual(plan.digest, placement._signature(*args, 'confirmation'))
-        self.assertNotEqual(plan.digest, placement._signature(*args, 'probe'))
-
-    def test_candidates_exclude_probes_and_unsafe_prefixes_with_reasons(self):
+    def test_candidates_exclude_unsafe_prefixes_with_reasons(self):
         base = self.f.steam / 'steamapps/compatdata'
         base.mkdir(parents=True)
         other = self.f.root / 'other-games'
         other.mkdir()
         games = {
             '42': {'exe': str(self.f.exe)},
-            '43': {'exe': str(self.exe)},
             '50': {'exe': str(other / 'a.exe')},
             str(2**32 - 5): {'exe': str(other / 'b.exe')},
             '60': {'exe': str(self.f.steam / 'game.exe')},
@@ -534,12 +480,7 @@ class ConfirmedNativeTests(ConfirmedFixture):
             self.confirmed_apply(plan)
         self.assertFalse(self.f.destination().exists())
 
-    def test_probe_placement_stays_strict_about_archive_timestamps(self):
-        with FOLDER['touching_asset_folder'](self.f.fixture.source.root), \
-                self.assertRaisesRegex(Invalid, r'input changed during read \(mtime_ns'):
-            self.plan()
-
-    def test_direct_apply_matches_the_menu_result(self):
+    def test_confirmed_placement_records_the_confirmation_registration(self):
         result = self.confirmed_apply(self.confirmed_plan())
         self.assertEqual(result['mode'], 'static-preparation-tool-installed')
         self.assertEqual(result['confirmation_registration']['kind'], 'confirmation-registration')

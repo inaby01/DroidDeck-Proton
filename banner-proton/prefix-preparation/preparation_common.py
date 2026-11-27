@@ -16,7 +16,6 @@ MAX_DEPENDENCIES = 128
 MAX_EXE = 2 * 1024**3
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z", re.ASCII)
 SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
-HANDLERS = {"mfc-local", "softdenchi-interactive"}
 
 
 class Invalid(ValueError):

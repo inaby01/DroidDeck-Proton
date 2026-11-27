@@ -62,7 +62,6 @@ for test in \
     /input/prefix-preparation/test_preparation_diagnose.py \
     /input/prefix-preparation/test_preparation_redo.py \
     /input/prefix-preparation/test_preparation_folder_reads.py \
-    /input/prefix-preparation/test_preparation_probe.py \
     /input/prefix-preparation/test_preparation_selection.py \
     /input/banner-proton/test-softdenchi-install.py \
     /input/banner-proton/test-softdenchi-observer.py; do

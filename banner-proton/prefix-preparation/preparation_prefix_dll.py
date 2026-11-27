@@ -225,7 +225,7 @@ def load_asset(root, spec):
         size = os.fstat(source.fileno()).st_size
         data = source.read(LIMIT + 1)
     # The SHA-256 below is the guarantee. Timestamps are not compared: on Android's shared storage
-    # they were seen to change while a copied file was read (menu 12, 2026-11-21).
+    # they were seen to change while a copied file was read (one-pass preparation, 2026-11-21).
     require(len(data) == size, "asset changed while reading")
     machine = pe_machine(io.BytesIO(data), len(data))
     require((len(data), hashlib.sha256(data).hexdigest(), machine) ==
@@ -471,7 +471,7 @@ class PrefixDllSession:
         from preparation_recheck import RecheckSession
         require(isinstance(plan, PrefixDllPlan), "trusted prefix DLL plan required")
         self.plan, self.store, self.refresh, self.confirmation, self.stop = plan, store, refresh, confirmation, stop_check
-        self.base_guard = RecheckSession(plan.recheck, store, None, None, stop_check)
+        self.base_guard = RecheckSession(plan.recheck, store, stop_check)
         # ``step`` names the operation in progress, so a failure records which one it was.
         self.hash, self.step = None, "prepare"
         self.made = False  # whether this run created the destination (known from the descriptor, not the phase)

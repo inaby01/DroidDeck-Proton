@@ -329,7 +329,7 @@ class MoveTests(MoveFixture, ONE['OnePassTests']):
                 'preparation_complete'})
         with PrivateStore(self.f.store_root) as store:
             self.assertEqual(set(store.inventory()), {
-                'assets', 'runs', 'bindings', 'launches', 'trials', 'rechecks', 'installations', 'dependency_installs',
+                'assets', 'bindings', 'installations', 'dependency_installs',
                 'game_prefixes', 'prefix_dlls', 'backups', 'temporary_records'})
 
     def test_reverse_screen_choice_is_never_written(self):

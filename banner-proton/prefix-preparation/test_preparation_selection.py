@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Numbered target selection, current registration pins and short report launcher."""
+"""Registration catalog, bundle validation, script emission and report storage/export."""
 
 import copy
 import hashlib
@@ -42,6 +42,19 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(list(games), [self.key])
         with self.assertRaises(Invalid):
             selection.registration_catalog({"BL_ADDED_GAMES": self.fixture.game.added.read_text()})
+
+    def test_duplicate_normalized_ids_are_rejected_before_selection(self):
+        # -1 and 4294967295 are the same registration: never keep one of them silently.
+        self.fixture.game.added.write_text(json.dumps([{"appid": -1, "exe": str(self.fixture.game.exe)},
+                                                     {"appid": 4294967295, "exe": str(self.fixture.game.exe)}]))
+        with self.assertRaisesRegex(Invalid, "duplicate or signed/unsigned alias"):
+            self.catalog()
+
+    def test_screen_text_escapes_terminal_controls(self):
+        text = selection._text("日本語\u001b[31m\u202e\n")
+        self.assertIn("日本語", text)
+        for control in ("\u001b", "\u202e", "\n"):
+            self.assertNotIn(control, text)
 
     def test_report_saving_is_exclusive_private_and_does_not_mutate_input(self):
         report = {"writes": [], "preparation_complete": False}

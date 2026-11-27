@@ -155,6 +155,16 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(Invalid):
                 COMMON["app_id"](value)
 
+    def test_pe_architecture_and_malformed_headers(self):
+        import io
+        assets = sys.modules["preparation_assets"] if "preparation_assets" in sys.modules else __import__("preparation_assets")
+        for machine, magic, expected in ((0x14C, 0x10B, "x86"), (0x8664, 0x20B, "x86_64"), (0xAA64, 0x20B, "arm64")):
+            data = pe(machine, magic)
+            self.assertEqual(assets.pe_machine(io.BytesIO(data), len(data)), expected)
+        for data in (b"MZ", b"bad", pe(0xAA64, 0x10B), pe()[:89]):
+            with self.subTest(data=data[:8]), self.assertRaises(Invalid):
+                assets.pe_machine(io.BytesIO(data), len(data))
+
     def test_json_duplicate_keys_nonfinite_depth_size_and_string_limits(self):
         with tempfile.TemporaryDirectory(dir=TEMP) as folder:
             path = Path(folder).resolve() / "input.json"

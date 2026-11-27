@@ -31,7 +31,7 @@ from preparation_target import registrations
 def operational_layout(config):
     """Whether the bundle shows the operational entry first (design: operational entry 3).
 
-    The same conditions as menu 12; a bundle missing one keeps the earlier screen.
+    Every operational step must be configured; a bundle missing one is refused (1.0.1).
     """
     return (type(config) is dict and bool(config.get("probe_material", False)) and config.get("initialization_trial") is True
             and all(name in config for name in ("placement_review", "game_preparation", "dependency_installation")))
@@ -268,7 +268,7 @@ def selection_script(config, entry="prepare"):
     names = ("preparation_common", "preparation_assets", "preparation_vdf", "preparation_binding", "preparation_target",
              "preparation_payload", "preparation_runtime", "preparation_customization", "preparation_runtime_context",
              "preparation_installation", "preparation_processes", "preparation_publication", "preparation_execution",
-             "preparation_tool_writer", "preparation_store", "preparation_slot_manifest", "preparation_probe", "preparation_static_placement", "preparation_trial", "preparation_recheck", "preparation_softdenchi_recipe",
+             "preparation_tool_writer", "preparation_store", "preparation_slot_manifest", "preparation_static_placement", "preparation_trial", "preparation_recheck", "preparation_softdenchi_recipe",
              "preparation_dependency_state", "preparation_vc_record", "preparation_installer_log", "preparation_dependency_install", "preparation_prefix_dll", "preparation_game_prefix",
              "preparation_one_pass", "preparation_proton_update", "preparation_status", "preparation_batch",
              "preparation_diagnose", "preparation_redo", "preparation_selection")
@@ -284,7 +284,7 @@ def selection_script(config, entry="prepare"):
             "    sys.modules[name] = module\n"
             "    exec(compile(source, name, 'exec'), module.__dict__)\n" +
             "with os.fdopen(os.dup(3), 'r', encoding='utf-8') as selection_input:\n"
-            "    status, _ = sys.modules['preparation_probe'].interactive_workflow(\n"
+            "    status, _ = sys.modules['preparation_batch'].interactive_workflow(\n"
             "        sys.argv[1], sys.modules['preparation_distributed_installer'].render_installation,\n"
             "        config=" + ascii(config) + ", input_stream=selection_input, entry=" + ascii(entry) + ")\n"
             "raise SystemExit(status)\n")

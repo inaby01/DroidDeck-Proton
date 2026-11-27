@@ -111,7 +111,6 @@ def build(ctx):
     import preparation_selection as selection
     from preparation_assets import exe_identity
     from preparation_one_pass import _game_records
-    from preparation_probe import EXE
     from preparation_proton_update import (
         bundle_directory,
         classify,
@@ -198,8 +197,6 @@ def build(ctx):
     base_dir = ctx.steam / "steamapps/compatdata"
     for key in sorted(games, key=int):
         game = games[key]
-        if Path(game["exe"]).name == EXE:
-            continue
         entry = {"app_id": key, "title": game["title"]}
         try:
             entry["targets"] = target_items(current_files(ctx.steam, ctx.settings), key)
@@ -1237,6 +1234,26 @@ def confirm(stream, output, question):
 
 
 ENTRIES = ("prepare", "status", "diagnose", "recovery")
+
+
+def interactive_workflow(directory, renderer, config=None, *, input_stream=None, output_stream=None, environment=None,
+                         steam=None, settings=None, home=None, runtime_root=Path("/"), entry="prepare"):
+    """Common entry of the four scripts (1.0.0): prepare, status, diagnose or recovery.
+
+    Only an operational bundle is accepted; the earlier screens were removed in 1.0.1.
+    """
+    import sys
+
+    import preparation_selection as selection
+
+    stream = sys.stdin if input_stream is None else input_stream
+    output = sys.stdout if output_stream is None else output_stream
+    environment = os.environ if environment is None else environment
+    options = {"input_stream": stream, "output_stream": output, "environment": environment,
+               "steam": steam, "settings": settings, "home": home, "runtime_root": runtime_root}
+    require(selection.operational_layout(config), "operational bundle required")
+    selection.validate_selection_config(config)
+    return interactive_entry(entry, directory, renderer, config, **options)
 
 
 def interactive_entry(entry, directory, renderer, config, **options):

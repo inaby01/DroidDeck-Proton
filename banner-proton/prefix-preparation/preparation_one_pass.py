@@ -7,7 +7,7 @@ SoftDenchi bootstrap runs with its pinned silent arguments. Only when that insta
 is the interactive installer offered, under a separate confirmation of its own plan.
 
 The run resumes from the private records of the selected registration, so a stop (for
-example a refused SdProxy stop) is continued by running menu 12 again for the same game.
+example a refused SdProxy stop) is continued by running it again for the same game (prepare.sh or recovery.sh 1).
 """
 
 import hashlib
@@ -596,7 +596,6 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
         inspect_managed_dependency,
         plan_dependency_install,
     )
-    from preparation_probe import EXE
     from preparation_recheck import plan_recheck
     from preparation_softdenchi_recipe import (
         softdenchi_recipe,
@@ -723,9 +722,7 @@ def interactive_one_pass(directory, renderer, config, *, input_stream=None, outp
             print(f"読めない初期化記録が{unreadable}件あります（どの登録のものか分からないため、一覧の判定には使いません）。", file=output)
         base_dir = steam / "steamapps/compatdata"
         candidates = []
-        for key_, game in games.items():
-            if Path(game["exe"]).name == EXE:
-                continue
+        for key_ in games:
             if key_ in records:
                 candidates.append((key_, "続きから"))
             elif not os.path.lexists(base_dir / key_) and not (int(key_) >= 2**31 and

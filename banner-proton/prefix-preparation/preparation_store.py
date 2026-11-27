@@ -30,11 +30,8 @@ from preparation_common import (
     pairs,
     regular_open,
     require,
-    revision,
     safe_path,
-    string,
 )
-from preparation_execution import validate_launch_record
 from preparation_tool_writer import validate_installation_record
 
 MAX_OBJECTS = 4096
@@ -70,17 +67,6 @@ def encode(value):
     raw = (json.dumps(value, sort_keys=True, ensure_ascii=True, indent=2) + "\n").encode()
     require(len(raw) <= MAX_JSON, "record too large")
     return raw
-
-
-def check_results(value):
-    require(type(value) is list and 0 < len(value) <= 128, "nonempty bounded checks required")
-    seen = set()
-    for item in value:
-        fields(item, ("check_id", "result"))
-        key = identifier(item["check_id"])
-        require(key not in seen and item["result"] in ("passed", "failed", "uninspected"), "invalid check result")
-        seen.add(key)
-    return all(item["result"] == "passed" for item in value)
 
 
 class PrivateStore:
@@ -407,8 +393,8 @@ class PrivateStore:
 
     def inventory(self):
         """Read-only bounded inventory. Incomplete objects remain visible, never deleted."""
-        result = {"assets": [], "runs": [], "bindings": [], "launches": [], "trials": [], "rechecks": [], "installations": [], "dependency_installs": [], "game_prefixes": [], "prefix_dlls": [], "backups": [], "temporary_records": []}
-        for directory in ("assets", "runs", "bindings", "launches", "trials", "rechecks", "installations", "dependency-installs", "game-prefixes",
+        result = {"assets": [], "bindings": [], "installations": [], "dependency_installs": [], "game_prefixes": [], "prefix_dlls": [], "backups": [], "temporary_records": []}
+        for directory in ("assets", "bindings", "installations", "dependency-installs", "game-prefixes",
                           "prefix-dlls", "backups"):
             try:
                 with self.directory((directory,)) as fd:
@@ -433,35 +419,6 @@ class PrivateStore:
                                                   "completed_files": record["completed_files"], "preparation_complete": False})
                     except (OSError, Invalid, TypeError, KeyError):
                         result["bindings"].append({"object": name, "status": "invalid"})
-                elif directory == "rechecks" and not name.startswith("tmp-"):
-                    try:
-                        from preparation_recheck import validate_recheck_record
-                        record, _ = self.read_record("rechecks", name)
-                        validate_recheck_record(record)
-                        result["rechecks"].append({key: record[key] for key in
-                            ("recheck_id", "trial_id", "app_id", "status", "exit_code", "preparation_complete")})
-                        result["rechecks"][-1]["reinspection_required"] = True
-                    except (OSError, Invalid, TypeError, KeyError):
-                        result["rechecks"].append({"object": name, "status": "invalid"})
-                elif directory == "trials" and not name.startswith("tmp-"):
-                    try:
-                        from preparation_trial import validate_trial_record
-                        record, _ = self.read_record("trials", name)
-                        validate_trial_record(record)
-                        result["trials"].append({key: record[key] for key in
-                            ("trial_id", "app_id", "scope", "status", "phase", "exit_code", "preparation_complete")})
-                        result["trials"][-1]["reinspection_required"] = True
-                    except (OSError, Invalid, TypeError, KeyError):
-                        result["trials"].append({"object": name, "status": "invalid"})
-                elif directory == "launches" and not name.startswith("tmp-"):
-                    try:
-                        record, _ = self.read_record("launches", name)
-                        validate_launch_record(record)
-                        result["launches"].append({key: record[key] for key in
-                                                   ("launch_id", "app_id", "operation", "status", "preparation_complete")})
-                        result["launches"][-1]["reinspection_required"] = True
-                    except (OSError, Invalid, TypeError, KeyError):
-                        result["launches"].append({"object": name, "status": "invalid"})
                 elif directory == "game-prefixes" and not name.startswith("tmp-"):
                     try:
                         from preparation_game_prefix import ID_PREFIX
@@ -522,76 +479,4 @@ class PrivateStore:
                     result["assets"].append({"object": name, "status": status})
                 elif name.startswith("tmp-"):
                     result["temporary_records"].append(name)
-                else:
-                    try:
-                        record, _ = self.read_record("runs", name)
-                        validate_run(record)
-                        result["runs"].append({"run_id": record["run_id"], "stored_status": record["status"],
-                                               "created_ns": record["created_ns"], "updated_ns": record["updated_ns"],
-                                               "reinspection_required": True, "preparation_complete": False})
-                    except (OSError, Invalid, TypeError, KeyError):
-                        result["runs"].append({"object": name, "stored_status": "invalid",
-                                               "reinspection_required": True, "preparation_complete": False})
         return result
-
-
-def validate_run(record):
-    bounded(record)
-    fields(record, ("schema_version", "tool_version", "run_id", "created_ns", "updated_ns", "target_key", "input_digest", "input_hashes",
-                    "profile", "recipes", "assets", "compatibility", "target", "template", "status", "steps", "preparation_complete"))
-    require(type(record["schema_version"]) is int and record["schema_version"] == 1, "unknown run schema")
-    require(record["tool_version"] == VERSION and record["preparation_complete"] is False, "incompatible run")
-    identifier(record["run_id"])
-    for name in ("created_ns", "updated_ns"):
-        require(type(record[name]) is int and record[name] > 0, "invalid run timestamp")
-    sha256(record["target_key"])
-    sha256(record["input_digest"])
-    require(type(record["input_hashes"]) is dict, "invalid input hash map")
-    for key, value in record["input_hashes"].items():
-        require(key in ("registrations", "games", "config", "profile", "recipes", "assets", "binding"), "unknown input hash")
-        sha256(value)
-    fields(record["profile"], ("profile_id", "revision"))
-    identifier(record["profile"]["profile_id"])
-    revision(record["profile"]["revision"])
-    require(type(record["recipes"]) is dict and len(record["recipes"]) <= 128, "invalid recipe revisions")
-    for key, value in record["recipes"].items():
-        identifier(key)
-        revision(value)
-    require(type(record["assets"]) is dict and len(record["assets"]) <= 128, "invalid asset history")
-    for key, value in record["assets"].items():
-        identifier(key)
-        fields(value, ("revision", "spec_digest", "sha256"))
-        revision(value["revision"])
-        sha256(value["spec_digest"])
-        if value["sha256"] is not None:
-            sha256(value["sha256"])
-    fields(record["compatibility"], ("status", "droiddeck", "proton", "version_source"))
-    require(record["compatibility"]["status"] == "unverified" and
-            record["compatibility"]["version_source"] == "operator-declared", "unsupported compatibility claim")
-    for key in ("droiddeck", "proton"):
-        if record["compatibility"][key] is not None:
-            string(record["compatibility"][key])
-    fields(record["target"], ("app_id", "exe_sha256", "exe_size"))
-    require(type(record["target"]["app_id"]) is str and record["target"]["app_id"].isascii()
-            and record["target"]["app_id"].isdigit() and 0 < int(record["target"]["app_id"]) <= 0xFFFFFFFF,
-            "invalid target registration")
-    sha256(record["target"]["exe_sha256"])
-    require(type(record["target"]["exe_size"]) is int and record["target"]["exe_size"] > 0, "invalid EXE length")
-    require(record["template"] is None, "templates not implemented")
-    require(record["status"] in ("pending", "running", "failed", "needs-user"), "invalid run status")
-    require(type(record["steps"]) is dict and set(record["steps"]) == {"asset-cache", "prefix-preparation"}, "unknown steps")
-    for name, step in record["steps"].items():
-        identifier(name)
-        fields(step, ("status", "attempt", "checks", "exit_code", "started_ns", "finished_ns", "last_checked_ns"))
-        for timestamp in ("started_ns", "finished_ns", "last_checked_ns"):
-            require(step[timestamp] is None or type(step[timestamp]) is int and step[timestamp] > 0,
-                    "invalid step timestamp")
-        require(step["status"] in STEP_STATES and type(step["attempt"]) is int and 0 <= step["attempt"] <= 10000,
-                "invalid step state")
-        require(step["exit_code"] is None or type(step["exit_code"]) is int and -255 <= step["exit_code"] <= 255,
-                "invalid exit code")
-        require(type(step["checks"]) is list, "invalid step checks")
-        if step["checks"]:
-            check_results(step["checks"])
-        if step["status"] == "succeeded":
-            require(step["exit_code"] == 0 and check_results(step["checks"]), "success without postconditions")

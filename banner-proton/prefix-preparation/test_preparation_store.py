@@ -54,6 +54,16 @@ class StorageTests(unittest.TestCase):
     def cache(self, store):
         return store.cache_asset(self.spec, self.source_root)
 
+    def test_missing_asset_and_unreviewed_origin_terms_hash_remain_blocked(self):
+        self.source.unlink()
+        spec = {**self.spec, "source_kind": "unknown", "provenance_status": "unconfirmed",
+                "terms_status": "unconfirmed", "expected_sha256": None, "expected_size": None,
+                "hash_kind": "local-measurement", "hash_reference": None}
+        blockers = assets.inspect_assets({"schema_version": 1, "assets": [spec]}, self.source_root)[0]["blockers"]
+        for expected in ("asset-missing", "provenance-unconfirmed", "terms-unconfirmed", "expected-hash-unknown",
+                         "expected-size-unknown", "independent-hash-reference-unavailable"):
+            self.assertIn(expected, blockers)
+
     def test_schema_fields_limits_and_paths_are_validated(self):
         cases = (("command", "touch injected"), ("schema_version", 99), ("format", "shell"),
                  ("expected_size", True), ("expected_size", 2**40), ("filename", "../escape"),
@@ -97,7 +107,7 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(store.inventory()["assets"][0]["status"], "integrity-checked")
 
     def test_asset_folder_timestamps_alone_do_not_stop_caching_and_the_private_copy_stays_strict(self):
-        # Other callers (such as --stage-local) keep the strict read; only the prepare.sh folder is loose.
+        # The private copy keeps the strict read; only the prepare.sh folder is loose.
         with self.store() as store, store.locked(self.key), \
                 patch.object(storage, "regular_open", side_effect=FOLDER["touching_open"](self.source)), \
                 self.assertRaisesRegex(storage.Invalid, r"input changed during read \(mtime_ns"):

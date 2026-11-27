@@ -17,9 +17,8 @@ from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 FIXTURE = runpy.run_path(str(HERE / "test_preparation_installation.py"))
-import fixture_legacy_builders as legacy
 import preparation_tool_writer as writer
-from preparation_common import Invalid
+from preparation_common import Invalid, require
 from preparation_payload import verify_tree
 from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore
@@ -69,9 +68,18 @@ class ToolWriterTests(unittest.TestCase):
         with PrivateStore(self.store_root, create=True) as store, store.locked(self.lock_key):
             yield store
 
-    def apply(self, store, plan=None):
-        return legacy.apply_installation(self.plan() if plan is None else plan, self.plan, store,
-                                         self.settings, lambda: dict(self.checks), self.stop_check)
+    def apply(self, store, plan=None, refresh=None):
+        """The shared tree transaction with a minimal readiness callback (the tool's caller is
+        apply_static_placement; the full-readiness wrapper of earlier versions was removed in 1.0.1)."""
+        plan = self.plan() if plan is None else plan
+
+        def ready(published=False):
+            store._guard()
+            require(all(value is True for value in self.checks.values()), "installation prerequisites unverified")
+            require(self.stop_check.check()["clear_in_view"], "active or unknown prefix process")
+            plan.target.verify()
+            plan.runtime.verify()
+        return writer._write_installation_tree(plan, self.plan if refresh is None else refresh, store, self.settings, ready)
 
     def record(self, store):
         inventory = store.inventory()["installations"]
@@ -139,15 +147,6 @@ class ToolWriterTests(unittest.TestCase):
             self.assertEqual(before, {str(p): (p.read_bytes(), p.stat().st_mtime_ns) for p in destination.rglob("*") if p.is_file()})
             self.assertEqual(len(store.inventory()["installations"]), 2)
 
-    def test_missing_or_wrong_target_lock_rejected_before_installation(self):
-        plan = self.plan()
-        with PrivateStore(self.store_root, create=True) as store:
-            with self.assertRaises(Invalid):
-                self.apply(store, plan)
-            with store.locked("0" * 64), self.assertRaises(Invalid):
-                self.apply(store, plan)
-        self.assertFalse((self.steam / "compatibilitytools.d").exists())
-
     def test_each_readiness_check_must_be_true(self):
         with self.store() as store:
             for key in self.checks:
@@ -163,16 +162,6 @@ class ToolWriterTests(unittest.TestCase):
         with self.store() as store, self.assertRaises(Invalid):
             self.apply(store)
         self.assertFalse((self.steam / "compatibilitytools.d").exists())
-
-    def test_snapshot_outputs_cannot_escape_snapshot(self):
-        self.fixture.options["steam"] = self.fixture.game.steam
-        outside_plan = self.plan()
-        compatdata = self.fixture.game.steam / "steamapps/compatdata/42"
-        with PrivateStore(self.store_root, create=True) as store, store.locked(hashlib.sha256(str(compatdata).encode()).hexdigest()), \
-             self.assertRaises(Invalid):
-            legacy.apply_installation(outside_plan, self.plan, store, self.settings, lambda: self.checks,
-                                      ProcessStopCheck(compatdata, self.proc))
-        self.assertFalse((self.fixture.game.steam / "compatibilitytools.d").exists())
 
     def test_mutated_plan_expected_bytes_are_rejected(self):
         plan = self.plan()
@@ -340,7 +329,7 @@ class ToolWriterTests(unittest.TestCase):
                 with patch("preparation_installation.os.statvfs", return_value=fs):
                     return original()
             with self.assertRaises(Invalid):
-                legacy.apply_installation(plan, low_capacity, store, self.settings, lambda: self.checks, self.stop_check)
+                self.apply(store, plan, low_capacity)
             self.assertEqual(self.record(store)["status"], "failed")
         self.assertFalse((self.steam / "compatibilitytools.d").exists())
 

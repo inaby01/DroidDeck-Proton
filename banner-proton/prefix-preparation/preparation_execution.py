@@ -150,7 +150,7 @@ class LaunchPlan:
 
 def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_environment,
                 expected_hashes, payload_inventory=None, payload_overlays=None, target_pin=None, runtime_plan=None, operation="initialize",
-                prefix_version_sha256=None, origin_launch_id=None, trial_recheck_id=None, fex_runtime_contract=False):
+                prefix_version_sha256=None, trial_recheck_id=None, fex_runtime_contract=False):
     """Read-only plan. Hashes/runtime inputs come from trusted adapters, never profile JSON.
 
     ``fex_runtime_contract`` is for the managed initialization scopes only: the reviewed
@@ -172,15 +172,13 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
             require(private != protected and not private.is_relative_to(protected) and
                     not protected.is_relative_to(private), "launch directories overlap")
     if operation == "initialize":
-        require(trial_recheck_id is None and prefix_version_sha256 is None and origin_launch_id is None and not os.path.lexists(compatdata), "new compatdata required")
+        require(trial_recheck_id is None and prefix_version_sha256 is None and not os.path.lexists(compatdata), "new compatdata required")
     else:
-        if trial_recheck_id is None:
-            _launch_id(origin_launch_id)
-        else:
-            prefix = next((p for p in ("trial-", "gprefix-") if type(trial_recheck_id) is str and trial_recheck_id.startswith(p)), None)
-            require(origin_launch_id is None and prefix is not None and len(trial_recheck_id) == len(prefix) + 32 and
-                    all(c in "0123456789abcdef" for c in trial_recheck_id[len(prefix):]),
-                    "managed trial origin required")
+        # The origin is a registered-game prefix record (the probe trial origin was removed in 1.0.1).
+        prefix = "gprefix-"
+        require(type(trial_recheck_id) is str and trial_recheck_id.startswith(prefix) and len(trial_recheck_id) == len(prefix) + 32 and
+                all(c in "0123456789abcdef" for c in trial_recheck_id[len(prefix):]),
+                "managed trial origin required")
         require(type(prefix_version_sha256) is str and SHA256.fullmatch(prefix_version_sha256)
                 and _prefix(compatdata) == prefix_version_sha256, "unverified or changed prefix version")
     overlays = {} if payload_overlays is None else copy.deepcopy(payload_overlays)
@@ -227,7 +225,7 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
     spec = {"tool": tool, "steam": steam, "registration_id": key, "install": install, "work": work,
             "home": home, "runtime_environment": dict(runtime_environment), "expected_hashes": hashes,
             "payload_inventory": payload_inventory, "payload_overlays": overlays, "target_pin": target_pin, "runtime_plan": runtime_plan,
-            "operation": operation, "prefix_version_sha256": prefix_version_sha256, "origin_launch_id": origin_launch_id, "trial_recheck_id": trial_recheck_id,
+            "operation": operation, "prefix_version_sha256": prefix_version_sha256, "trial_recheck_id": trial_recheck_id,
             "fex_runtime_contract": fex_runtime_contract}
     signature = {k: str(v) if hasattr(v, "parts") else v for k, v in spec.items()}
     signature["payload_inventory"] = payload_digest
@@ -237,7 +235,7 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
     signature["runtime_environment"] = {key:("present" if key == "PROOT_FP_KEY" else value)
                                         for key,value in runtime_environment.items()}
     signature["tool_version"] = VERSION
-    context = {k: v for k, v in signature.items() if k not in ("operation", "prefix_version_sha256", "origin_launch_id")}
+    context = {k: v for k, v in signature.items() if k not in ("operation", "prefix_version_sha256")}
     return LaunchPlan(operation, key, _digest(signature), _digest(context), payload_digest, target_pin.digest, spec, env, (str(tool / "proton"), *OPERATIONS[operation]))
 
 
@@ -254,24 +252,3 @@ def _payload_digest(inventory, overlays):
     require(inventory.external_links == 0, "external payload links not supported for launch")
     return _digest({"archive_sha512": inventory.archive_sha512, "inventory_digest": inventory.digest,
                     "overlays": overlays})
-
-
-def _launch_id(value):
-    require(type(value) is str and value.startswith("launch-") and len(value) == 39 and
-            all(c in "0123456789abcdef" for c in value[7:]), "invalid launch ID")
-
-
-def validate_launch_record(record):
-    fields(record, ("schema_version", "tool_version", "launch_id", "app_id", "operation", "input_digest",
-                    "status", "exit_code", "prefix_version_sha256", "context_digest", "payload_pin_digest", "target_pin_digest", "preparation_complete"))
-    require(type(record["schema_version"]) is int and record["schema_version"] == 2, "unknown launch record")
-    require(type(record["tool_version"]) is str and len(record["tool_version"]) <= 64, "invalid launch version")
-    _launch_id(record["launch_id"])
-    require(app_id(record["app_id"]) == record["app_id"] and record["operation"] in OPERATIONS, "invalid launch target")
-    for key in ("input_digest", "context_digest", "payload_pin_digest", "target_pin_digest"):
-        require(type(record[key]) is str and SHA256.fullmatch(record[key]), "invalid launch digest")
-    require(record["status"] in ("running", "needs-user", "failed", "initialized-unverified", "probe-exited")
-            and record["preparation_complete"] is False, "invalid launch state")
-    require(record["exit_code"] is None or type(record["exit_code"]) is int, "invalid launch exit code")
-    version = record["prefix_version_sha256"]
-    require(version is None or type(version) is str and SHA256.fullmatch(version), "invalid prefix version digest")
