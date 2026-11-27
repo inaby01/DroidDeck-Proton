@@ -77,7 +77,7 @@ class RedoTests(BATCH['NewGameBatchTests']):
         locked.chmod(0o500)
         _, _, listed = self.first_screen('q\n')
         self.assertIn('recovery.sh の7でprefixを消して', listed)
-        status, report, output = self.redo('1\ny\n')
+        _status, report, output = self.redo('1\ny\n')
         self.assertEqual((report['status'], report['retired']), ('done', {}), output)
         self.assertFalse(os.path.lexists(self.game_compat))
         self.assertEqual(outside.read_text(), 'keep')
@@ -98,7 +98,7 @@ class RedoTests(BATCH['NewGameBatchTests']):
         with PrivateStore(self.f.store_root, create=True) as store, store.locked('e' * 64):
             store.write_record(redo.BINDINGS, 'binding-' + '1' * 32 + '.json',
                                {'schema_version': 1, 'app_id': '42', 'status': 'binding-running'})
-        _, report, output = self.redo('q\n')
+        _, _report, output = self.redo('q\n')
         self.assertIn('[ID 42]（設定の書き換えを始めた記録があります', output)
         self.assertNotIn('一度準備を終えています', output)
         self.assertTrue(self.game_compat.is_dir())
@@ -306,7 +306,7 @@ class RedoTests(BATCH['NewGameBatchTests']):
         self.initialize()
         import shutil
         shutil.rmtree(self.game_compat)  # As a stop between saving the record and creating the prefix.
-        _, report, output = self.redo('1\ny\n')
+        _, report, _output = self.redo('1\ny\n')
         self.assertEqual((report['status'], report['prefix'], report['retired']), ('done', 'absent', {'game-prefixes': 1}))
         _, _, listed = self.first_screen('q\n')
         self.assertIn('[ID 42] を新しく準備する', listed)
@@ -403,7 +403,7 @@ class FinishPlacementTests(BATCH['NewGameBatchTests']):
     def test_publish_intent_and_needs_inspection_are_finished_and_an_earlier_running_record_fails(self):
         intent = self.interrupt('publish-intent', status='needs-inspection')
         early = self.interrupt('tree-verified', staging=True)
-        status, report, output = self.first_screen('1\n')
+        _status, report, output = self.first_screen('1\n')
         self.assertEqual(report['items'][0]['outcome'], 'done', output)
         self.assertEqual(self.record(intent)['status'], 'installed-tree-verified')
         self.assertEqual(self.record(early)['status'], 'failed')
@@ -411,7 +411,7 @@ class FinishPlacementTests(BATCH['NewGameBatchTests']):
 
     def test_a_non_empty_staging_folder_of_a_published_record_is_not_finished(self):
         record = self.interrupt('published', staging=True)
-        status, report, output = self.first_screen('1\n')
+        _status, report, output = self.first_screen('1\n')
         entry = report['items'][0]
         self.assertEqual((entry['kind'], entry['outcome'], entry['reason']),
                          ('finish-placement', 'skipped', 'placement-record-not-finished'), output)
@@ -422,7 +422,7 @@ class FinishPlacementTests(BATCH['NewGameBatchTests']):
     def test_a_publish_intent_whose_tree_is_still_staged_did_not_publish(self):
         record = self.interrupt('publish-intent', staging=True)
         other = self.interrupt('published', staging=False)
-        status, report, output = self.first_screen('1\n')
+        _status, report, output = self.first_screen('1\n')
         self.assertEqual(report['items'][0]['outcome'], 'done', output)
         closed = self.record(record)
         self.assertEqual((closed['status'], closed['phase'], closed['published']), ('failed', 'tree-verified', False))
@@ -450,7 +450,7 @@ class FinishPlacementTests(BATCH['NewGameBatchTests']):
 
     def test_a_post_verified_record_left_for_inspection_is_finished(self):
         record = self.interrupt('post-verified', status='needs-inspection')
-        status, report, output = self.first_screen('1\n')
+        _status, report, output = self.first_screen('1\n')
         self.assertEqual(report['items'][0]['outcome'], 'done', output)
         self.assertEqual(self.record(record)['status'], 'installed-tree-verified')
         self.assertIsNotNone(self.placed())
@@ -458,7 +458,7 @@ class FinishPlacementTests(BATCH['NewGameBatchTests']):
     def test_a_partly_finished_placement_is_shown_as_such(self):
         self.interrupt('published', staging=True)
         self.interrupt('published', staging=False)
-        status, report, output = self.first_screen('1\n')
+        _status, report, output = self.first_screen('1\n')
         self.assertEqual(report['items'][0]['state'], 'partial', output)
         self.assertIn('置いた記録の仕上げ: 一部だけ仕上げ・要確認', output)
 
@@ -466,7 +466,7 @@ class FinishPlacementTests(BATCH['NewGameBatchTests']):
         record = self.interrupt('published')
         tool = self.f.steam / 'compatibilitytools.d' / self.bundle()
         (tool / 'files' / 'extra.txt').write_text('changed')
-        status, report, output = self.first_screen('1\n')
+        status, _report, output = self.first_screen('1\n')
         self.assertEqual(status, 1, output)
         self.assertNotIn('置いた記録を仕上げる', output)
         self.assertEqual(self.record(record)['status'], 'running')

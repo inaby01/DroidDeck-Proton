@@ -89,7 +89,7 @@ class DiagnoseTests(unittest.TestCase):
         for reference in (None, {"runtime_sources": [], "libraries": "x", "process_observation_basis": 3}):
             with self.subTest(reference=reference):
                 self.reference = reference
-                status, text, report = self.run_diagnose()
+                status, _text, report = self.run_diagnose()
                 self.assertEqual(status, 2)
                 self.assertEqual(report["status"], "stopped" if reference is None else "reported")
 

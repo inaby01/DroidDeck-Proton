@@ -15,11 +15,11 @@ from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 BASE = runpy.run_path(str(HERE / 'test_preparation_static_placement.py'))
+import preparation_dependency_install as dependency
 import preparation_execution as execution
 import preparation_game_prefix as game
 import preparation_recheck as recheck
 import preparation_trial as trial
-import preparation_dependency_install as dependency
 from preparation_common import Invalid
 from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore

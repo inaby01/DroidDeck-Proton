@@ -332,10 +332,10 @@ def redo(ctx, key, confirmed_prefix):
     none); a different one now stops before any write.
 
     Returns the report; after the first write it always names the redo ID and how far it got."""
+    import preparation_selection as selection
     from preparation_processes import ProcessStopCheck
     from preparation_proton_update import current_files
     from preparation_store import PrivateStore
-    import preparation_selection as selection
     _, _, games = selection.registration_catalog(ctx.environment)
     require(key in games, "registration missing")
     parent = safe_path(ctx.steam / "steamapps/compatdata", ctx.steam)

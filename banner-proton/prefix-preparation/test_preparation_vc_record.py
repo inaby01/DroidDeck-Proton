@@ -69,6 +69,7 @@ def initial(text):
 
 
 NO_MFC = {"syswow64": "absent", "system32": "absent"}
+TEMPLATE_MISSING = Invalid("template contract missing")  # Default of TemplateOriginalTests.decide.
 
 
 class ScanTests(unittest.TestCase):
@@ -152,7 +153,7 @@ class TemplateOriginalTests(unittest.TestCase):
     def text(self):
         return "\n".join(wine_original(ident) for ident in ORIGINAL_KEYS)
 
-    def decide(self, text, *, original=None, init="same", tmpl=Invalid("template contract missing"), tail=None):
+    def decide(self, text, *, original=None, init="same", tmpl=TEMPLATE_MISSING, tail=None):
         found = scan(text)
         start = initial(text) if init == "same" else init
         return vc.evaluate(found, NO_MFC, tmpl, start, tail, original=self.ORIGINAL if original is None else original)

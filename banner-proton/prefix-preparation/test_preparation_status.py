@@ -500,12 +500,12 @@ class EntryTests(StatusMixin, ONE['OnePassTests']):
                 self.assertNotIn(absent, result.stdout)
                 self.assertNotIn('詳細メニュー', result.stdout)
                 script.unlink()
-        with self.assertRaises(Exception):
+        with self.assertRaises(selection.require.__globals__['Invalid']):
             selection.selection_script(self.config, 'detailed')
         # A bundle without the operational layout has no scripts at all since 1.0.1.
         earlier = {key: value for key, value in self.config.items() if key != 'game_preparation'}
         for entry in ('prepare', 'status', 'diagnose', 'recovery'):
-            with self.subTest(earlier=entry), self.assertRaises(Exception):
+            with self.subTest(earlier=entry), self.assertRaises(selection.require.__globals__['Invalid']):
                 selection.selection_script(earlier, entry)
 
 

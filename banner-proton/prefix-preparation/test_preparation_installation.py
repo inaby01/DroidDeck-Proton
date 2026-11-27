@@ -20,7 +20,6 @@ from preparation_common import Invalid
 from preparation_installation import plan_installation
 
 
-
 def extract_fixture(archive, tools, mode):
     """What the removed manual installer did before its own renames: extract the archive with the
     data filter (keeping the process umask) and name the folder as SoftDenchi-Proton <version>."""

@@ -14,7 +14,14 @@ import os
 import re
 import stat
 
-from preparation_common import Invalid, input_change, regular_open, require, safe_path, unchanged
+from preparation_common import (
+    Invalid,
+    input_change,
+    regular_open,
+    require,
+    safe_path,
+    unchanged,
+)
 from preparation_dependency_state import (
     MAX_KEY_HEADERS,
     MAX_LOGICAL_LINE,
