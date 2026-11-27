@@ -5,7 +5,8 @@ preparation Proton slot (`SoftDenchi-Prep-Proton <upstream>-softdenchi-r<N>`), c
 prefix for each registered game, puts the game's declared dependencies into it (prefix DLLs,
 the SoftDenchi runtime), and assigns the game to the slot in DroidDeck's settings. It runs on
 the device inside DroidDeck's Ubuntu runtime. Everything is read-only until the operator
-confirms what was listed. The confirmed steps write only their own new files, the game's own
+confirms what was listed, with one exception: opening `recovery.sh` 7 first removes the hidden
+folder a previously confirmed redo left behind, when no game or Wine of it runs. The confirmed steps write only their own new files, the game's own
 entries in DroidDeck's three settings files (with backups), and, for `recovery.sh` 7 only, the
 removal of that game's prefix; existing prefixes are never adopted.
 
@@ -48,7 +49,8 @@ prefix DLLs) are read from the folder the script is in.
 4. Initialize a new prefix only (before 5; the game is not started).
 5. Install SoftDenchi with its installer window (to read the licence on screen, or when the
    silent installation installed nothing).
-6. Read the SoftDenchi state (read-only).
+6. Read the SoftDenchi state (Wine is not started; when a leftover SdProxy of the prefix still
+   runs, it offers to send it SIGTERM after a separate confirmation).
 7. Prepare a game again under the same registration (see below).
 
 Operational notes:
@@ -508,7 +510,9 @@ bash prepare-game.sh --inspect-runtime --runtime-root /
 - Emission refuses a bundle that is not operational or does not validate. The script embeds the
   `preparation_*.py` modules, `install-softdenchi.py` from `banner-proton/` and the bundle; it
   takes input through FD 3 so the Python heredoc can use stdin.
-- Inputs are rejected with a fixed message, without echoing paths or input content.
+- Inputs that fail validation are rejected with a fixed message, without echoing paths or input
+  content. Unknown or malformed options are reported by `argparse` before that, and its usage
+  error can repeat what was typed.
 - Neither runtime mode connects to sockets or prints environment values.
 
 ## Tests

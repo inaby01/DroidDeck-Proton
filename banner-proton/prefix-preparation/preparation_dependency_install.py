@@ -1400,6 +1400,11 @@ def collect_diagnostics(*, record, config, directory, renderer, environment, ste
                 result["recipe_bootstrap"] = False
         return result
 
+    def prefix():
+        # The prefix on its own: present with its structure and the version recorded at initialization.
+        from preparation_execution import _prefix
+        return {"version_matches_record": _prefix(compatdata) == record["prefix_version_sha256"]}
+
     def state():
         found = inspect_dependency_state(compatdata, recipe)
         return {"state": found["state"], "groups": found["groups"], "trace_directories": found["trace_directories"],
@@ -1411,7 +1416,7 @@ def collect_diagnostics(*, record, config, directory, renderer, environment, ste
 
     checks = {name: _isolated(function) for name, function in (
         ("environment-presence", presence), ("registration", registration), ("managed-recheck-plan", recheck_plan),
-        ("asset-file", asset), ("dependency-state", state), ("installation-history", history))}
+        ("prefix", prefix), ("asset-file", asset), ("dependency-state", state), ("installation-history", history))}
     return {"scope": "independent-read-only-diagnostics", "checks": checks, "wine_started": False, "writes": []}
 
 

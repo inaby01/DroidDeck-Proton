@@ -1500,6 +1500,15 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertEqual(checks['dependency-state']['state'], 'absent')
         self.assertIs(checks['asset-file']['recipe_bootstrap'], True)
         self.assertNotIn('recheck-records', checks)
+        self.assertEqual(checks['prefix'], {'status': 'accepted', 'version_matches_record': True})
+        # Without the prefix, the diagnostics still say so on their own (the managed plan may stop earlier).
+        compat = self.f.steam / 'steamapps/compatdata/42'
+        compat.rename(compat.with_name('42-moved'))
+        diagnostics = dep.collect_diagnostics(record=self.trial_record, config=self.config, directory=self.f.fixture.source.root,
+            renderer=self.f.fixture.options['renderer'], environment=self.environment, steam=self.f.steam,
+            settings=self.f.settings, home=self.home, runtime_root=self.f.root, recipe=self.recipe)
+        self.assertEqual((diagnostics['checks']['prefix']['status'], diagnostics['checks']['prefix']['reason']),
+                         ('rejected', 'prefix absent'))
         self.assertEqual(checks['registration']['registered'], True)
         self.assertFalse(report['diagnostics']['wine_started'])
         self.assertNotIn('DUMMY_SECRET', json.dumps(report))

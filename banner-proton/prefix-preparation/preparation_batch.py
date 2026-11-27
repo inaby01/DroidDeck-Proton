@@ -1281,7 +1281,7 @@ def recovery(directory, renderer, config, **options):
     print("3. 前のProtonへ戻す", file=output)
     print("4. 新しいゲームのprefixを初期化だけする（5の前に。ゲームは起動しません）", file=output)
     print("5. ソフト電池を画面ありで入れる（使用許諾を画面で読む・画面なしの導入で入らなかったとき）", file=output)
-    print("6. ソフト電池の状態を見る（何も変更しません）", file=output)
+    print("6. ソフト電池の状態を見る（Wineは起動しません。SdProxyが残っていれば、確認のうえ終了の合図を送れます）", file=output)
     print("7. ゲームの準備をやり直す（同じ登録のまま、prefixを消して新しく準備できるようにする）", file=output)
     print("q. 取消", file=output)
     answer = stream.readline(32).strip()
