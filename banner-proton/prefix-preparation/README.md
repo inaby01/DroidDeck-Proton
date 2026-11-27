@@ -406,8 +406,9 @@ files). Per-game work folders: `~/.local/share/droiddeck-preparation-work/<id>`.
 | `batch-runs` | Progress of `prepare.sh` runs. |
 | `redos`, `retired` | `recovery.sh` 7 records and the records it moved aside. |
 
-Records of removed features (probe receipts, dedicated trials, rechecks, launches, local runs)
-may still exist in a store written by an earlier version; the tool no longer reads them. Backups
+Records of removed features may still exist from an earlier version: dedicated trials, rechecks,
+launches and local runs in this store, and probe receipts in the sibling `probe-store`. The tool
+no longer reads them. Backups
 and logs contain private data and device paths; do not share them.
 
 ## Diagnostic log of the SoftDenchi installer

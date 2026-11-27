@@ -147,7 +147,9 @@ class ToolWriterTests(unittest.TestCase):
             self.assertEqual(before, {str(p): (p.read_bytes(), p.stat().st_mtime_ns) for p in destination.rglob("*") if p.is_file()})
             self.assertEqual(len(store.inventory()["installations"]), 2)
 
-    def test_each_readiness_check_must_be_true(self):
+    def test_a_refusing_readiness_callback_stops_before_any_write(self):
+        # The callback is the caller's (apply_static_placement in the tool); the writer must call it
+        # before it writes anything, and stop when it refuses.
         with self.store() as store:
             for key in self.checks:
                 self.checks[key] = False
@@ -157,7 +159,7 @@ class ToolWriterTests(unittest.TestCase):
             self.assertEqual(store.inventory()["installations"], [])
         self.assertFalse((self.steam / "compatibilitytools.d").exists())
 
-    def test_unknown_process_cannot_be_bypassed_by_readiness_callback(self):
+    def test_a_callback_refusing_on_the_process_view_stops_before_any_write(self):
         (self.proc / "12345").mkdir()
         with self.store() as store, self.assertRaises(Invalid):
             self.apply(store)

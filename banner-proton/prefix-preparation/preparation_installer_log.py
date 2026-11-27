@@ -342,7 +342,7 @@ def _close_quietly(live):
 def abandon(store, live, install_id):
     """The installer was never started: close the log and record that there is none (never raises).
 
-    Without this the ``open`` record would stay in menu 9 for a run that wrote nothing.
+    Without this the ``open`` record would stay listed by the status check (and recovery.sh 6) for a run that wrote nothing.
     """
     _close_quietly(live)
     try:

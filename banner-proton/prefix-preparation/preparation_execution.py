@@ -1,4 +1,4 @@
-"""Launch plans for the tool's own Wine runs (initialization, recheck, installers).
+"""Launch plans for the tool's own Wine runs (initialization of a game prefix, then winver, the VC++ release and installers).
 
 Full payload identity, pinned registration and proc observations are mandatory.
 The caller must additionally establish provenance and actual runtime/stop scope;
@@ -24,7 +24,7 @@ from preparation_common import (
     safe_path,
     unchanged,
 )
-from preparation_payload import PayloadInventory, verify_fex_runtime_tree, verify_tree
+from preparation_payload import PayloadInventory, verify_fex_runtime_tree
 from preparation_runtime_context import HOOK_KEYS, RuntimeEnvironmentPlan
 from preparation_target import RegistrationPin
 
@@ -141,20 +141,15 @@ class LaunchPlan:
     environment: dict = field(repr=False)
     argv: tuple = field(repr=False)
 
-    def summary(self):
-        return {"operation": self.operation, "app_id": self.registration_id, "input_digest": self.digest,
-                "command": list(OPERATIONS[self.operation]), "payload": "identity-pinned-provenance-unverified",
-                "payload_pin_digest": self.payload_pin_digest, "target_pin_digest": self.target_pin_digest,
-                "runtime_equivalence": "unverified", "preparation_complete": False, "writes": []}
-
 
 def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_environment,
                 expected_hashes, payload_inventory=None, payload_overlays=None, target_pin=None, runtime_plan=None, operation="initialize",
-                prefix_version_sha256=None, trial_recheck_id=None, fex_runtime_contract=False):
+                prefix_version_sha256=None, trial_recheck_id=None):
     """Read-only plan. Hashes/runtime inputs come from trusted adapters, never profile JSON.
 
-    ``fex_runtime_contract`` is for the managed initialization scopes only: the reviewed
-    preparation slot may then hold FEX's one empty AppConfig directory.
+    Every launch of the tool is a managed scope (a new game prefix, or one with a ``gprefix-``
+    origin), so the slot is verified with the FEX runtime contract: it may hold FEX's one empty
+    AppConfig directory and the runtime writes the contract accepts.
     """
     require(operation in OPERATIONS, "unsupported preparation operation")
     require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
@@ -183,11 +178,7 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
                 and _prefix(compatdata) == prefix_version_sha256, "unverified or changed prefix version")
     overlays = {} if payload_overlays is None else copy.deepcopy(payload_overlays)
     payload_digest = _payload_digest(payload_inventory, overlays)
-    require(type(fex_runtime_contract) is bool, "invalid runtime contract flag")
-    if trial_recheck_id is None and not fex_runtime_contract:
-        verify_tree(tool, payload_inventory, overlays)
-    else:
-        verify_fex_runtime_tree(tool, payload_inventory, overlays)
+    verify_fex_runtime_tree(tool, payload_inventory, overlays)
     source_entries = {**payload_inventory.entries, **overlays}
     launcher_hashes = {}
     for name in ("proton", "version", "user_settings.py"):
@@ -225,8 +216,7 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
     spec = {"tool": tool, "steam": steam, "registration_id": key, "install": install, "work": work,
             "home": home, "runtime_environment": dict(runtime_environment), "expected_hashes": hashes,
             "payload_inventory": payload_inventory, "payload_overlays": overlays, "target_pin": target_pin, "runtime_plan": runtime_plan,
-            "operation": operation, "prefix_version_sha256": prefix_version_sha256, "trial_recheck_id": trial_recheck_id,
-            "fex_runtime_contract": fex_runtime_contract}
+            "operation": operation, "prefix_version_sha256": prefix_version_sha256, "trial_recheck_id": trial_recheck_id}
     signature = {k: str(v) if hasattr(v, "parts") else v for k, v in spec.items()}
     signature["payload_inventory"] = payload_digest
     signature["target_pin"] = target_pin.digest

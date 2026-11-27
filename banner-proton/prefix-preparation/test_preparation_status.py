@@ -411,7 +411,7 @@ class StatusTests(StatusMixin, ONE['OnePassTests']):
         _, menu, _, _ = self.run_menu('1\n1\n')
         self.agrees(entry, menu)
 
-    def test_archive_is_read_once_and_the_inventory_is_only_for_game_prefixes(self):
+    def test_archive_is_read_once_and_a_given_inventory_must_match(self):
         self.initialize()
         with patch.object(recheck, 'inspect_archive_from_folder', wraps=recheck.inspect_archive_from_folder) as loose:
             _, report, _ = self.status()

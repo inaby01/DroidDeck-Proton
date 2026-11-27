@@ -1,6 +1,6 @@
-"""Menu 12: prepare one registered game in one run (initialize, place DLLs, install, bind).
+"""Prepare one registered game in one run (initialize, place DLLs, install, bind): recovery.sh 1, and per game in prepare.sh.
 
-Each step calls the plan, session and writer that menus 10, 8 and 11 use, and plans again
+Each step calls the plan, session and writer of its own module (game prefix, dependency installation, binding), and plans again
 right before it runs. One confirmation covers the fixed values shown before anything is
 written; a later plan whose fixed values differ stops the run without asking again. The
 SoftDenchi bootstrap runs with its pinned silent arguments. Only when that installs nothing

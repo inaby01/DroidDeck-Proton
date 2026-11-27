@@ -36,7 +36,6 @@ from preparation_tool_writer import validate_installation_record
 
 MAX_OBJECTS = 4096
 MARKER = {"schema_version": 1, "application": "droiddeck-prefix-preparation"}
-STEP_STATES = ("pending", "running", "succeeded", "failed", "needs-user")
 COMPONENT = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z", re.ASCII)
 
 

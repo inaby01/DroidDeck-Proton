@@ -46,8 +46,8 @@ prune images/volumes, restart Docker, or operate on unrelated containers.
 
 For each UID the harness runs the same test files (the list is in `run-in-container.sh`)
 without replacing assertions. Each file prints its own count when it runs. 1.0.1 removed the
-suites of the removed code (preflight, measured dependency plans, probe recovery and the old
-command-line modes).
+suites of the removed code (preflight, measured dependency plans, the dedicated registration
+probe and its recovery, and the old command-line modes).
 
 The script stops at the first failing suite and preserves the raw console error.
 A zero script exit means both UID runs finished; it is not a device preparation

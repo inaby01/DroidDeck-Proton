@@ -568,7 +568,7 @@ def profile_revision_change(profile, recorded):
     revision that pins the EXE hash measured at initialization (still checked live by the
     recheck). Its dependencies are evaluated live at binding, so they need no pinning here;
     the record has no dependency list, so removed dependencies cannot be detected, and title
-    and edition are not part of the record either. Menu 11 shows them for the operator.
+    and edition are not part of the record either; the confirmation screen shows them to the operator.
     """
     current = digest_json(profile)
     if current == recorded["profile_digest"]:

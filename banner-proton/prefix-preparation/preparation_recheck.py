@@ -93,15 +93,6 @@ class RecheckPlan:
     # Runtime writes the contract accepted in the tool (DroidDeck redist markers, CPython caches), or None.
     tool_writes: object = None
 
-    def summary(self):
-        return {"scope": SCOPE, "input_digest": self.digest, "trial_id": self.record["trial_id"],
-                "origin_status": self.record["status"], "app_id": self.record["app_id"],
-                "prefix": str(self.compatdata), "command": ["runinprefix", "cmd.exe", "/d", "/c", "exit", "0"],
-                "runtime_contract": FEX_RUNTIME_CONTRACT, "tool_runtime_writes": self.tool_writes,
-                "prefix_reinitialized": False,
-                "old_trial_record_updated": False, "execution_authorized": False,
-                "device_namespace_verified": False, "preparation_complete": False, "writes": []}
-
 
 def read_payload_inventory(config, directory):
     """The verified payload inventory from the asset folder, read once for several registered-game plans."""
@@ -184,7 +175,7 @@ def _game_record(record, games):
     require(record["exit_code"] == 0 and record.get("settings_identity_unchanged") is True,
             "prior fixed-command exit and unchanged settings required")
     require(record["phase"] == "post-checks", "completed command phase required")
-    require(record["status"] == "initialized-unverified", "only initialized or tree-mismatch trial can be rechecked")
+    require(record["status"] == "initialized-unverified", "only an initialized game prefix can be rechecked")
     require(record["app_id"] in games, "trial registration missing")
     return record["app_id"]
 

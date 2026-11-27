@@ -2,7 +2,6 @@
 """Disposable launch contracts. No Wine, Windows binary or real prefix is used."""
 
 import hashlib
-import json
 import os
 import runpy
 import tarfile
@@ -51,6 +50,9 @@ class ExecutionTests(unittest.TestCase):
         self.tool = self.steam / "compatibilitytools.d/Example Proton"
         self.tool.mkdir(parents=True)
         (self.tool / "launch_fixture_support.py").write_text('MARKER = "sibling-imported"\n')
+        # Every launch verifies the slot with the FEX runtime contract, which needs FEX's share folder.
+        (self.tool / "files/share/fex-emu").mkdir(parents=True)
+        self.tool.parent.chmod(0o700)  # The contract needs a private tool parent, as on the device.
         (self.tool / "proton").write_text(FAKE)
         (self.tool / "proton").chmod(0o755)
         (self.tool / "version").write_text("fixture-build-1\n")
@@ -92,8 +94,6 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         self.assertNotIn("DUMMY_SECRET", plan.environment)
         self.assertNotIn(str(self.home), repr(plan))
-        self.assertNotIn(":7", json.dumps(plan.summary()))
-        self.assertEqual(plan.summary()["writes"], [])
 
     def test_tool_launches_never_read_bytecode_caches_from_the_tool(self):
         prefix = self.work / execution.BYTECODE_PREFIX
@@ -112,6 +112,26 @@ class ExecutionTests(unittest.TestCase):
         (self.work / execution.BYTECODE_PREFIX).mkdir()
         with self.assertRaisesRegex(Invalid, "bytecode cache prefix present"):
             execution.require_no_bytecode_cache(plan)
+
+    def test_a_later_wine_run_needs_a_game_prefix_origin_and_its_unchanged_version(self):
+        (self.compatdata / "pfx/drive_c/windows").mkdir(parents=True)
+        for name in ("system.reg", "user.reg"):
+            (self.compatdata / "pfx" / name).write_text("WINE REGISTRY Version 2\n")
+        (self.compatdata / "version").write_text("fixture-prefix-1\n")
+        version = hashlib.sha256(b"fixture-prefix-1\n").hexdigest()
+        origin = "gprefix-" + "0" * 32
+        plan = self.plan(operation="probe", trial_recheck_id=origin, prefix_version_sha256=version)
+        self.assertEqual(plan.argv[1:], tuple(execution.OPERATIONS["probe"]))
+        # The probe trial origin of earlier versions, a missing origin, or a malformed one are refused.
+        for bad in ("trial-" + "0" * 32, None, "gprefix-" + "0" * 31, "gprefix-" + "X" * 32):
+            with self.subTest(origin=bad), self.assertRaisesRegex(Invalid, "managed trial origin required"):
+                self.plan(operation="probe", trial_recheck_id=bad, prefix_version_sha256=version)
+        for wrong in (None, "0" * 64):
+            with self.subTest(version=wrong), self.assertRaisesRegex(Invalid, "unverified or changed prefix version"):
+                self.plan(operation="probe", trial_recheck_id=origin, prefix_version_sha256=wrong)
+        # The initialization itself takes neither an origin nor a version, and needs an absent prefix.
+        with self.assertRaisesRegex(Invalid, "new compatdata required"):
+            self.plan()
 
     def test_low_app_id_environment_matches_steam_identity(self):
         self.write_json(self.added,[{"appid":42,"exe":str(self.exe)}])

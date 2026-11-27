@@ -1,7 +1,7 @@
 """The guarded initialization session shared by registered-game new prefixes.
 
-Game prefixes (preparation_game_prefix) subclass the session; the dedicated probe trial menu
-was removed in 1.0.1. Trial records of earlier versions are still validated when read.
+Game prefixes (preparation_game_prefix) subclass the session; the dedicated probe trial was
+removed in 1.0.1 and its records are no longer read.
 """
 
 import hashlib
@@ -225,7 +225,7 @@ class TrialSession:
                 steam=installation.target.steam, registration_id=installation.target.registration_id, install=installation.target.exe.parent,
                 work=p.work, home=p.private_home, runtime_environment=installation.runtime.environment, expected_hashes=hashes,
                 payload_inventory=installation.inventory, payload_overlays=installation.customization.overlays,
-                target_pin=installation.target, runtime_plan=installation.runtime, fex_runtime_contract=True)
+                target_pin=installation.target, runtime_plan=installation.runtime)
             self._guard()
             require(self.stop_check.check()["clear_in_view"], "target process view changed")
             require(not os.path.lexists(p.compatdata), "trial prefix appeared")

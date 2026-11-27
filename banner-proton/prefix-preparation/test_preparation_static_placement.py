@@ -209,7 +209,7 @@ class StaticNativeTests(StaticFixture):
         self.assertFalse(self.f.compatdata.exists())
         self.assertEqual(result['installation']['status'], 'installed-tree-verified')
 
-    def test_original_full_writer_still_rejects_missing_stopped_readiness(self):
+    def test_writer_stops_before_any_write_when_the_callback_refuses(self):
         self.f.checks['stopped'] = False
         with self.f.store() as store, self.assertRaises(Invalid):
             self.f.apply(store)
@@ -372,7 +372,7 @@ class PrivateModeNativeTests(StaticFixture):
         self.assertFalse(self.f.destination().exists())
         self.assertEqual(len(list((self.f.steam / 'compatibilitytools.d').glob('.prefix-preparation-staging-*'))), 1)
 
-    def test_full_writer_does_not_gain_private_permission_exception(self):
+    def test_writer_without_the_private_xalia_context_refuses_writable_payload_modes(self):
         with self.f.store() as store, self.assertRaises(Invalid) as caught:
             self.f.apply(store)
         self.assertEqual(str(caught.exception), 'unsupported payload permissions')

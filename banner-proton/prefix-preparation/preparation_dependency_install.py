@@ -820,7 +820,7 @@ class DependencyInstallSession:
     def stop_lingering_proxies(self, sender=None, confirmation="operator-prompt"):
         """Operator-confirmed: SIGTERM only to SdProxy explained by proxy_stop_targets, then post-checks.
 
-        ``confirmation`` records how the operator agreed: at the prompt (menu 8), or in the
+        ``confirmation`` records how the operator agreed: at the prompt (recovery.sh 5 or 6), or in the
         one-pass confirmation before the run (recovery.sh 1 or prepare.sh). The targets and conditions are the same.
         """
         require(confirmation in ("operator-prompt", "one-pass-preapproved"), "invalid stop confirmation")
@@ -1662,7 +1662,7 @@ def _offer_session_proxy_stop(session, stream, output, text, preapproved=False, 
 
 
 def offer_reinspection_proxy_stop(base, store, stop, stream, output, text, sender=None):
-    """Menu 9: when the prefix view is not clear, optionally stop UCManSvc-descended SdProxy only."""
+    """recovery.sh 6: when the prefix view is not clear, optionally stop UCManSvc-descended SdProxy only."""
     if stop.check()["clear_in_view"]:
         return None
     scope = StopScope(xalia_images=xalia_images(_tool_directory(base)))

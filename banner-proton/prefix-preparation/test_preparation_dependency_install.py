@@ -695,7 +695,7 @@ class InstallTests(TRIAL['TrialTests']):
         record, spawned = self.run_flow(display=False)
         self.assertEqual(record['status'], 'stopped-before-installer')
         self.assertEqual(len(spawned.call_args_list), 1)
-        self.assertFalse((self.home / '.local/share/droiddeck-preparation-work/43/inputs').exists())
+        self.assertFalse((self.home / '.local/share/droiddeck-preparation-work/42/inputs').exists())
 
     def test_cancelled_installer_without_changes_is_cancelled_absent_and_retry_shows_history(self):
         self.use_installer(installer(files={}, registry='', exit_code=1602 % 256))
