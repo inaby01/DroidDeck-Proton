@@ -20,7 +20,6 @@ from preparation_common import (
     VERSION,
     app_id,
     fields,
-    input_change,
     require,
     safe_path,
 )
@@ -415,95 +414,3 @@ class RecheckSession:
             if hasattr(error, "tree_diagnostic"):
                 self.record["error"]["tree_diagnostic"] = error.tree_diagnostic
         return self._save()
-
-
-def interactive_recheck(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
-                        steam=None, settings=None, home=None, runtime_root=Path("/")):
-    import sys
-
-    import preparation_selection as selection
-    from preparation_binding import droiddeck_lock
-
-    stream = sys.stdin if input_stream is None else input_stream
-    output = sys.stdout if output_stream is None else output_stream
-    environment = os.environ if environment is None else environment
-    home = safe_path(home if home is not None else Path.home())
-    steam = safe_path(steam if steam is not None else home / ".local/share/Steam")
-    settings = safe_path(settings if settings is not None else home / ".local/share/droiddeck-compat")
-    directory = safe_path(directory)
-    management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
-    protected, session, started = [steam, settings], None, False
-    stage = "recheck-plan"
-    try:
-        selection.validate_selection_config(config)
-        require(config.get("initialization_trial") is True, "trial recheck not enabled")
-        with PrivateStore(management) as store:
-            records = [item for item in store.inventory()["trials"] if item["status"] != "invalid"]
-            require(records, "no private trial records")
-            for index, item in enumerate(records, 1):
-                print(f"{index}. ID {item['app_id']} / {item['status']} / {item['trial_id']}", file=output)
-            print("再照会する管理済み試験記録の番号（qで取消）: ", end="", file=output, flush=True)
-            answer = stream.readline(32).strip()
-            if answer == "q":
-                return 0, None
-            require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(records), "invalid recheck selection")
-            record, digest = store.read_record("trials", records[int(answer) - 1]["trial_id"] + ".json")
-        source, _, games = selection.registration_catalog(environment)
-        protected.extend(Path(game["exe"]).parent for game in games.values())
-
-        def refresh():
-            current, _, now = selection.registration_catalog(environment)
-            require(current == source, "registration source changed")
-            return plan_recheck(record=record, record_sha256=digest, config=config, directory=directory, renderer=renderer,
-                source=source, games=now, steam=steam, settings=settings, home=home, environment=environment, runtime_root=runtime_root)
-
-        print("既存prefixとtool全体を再照合し、FEX AppConfigが本人所有0700の空directoryか検査しています。", file=output, flush=True)
-        plan = refresh()
-        print("対象prefix: " + selection._text(str(plan.compatdata)), file=output)
-        print("実行: 準備用Proton runinprefix cmd.exe /d /c exit 0（初期化はしません）", file=output)
-        print("変更範囲: この試験prefixの通常起動時の状態、既存の専用work/HOME、新しい再照会記録/lock、結果JSON。", file=output)
-        print("旧failed記録・ゲーム・installer・割り当て設定は変更しません。", file=output)
-        print("全ゲーム・Wineを終了してください。他namespaceの停止保証はありません。", file=output)
-        print("この再照会を実行する場合は1、取消はq: ", end="", file=output, flush=True)
-        if stream.readline(32).strip() != "1":
-            return 0, None
-        started, stage = True, "recheck-start"
-        selection._private_report_directory(home, protected)
-        lock = hashlib.sha256(str(plan.compatdata).encode()).hexdigest()
-        with PrivateStore(management) as store, store.locked(lock), droiddeck_lock(settings):
-            session = RecheckSession(plan, store, refresh, plan.digest, ProcessStopCheck(plan.compatdata))
-            session.start()
-            stage = "recheck-wait"
-            while True:
-                outcome = session.wait(30)
-                if outcome["status"] != "needs-user":
-                    break
-                print("未完了です。強制終了していません。1で再待機、qで記録を残して戻る: ", end="", file=output, flush=True)
-                if stream.readline(32).strip() != "1":
-                    break
-            report = {"mode": "managed-trial-recheck-result", "scope": SCOPE, "recheck": outcome,
-                      "old_trial_record_unchanged": store.read_record("trials", record["trial_id"] + ".json")[1] == digest,
-                      "prefix_reinitialized": False, "binding_written": False, "preparation_complete": False,
-                      "writes": [{"scope": "existing-managed-trial-prefix-and-private-work-home"},
-                                 {"scope": "new-private-recheck-journal-and-locks"}, {"scope": "cooperative-settings-lock-only"}]}
-    except (OSError, ValueError, TypeError, KeyError) as error:
-        report = {"mode": "managed-trial-recheck-result", "scope": SCOPE, "stage": stage,
-                  "error_class": type(error).__name__, "errno": getattr(error, "errno", None),
-                  "reason": {"FEX AppConfig is not empty; configuration not permitted": "fex-appconfig-not-empty",
-                             "FEX AppConfig must be owned empty 0700 directory": "fex-appconfig-ownership-or-mode",
-                             "private 0700 tool parent required for FEX runtime contract": "tool-parent-not-private-0700"}.get(str(error), "input-rejected"),
-                  **input_change(error),
-                  "prefix_reinitialized": False, "preparation_complete": False,
-                  "writes": [] if not started else [{"scope": "partial-managed-recheck-preserve"}]}
-        if hasattr(error, "tree_diagnostic"):
-            report["tree_diagnostic"] = error.tree_diagnostic
-        if session is not None:
-            report["recheck"] = dict(session.record)
-        print("再照会は停止しました。既存prefixと旧記録を保全して結果を保存します。", file=output)
-    try:
-        saved, _ = selection.save_selection_result(directory, home, report, protected)
-    except (OSError, ValueError):
-        print("結果JSONを保存できませんでした。私有記録とprefixは削除していません。", file=output)
-        return 1, None
-    print("結果を保存しました: " + selection._text(str(saved)), file=output)
-    return 2, str(saved)

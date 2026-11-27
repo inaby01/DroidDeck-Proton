@@ -78,10 +78,6 @@ class Document:
         return unpack(self.root)
 
 
-def parse_vdf(raw):
-    return Document(raw).value()
-
-
 def patch_game_mapping(raw, registration_id, tool):
     """Modify only this game's name or insert its block. All other bytes survive."""
     key = app_id(registration_id)

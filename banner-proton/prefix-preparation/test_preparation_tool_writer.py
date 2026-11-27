@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 FIXTURE = runpy.run_path(str(HERE / "test_preparation_installation.py"))
+import fixture_legacy_builders as legacy
 import preparation_tool_writer as writer
 from preparation_common import Invalid
 from preparation_payload import verify_tree
@@ -69,7 +70,7 @@ class ToolWriterTests(unittest.TestCase):
             yield store
 
     def apply(self, store, plan=None):
-        return writer.apply_installation(self.plan() if plan is None else plan, self.plan, store,
+        return legacy.apply_installation(self.plan() if plan is None else plan, self.plan, store,
                                          self.settings, lambda: dict(self.checks), self.stop_check)
 
     def record(self, store):
@@ -169,7 +170,7 @@ class ToolWriterTests(unittest.TestCase):
         compatdata = self.fixture.game.steam / "steamapps/compatdata/42"
         with PrivateStore(self.store_root, create=True) as store, store.locked(hashlib.sha256(str(compatdata).encode()).hexdigest()), \
              self.assertRaises(Invalid):
-            writer.apply_installation(outside_plan, self.plan, store, self.settings, lambda: self.checks,
+            legacy.apply_installation(outside_plan, self.plan, store, self.settings, lambda: self.checks,
                                       ProcessStopCheck(compatdata, self.proc))
         self.assertFalse((self.fixture.game.steam / "compatibilitytools.d").exists())
 
@@ -339,7 +340,7 @@ class ToolWriterTests(unittest.TestCase):
                 with patch("preparation_installation.os.statvfs", return_value=fs):
                     return original()
             with self.assertRaises(Invalid):
-                writer.apply_installation(plan, low_capacity, store, self.settings, lambda: self.checks, self.stop_check)
+                legacy.apply_installation(plan, low_capacity, store, self.settings, lambda: self.checks, self.stop_check)
             self.assertEqual(self.record(store)["status"], "failed")
         self.assertFalse((self.steam / "compatibilitytools.d").exists())
 

@@ -1,1486 +1,557 @@
-# Prefix preparation (1.0.0, the first operational version)
+# Prefix preparation
 
-## Operation in 1.0.0
+This tool prepares game prefixes for SoftDenchi games on DroidDeck. It places a dedicated
+preparation Proton slot (`SoftDenchi-Prep-Proton <upstream>-softdenchi-r<N>`), creates a new
+prefix for each registered game, puts the game's declared dependencies into it (prefix DLLs,
+the SoftDenchi runtime), and assigns the game to the slot in DroidDeck's settings. It runs on
+the device inside DroidDeck's Ubuntu runtime. Everything is read-only until the operator
+confirms what was listed; nothing the user owns is overwritten or deleted, and existing
+prefixes are never adopted.
 
-The bundle emits four scripts instead of one numbered screen; each embeds the same sources and
-runs on its own (`prepare_game.py --emit-selection-script --script-entry <entry>`):
+Current version: 1.0.1 (`VERSION` in `preparation_common.py`). The on-screen text is Japanese.
+
+## Contents
+
+- [The four scripts](#the-four-scripts)
+- [What a preparation does](#what-a-preparation-does)
+- [Moving games to a new Proton and reverting](#moving-games-to-a-new-proton-and-reverting)
+- [Preparing a game again (recovery.sh 7)](#preparing-a-game-again-recoverysh-7)
+- [What the slot check accepts](#what-the-slot-check-accepts)
+- [Records and private data](#records-and-private-data)
+- [Diagnostic log of the SoftDenchi installer](#diagnostic-log-of-the-softdenchi-installer)
+- [The bundle (bundle.json)](#the-bundle-bundlejson)
+- [Building the scripts and measuring the runtime](#building-the-scripts-and-measuring-the-runtime)
+- [Tests](#tests)
+- [Limits](#limits)
+- [Removed in 1.0.1](#removed-in-101)
+
+## The four scripts
+
+A bundle produces four scripts. Each embeds the same sources and the bundle, and runs on its
+own (`bash prepare.sh`, no arguments). Assets (the payload archive, the SoftDenchi installer,
+prefix DLLs) are read from the folder the script is in.
 
 | Script | Use | Writes |
 | --- | --- | --- |
-| `prepare.sh` | The list of 0.31.0's first screen, then one yes/no confirmation runs everything listed (placement, moves, new and resumed preparation). | yes |
-| `status.sh` | The game status check. | result JSON only |
+| `prepare.sh` | Lists everything this bundle would do (placement, moves, new and resumed preparations), then one yes/no confirmation runs all of it. | yes |
+| `status.sh` | The state of each game this tool initialized. | result JSON only |
 | `diagnose.sh` | Measures DroidDeck's runtime (OS, the pinned scripts, hook libraries, label, umask, environment presence) and lists each item next to the bundle's `runtime_reference`, with the runtime check's own verdict. For finding what a DroidDeck update changed. | result JSON only |
-| `recovery.sh` | Rare operations: prepare one game (non-ASCII paths, profile choice, resume), move one game, revert to the previous slot, initialize a new prefix only, install SoftDenchi with its screen, read the SoftDenchi state, prepare a game again (7). | per operation |
+| `recovery.sh` | Rare operations, see below. | per operation |
 
-- Guidance names these scripts (`menu_ref`/`one_pass_ref` map the earlier menus 8, 9, 10 and 12
-  to `recovery.sh` 5, 6, 4 and 1).
-- Detailed menus 1-7 and 11 and the separate placement entry are no longer reachable; their code
-  is removed in the next version (a transition period, design `prefix-preparation-1.0.0-design`).
+`recovery.sh` offers:
+
+1. Prepare one game (a game the batch run does not prepare: a non-ASCII EXE path, a profile
+   choice, resuming).
+2. Move one game to the new Proton.
+3. Revert a game to the previous slot.
+4. Initialize a new prefix only (before 5; the game is not started).
+5. Install SoftDenchi with its installer window (to read the licence on screen, or when the
+   silent installation installed nothing).
+6. Read the SoftDenchi state (read-only).
+7. Prepare a game again under the same registration (see below).
+
+Operational notes:
+
+- Guidance names these scripts. `menu_ref` / `one_pass_ref` in `preparation_selection.py` map
+  the earlier menu numbers 8, 9, 10 and 12 to `recovery.sh` 5, 6, 4 and 1.
 - The slot's `user_settings.py` sets only `PROTON_SOFTDENCHI_CLEANUP=1`. Proton's debug log is
   off; add `PROTON_LOG=1` to one game's environment in DroidDeck to collect it.
 - Only `cleanup` is accepted as installation mode, and only archives named
   `DroidDeck-Proton-<upstream>-softdenchi-r<N>-aarch64.tar.gz`.
-- The installer log of a preparation is still collected privately (a preparation cannot be
-  repeated after a stop) and copied to the shared folder only after a stop and a confirmation.
-- `recovery.sh` 7 prepares a game again under the same registration. Offered for a registration
-  with a prefix (its ID, or for a large ID the signed form), tool records or a private work folder
-  of its ID, when there is no binding record of that ID (it never reached "ready"). Not offered
-  when a record that may belong to it cannot be read; when DroidDeck's settings cannot be read or
-  choose a SoftDenchi Proton for it; when the prefix holds a SoftDenchi folder (`SoftDenchi` under
-  `Program Files (x86)` or `Program Files`, or `windows/ucharge`; links are not followed) that no
-  run of the tool's installer in the prefix the tool created explains (it may have been set up by
-  hand), or cannot be inspected; when both prefix forms exist; or when the prefix or the work
-  folder is not our own directory. Under the lock it checks again, stops if the prefix differs
-  from the one confirmed or a game or Wine runs in it, then renames the prefix out of DroidDeck's
-  view, moves the tool's records of that ID to `retired/<redo id>/` in the private store (never
-  deleted), renames the private work folder to `retired-<id>`, and removes the prefix without
-  following links (both renames are synced). A game that started right before the rename keeps
-  its hidden folder until it ends. The hidden folder named after a `redos` record that is still
-  there is removed the next time 7 is opened, when no game or Wine of that prefix runs; an
-  interruption before the records moved leaves the records alone, which 7 offers again. The next
-  `prepare.sh` lists the game as new. Saves in the game folder are not touched; the SoftDenchi
-  authentication inside the prefix is gone. Guidance that used to say "register again under
-  another name" points here.
+- When the bundle enables it (`diagnostics.installer_log`), the installer log of a preparation
+  is always collected privately (a preparation cannot be repeated after a stop) and copied to
+  the shared folder only after a stop and a confirmation.
 - An interrupted placement of the bundle slot (an installation record left `running` or
-  `needs-inspection`) is listed by `prepare.sh` as "finish the placement record". Under the slot
-  lock the tree is verified again, then each record is finished on its own: a `publish-intent`,
-  `published` or `post-verified` record becomes `installed-tree-verified` when its staging wrapper
-  is gone or empty; a `publish-intent` record whose tree is still in staging, and an earlier
-  running record, become `failed` (staging kept). A run that finishes only some records shows
-  them as partly finished and goes on. The slot then counts as placed, so a later Proton update can move games
-  from it. A matching slot with no record that this tool placed it is not finished; the list names
-  it under "しないこと".
+  `needs-inspection`) is listed by `prepare.sh` as "finish the placement record". Under the
+  slot lock the tree is verified again, then each record is finished on its own: a
+  `publish-intent`, `published` or `post-verified` record becomes `installed-tree-verified`
+  when its staging wrapper is gone or empty; a `publish-intent` record whose tree is still in
+  staging, and an earlier running record, become `failed` (staging kept). A run that finishes
+  only some records shows them as partly finished and goes on. The slot then counts as placed,
+  so a later Proton update can move games from it. A matching slot with no record that this
+  tool placed it is not finished; the list names it under "しないこと" (not done).
+- Removed in 1.0.1: the earlier numbered menus, the separate placement entry and the old
+  command-line modes. See [Removed in 1.0.1](#removed-in-101).
 
-## Earlier versions
+### prepare.sh
 
+- The list is read-only (no locks, no store creation, no Wine). It shows "to do" items (place
+  the bundle slot, finish a placement record, save the slot's verification data, move or align
+  games, resume, prepare new registrations) and "not done" items with their reason in words
+  (the status check uses the same text).
+- Registrations with a prefix but no record of this tool are grouped once; the tool never
+  adopts an existing prefix. New registrations get `game_preparation.default_profile`, or the
+  only profile without a pinned EXE hash; with two or more such profiles and no default they
+  are listed as not done. Non-ASCII EXE paths are left to `recovery.sh` 1.
+- When a SoftDenchi installation is listed, the installer name, hash, arguments and the
+  licence sentence are shown; the one confirmation includes that consent and the SdProxy
+  SIGTERM rule.
+- Without the bundle slot, only the placement is listed. It uses an automatically chosen
+  confirmation registration (registrations assigned to a preparation slot first, then by
+  number); the game is only read, never started. The list is then built again and confirmed a
+  second time. When no registration can confirm, the skipped ones and their reasons are shown
+  with the advice to register one game first.
+- Running: each step plans again under its own locks and compares what it would write with
+  what was listed (the game's entries in `games.json`, `state.json` and `config.vdf`, the move
+  decision, the one-pass fixed values). A game stopped before writing is skipped; a stop after
+  a game started writing, or a failure not about that game (opening the private store, a lock
+  held elsewhere), ends the run. Outcomes per game: done, not started, stopped before writing,
+  partially applied (with the stage, and the binding backup when it exists).
+- Progress (`batch-runs/`): before a step writes, the record ID it will use (`trial_id`, prefix
+  DLL `record_id`, `install_id`, `binding_id`) is saved. The next `prepare.sh` reconciles an
+  unfinished run from those IDs and the private records. A binding whose changed files all
+  hold their new bytes, or whose own entries all assign its slot, is shown as "only the final
+  check is missing".
+- Do not start games from DroidDeck while `prepare.sh` runs.
 
-`prepare-game.sh --inspect` (the default) and `--plan` inspect explicit local
-inputs without any writes. `--stage-local` separately opts into caching declared
-assets and journaling progress inside one explicit private management root;
-`--list-local` reads its inventory. See [local staging](LOCAL-STAGING.md) for its
-asset schema, write boundaries and restart procedure.
-Optional `--tool-directory` adds a [target-only binding plan](BINDING.md); its guarded
-internal writer is not exposed through the CLI.
+### status.sh
 
-`--inspect-payload` is a separate read-only mode accepting `--payload-archive`,
-`--payload-sha512` and `--payload-root`. It hashes all regular archive members
-without extracting them. Optional `--payload-directory` compares an unmodified
-installed tree, including extra files, modes and link topology. It cannot be
-combined with preparation modes. A matching operator-declared checksum establishes
-identity; the report retains provenance/runtime blockers and never enables execution.
+No locks, no store creation, no Wine and no SdProxy stop. The payload is read once; a missing
+payload or an unplaced slot is reported once and leaves dependencies undetermined. Per game it
+shows the initialization record, the profile, the assignment from `games.json`, `config.vdf`
+and `state.json` (this bundle's slot, another Proton, none, or partial with the differing
+files), the dependency states and the next step. The next step comes from the same read-only
+evaluation the one-pass run uses before its confirmation (`evaluate_resume`). "Ready" means
+every dependency is verified and the game is bound. A running game, or a read that changed
+underneath, is shown as not checkable. One game's problems do not stop the others.
 
-`--inspect-runtime --runtime-root /` inventories pinned runtime source files,
-selected library hashes/ELF headers, label hash, environment presence, display
-socket metadata and the auditor's proc/umask basis. It does not connect to sockets
-or print environment values. `--emit-runtime-audit` emits a self-contained command
-that can be pasted into the target terminal without installing files. Neither mode
-enables prefix preparation or claims runtime compatibility. Proc failures include
-stage/error diagnostics and separate numeric-PID/`proc/self` FD probes, without
-printing PID values or status contents. Self-status fields use the successful
-`proc/self` directory-FD reader while retaining shared-reader diagnostics. This
-does not establish namespace visibility or relax launch checks.
+## What a preparation does
 
-`--plan-preparation` composes the selected registration/EXE and optional profile/
-asset inspection with archive identity, pinned runtime, expected installation/
-adoption metadata, installation or strict reuse, and a target-only binding plan
-for an already installed matching tree. It requires the ordinary target paths,
-`--payload-archive`, `--payload-sha512`, `--payload-root`, `--installation-mode`,
-`--runtime-root`, and `--runtime-audit` (the prior live arm64 audit JSON). The
-runtime root is re-inspected, and its private live label and supported umask are
-used to generate expectations. An offline root snapshot remains planning-only;
-the presence of an audit report never authorizes execution.
+The one-pass preparation of one game (`preparation_one_pass.py`) is what `prepare.sh` runs per
+game and what `recovery.sh` 1 runs for one. The order is: initialize the prefix, place prefix
+DLLs, release the inherited VC++ record, install SoftDenchi, stop a lingering SdProxy, bind.
 
-The composed report separates actual `writes: []` from `planned_writes`, lists
-the new installation/staging paths, preserves any existing compatdata (including
-partial or signed-ID directories), and estimates tool installation space from
-filesystem allocation size plus a 64-MiB reserve. Prefix/dependency growth and write
-permissions remain unverified. Existing installations must match the entire
-archive plus the six generated metadata files, including modes and link topology.
-Only generator-backed metadata modes for creation umask 0022 or 0077 are accepted;
-unknown or mixed variants are rejected without repair. Archive directory modes
-remain exact: the legacy installer's `data_filter` extraction under umask 0077
-creates directories with mode 0700 rather than archive mode 0755, so such a tree
-is refused by strict reuse. No automatic chmod or reinstall is performed.
+### Confirmation, fixed values and resume
 
-This mode returns 2 (blocked plan). It exposes neither an installation writer nor
-a prefix executor. It does not call the legacy setup's global synchronization.
-The plan is an observation, not a durable authorization; future writers must
-recompute/recheck it under locks and satisfy independent readiness conditions.
+- Before the confirmation (nothing written yet) it stops on: a profile dependency that is not
+  `ready`, a missing or different installer or DLL asset (for a new prefix every asset is
+  checked; when resuming, only a DLL still to place needs its file), an unreadable binding
+  record, a profile changed since initialization (other than an accepted later revision), or a
+  running game or Wine. It also stops before confirming when a later step would stop.
+- The confirmation shows the registration, profile, prefix, preparation slot, each DLL, the
+  SoftDenchi installer with its arguments, the licence statement, the SdProxy stop rule and the
+  settings files the binding changes. It is taken for a digest of fixed values (registration
+  and EXE, profile and recipe digests, assets and installer mode, private paths, payload /
+  customization / runtime identity and runtime writes, binding plan). Each later step plans
+  again and stops, without asking again, when its fixed values differ; a stop names the changed
+  items.
+- Locks: the private tool/prefix lock is held from the first write to the last step;
+  DroidDeck's settings lock is held during initialization and installation, and the binding
+  writer takes it itself.
+- A stopped run is continued by running it again. Each step decides from its latest record and
+  the current state. A stop caused by an input that changed while read records
+  `reason: input-changed-during-read` and `changed_fields`.
+- Not done by the tool: registering the game in DroidDeck, authentication and the first launch.
 
-`--inspect-preflight` reports the live runtime and explicit/default Steam/settings
-paths and their existing ancestors/capacity. It does not read prefix or settings
-contents and is read-only unless `--probe-temporary` is explicitly supplied.
-`--emit-preflight-script` emits an inert standalone Bash/Python script for the same
-preflight, so the device needs only one script and one short command.
+### 1. Placing the preparation slot
 
-The opt-in probes create a new mode-0700 directory on the existing tool-parent
-filesystem (or Steam root if the tool parent is absent). They test the same Linux
-no-replacement publication primitive as the installation writer, including an
-existing empty-directory collision. A fixed native Python child with a fictitious
-prefix path tests before/during/after proc observations and direct child stat/
-environ access. It creates no compatdata or pfx. Only the two prefix-related env
-fields are interpreted; PID, raw environments and unrelated values are not output.
-The child normally exits when its input pipe is released; its own alarm provides a
-bounded fallback. No existing process is signaled.
+- The payload archive is hashed in full against the bundle's `sha512`. The slot is the archive
+  tree plus six generated files (`compatibilitytool.vdf`, `user_settings.py`,
+  `softdenchi-install.json`, `droiddeck-proton-wrap`, `toolmanifest.vdf`,
+  `toolmanifest.vdf.droiddeck-orig`); the first three are rendered by `install-softdenchi.py`.
+- The tree is written into a private staging directory under `compatibilitytools.d`, verified
+  in full, and published with `renameat2(RENAME_NOREPLACE)`. There is no replacing fallback; an
+  existing slot that does not match is never overwritten. Only umask 0022 or 0077 is accepted.
+- The writer holds the private locks and DroidDeck's settings lock. Records in `installations`
+  track staging, verification, publication intent and publication. Failed staging is kept;
+  after publication any failure requires inspection and never deletes the tree.
+- `placement_review` in the bundle ties the archive to a reviewed CI build (artifact ZIP and
+  inner SHA-512). An ordinary registered game confirms the registration source and the
+  executable DroidDeck records (`confirmation_registration`); its prefix and files are only
+  read.
+- Slot verification data (`slot-manifests/`, written once per slot name, never replaced): the
+  payload inventory, the expected generated files and the rule versions. A different or
+  unreadable record makes that slot unusable as a revert target; the same contents under other
+  rule versions are reported as `rules-differ`.
 
-For a local DISPLAY only, another fixed native Python child uses the system Xlib
-[XOpenDisplay/XCloseDisplay API](https://xorg.freedesktop.org/archive/X11R7.5/doc/man/man3/XCloseDisplay.3.html)
-to open/close the display without creating a window. It retains only required GUI
-authentication environment keys, strips loader inputs, never records cookie or env
-values, and has its own three-second alarm. This tests native X11 connection, not
-Wine GUI, rendering, audio or normal game launch equivalence. Missing Xlib, failed
-connection and deadline failure remain explicit results.
+### 2. Initializing a new prefix
 
-Only known unchanged empty probe directories are removed. Unexpected objects or
-changed identities are retained with an inspection status and private path. Actual
-temporary creation is included in `writes` even when cleaned up. Runtime/proc
-scope/registration freshness and prefix/dependency capacity remain separate
-blockers; even all successful probes do not grant installation/launch readiness.
-Exit 2 denotes a preflight report with preparation still blocked.
+- Only for a registered game with no compatdata of either ID form (unsigned, or signed for a
+  large ID). Existing prefixes stay read-only. Registrations are read from the file named by
+  `BL_ADDED_GAMES`; signed 32-bit IDs are normalized to unsigned, and ambiguous registrations
+  or prefix candidates stop instead of choosing.
+- The fixed builtin initialization runs with the preparation slot in a guarded session.
+  Records go to `game-prefixes` and bind the profile and the measured game EXE hash (an
+  undeclared hash is recorded as an operator selection, not a verified edition).
+- The record keeps the directory identity (device and inode) of the prefix root and of `pfx`,
+  and digests of the registered EXE path and title. Later steps require the same directories,
+  the recorded prefix version and the same registration.
+- The record also keeps `vc_runtime_fingerprint`, the inherited VC++ runtime values right after
+  initialization (used in step 4).
+- A non-ASCII EXE path is warned about: such a game has been seen to exit right after start
+  (cause unknown). The registration path is fixed at initialization.
 
-A short, plan-only user launcher is available through `--emit-selection-script`.
-It can embed a validated local `--selection-config` containing one declared archive
-identity/layout/mode and an earlier live runtime audit reference. Local data is
-not included in the public sources. Without embedded data it reads
-`prepare-plan.json` alongside the launcher. Development mode `--select-plan`
-runs the same selection/report flow directly.
+### 3. Profiles and dependency handlers
 
-The generated launcher is named `prepare.sh`: run `bash prepare.sh`, select a
-number, and read the displayed plan. No flags, manually typed ID or output
-redirection are required. It reads the file referenced by the current
-`BL_ADDED_GAMES` environment variable (not JSON text in the variable), projects
-known registration fields, and rechecks the source hash and selected EXE before
-publishing the plan. This pins the observed runtime file; it does not prove a
-fresh Android export or the normal launch route. IDs remain distinct from EXE
-basenames and titles. Terminal control characters are escaped.
+A profile lists dependency IDs; each refers to a recipe in `game_preparation.recipes`.
 
-The selected target is joined to the existing installation/runtime planner,
-including full archive and optional installed-tree verification, expected
-customizations and target-only binding planning. Existing compatdata, including
-empty or signed-ID entries, is preserved. A new registration/test context remains
-unconfirmed until explicitly established. Planned private HOME/work paths are
-separate from game/tool/Steam/settings data and are not created. Prefix template
-allocation is estimated from the shipped `files/share/default_pfx_arm64` subtree;
-initialization/dependency growth and complete capacity are still unmeasured. This
-is distinct from a future dependency-prepared prefix template.
+| Handler | Can be `ready` | What it does |
+| --- | --- | --- |
+| `softdenchi-interactive` | yes | Installs the SoftDenchi runtime (recipe in `preparation_softdenchi_recipe.py`: runtime 5.0.9.0, revision 1). |
+| `prefix-dll` | yes | Places one x86 DLL into the prefix's `syswow64`. |
+| `game-folder-file` | yes | Checks, read-only, that a declared DLL exists in the game folder. |
+| `mfc-local` | no | Reserved; always `blocked`. |
 
-A new `plan-<random>.json` is normally saved alongside the launcher with mode
-0600, exclusive creation, bounded size and no overwrite. When shared storage's
-owner/mode metadata prevents private direct saving, an owned Linux HOME fallback
-under `.local/state/droiddeck-prefix-preparation/reports` retains the authoritative
-private result. New fallback directories use mode 0700; existing ancestors are
-checked, never chmod/chown'ed. The result is then exported, with exclusive creation,
-to the explicitly selected launcher folder. Only this report-data export accepts
-shared filesystem ownership/mode emulation; its privacy depends on that filesystem.
-Asset, cache, payload, private record and execution checks are unchanged.
-A launcher inside Steam/settings/selected game data cannot save or export there;
-a private fallback outside those roots may still retain the diagnostic. Unexpected
-write failures can leave a partial new report; there is no automatic deletion.
-Cancellation saves nothing. Missing/ambiguous archives retain target evidence and
-report the needed filename. Other rejection reports contain only a fixed stage,
-exception class/errno and a closed reason code, not raw exception or environment
-values. Raw registration JSON and unrelated fields are not saved. The selected
-EXE/path/title and planned paths in the report are private user data.
+- A profile may have no dependencies: the prefix is only initialized and bound; nothing is
+  installed or placed and the VC++ record is left alone.
+- A later revision of the profile bound at initialization is accepted when it has the same
+  `profile_id`, a higher revision and a pinned EXE hash equal to the one measured at
+  initialization. A profile without a pinned EXE hash cannot get a later revision for an
+  initialized prefix; give a changed profile a new `profile_id`.
+- Dependency states: `absent`, `partial`, `incompatible`, `present-unverified`,
+  `present-verified`, `uninspected`. Only `present-verified` lets binding proceed.
+  `present-verified` means a match with the declaration; whether the game loads a file is only
+  observable at launch.
 
-The standalone script embeds trusted distribution modules and the trusted
-installer renderer, never the inspected helper or archive Python. Embedded source
-literals are ASCII escaped to avoid source-decoding differences across shells/
-Python versions. FD 3 preserves menu input while stdin carries the Python heredoc.
-The script works from another CWD without importing its modules or writing
-bytecode. It rejects command-line arguments. Exit 2 means a saved blocked plan;
-0 means cancellation; 1 means the report could not be saved or invocation failed.
-A rejection's fixed check stage/reason/class/errno is also printed before saving,
-so a storage failure cannot hide the initial rejection. Selected EXE path/FD type,
-link count and owner-comparison metadata are projected without reading contents
-when diagnosing an input refusal. This does not relax the strict reader.
-The automatic save is explicit in this user launcher; existing developer
-inspection modes keep their read-only/default no-save behavior.
+#### prefix-dll
 
-Selection bundle payloads may choose the fixed `tool_slot: "preparation"` instead
-of the backward-compatible default `"legacy"`. It uses a distinct
-`SoftDenchi-Prep-Proton <version>` directory and `SoftDenchi-Prep-Proton-<version>`
-tool ID; arbitrary slot/directory names are rejected. The source archive/version,
-Wine binaries and wrapper code do not change. Only generated catalog/receipt
-identity metadata differs, within the same six permitted overlays.
+- The recipe has an asset declaration (manifest format) and `"destination": "syswow64"`. A
+  ready recipe needs an x86 PE, reviewed provenance, `personal-use-reviewed` terms, a known size
+  and SHA-256. The name is a short ASCII basename ending in `.dll`, placed in lower case; two
+  DLLs of one profile may not share a name. Asset limit 64 MiB.
+- Refused: a name the payload ships under `files/lib/wine/` or `files/share/default_pfx*/`, and
+  a `syswow64` whose x86 layout cannot be confirmed (`syswow64/kernel32.dll` must link to the
+  verified payload's `i386-windows/kernel32.dll`, or be an x86 regular file). `system32` is not
+  used.
+- Copy: under the private and DroidDeck locks with a clear process view, relative to one opened
+  `syswow64`. The name is created with `O_EXCL|O_NOFOLLOW` (never replaced), recorded as
+  `created` at once, written and read back. Nothing is removed, renamed, truncated or written
+  again later. Registry, DLL overrides, regsvr32 and the game folder are not touched; Wine is not
+  started.
+- Records: `prefix-dlls` (phases `planned`, `created`, `present-verified`, `failed`). A partial
+  file left by an interrupted write is never written again; the run stops and the operator
+  removes it.
 
-A preparation-slot plan observes an existing legacy tree without modifying it and
-does not require that unused legacy tree to match. The actual preparation slot
-must still be absent or match the complete expected tree; mismatch never falls
-back to the legacy tool or permits overwrite. Native synthetic installation tests
-publish the preparation slot while preserving a deliberately changed legacy tree.
-The live installation and game binding remain blocked pending real prerequisites.
+#### game-folder-file
 
-Tree mismatch diagnostics identify the first discrepancy per creation-mask
-variant: root modes, known relative member path and differing field names, missing/
-unexpected object or hardlink topology. Raw file bytes, settings, link target text,
-unknown extra filenames and exception text are not collected. It is a bounded
-first-mismatch observation, not a complete diff or a corruption diagnosis. Existing
-strict tree validation is retained. Legacy-mode rejection reports retain these
-same structured diagnostics when available.
+Declares a file by name, size, SHA-256 and PE architecture, with the EXE hash and import it was
+derived from; the profile must pin that EXE hash. `present-verified` means exactly one
+single-link regular file of that ASCII name (case-insensitive) directly in the EXE's folder,
+matching the declaration and the EXE's architecture. Nothing is copied or moved.
 
-Ordinary inspection/planning never launches Wine, executes DroidDeck helpers or
-`user_settings.py`, installs dependencies or synchronizes settings. Separately confirmed
-material/placement operations and the dedicated initialization trial below are explicit
-write operations. The normal readiness-gated initialization/probe launcher remains
-internal and is not connected to executable recipes. It requires a complete pinned payload inventory, pinned registration/EXE and
-scoped proc observations, plus caller checks for provenance and runtime/stop scope.
-Local tests use a harmless substitute, not Wine. Launch records now use schema 2;
-schema-1 launch records are incompatible and are not migrated.
-An internal minimum-runtime plan pins source/library/label identities and a supported
-umask, constructs only known loader-hook paths, and keeps environment values private.
-A snapshot plan cannot authorize a live launch; provenance, process scope and actual
-GUI/Wine compatibility still need caller checks.
-An internal Linux installation writer now materializes a pinned archive into a
-private staging directory using directory FDs, with bounded streaming and deferred
-links. It applies the generated six metadata files, explicitly preserves archive
-permissions under umask 0022/0077, verifies the whole completed tree, and publishes
-with Linux `renameat2(RENAME_NOREPLACE)`. There is no replacing fallback if libc,
-the kernel or the filesystem lacks support. See the
-[Linux rename documentation](https://man7.org/linux/man-pages/man2/renameat2.2.html).
-No Wine, wrapper, helper or archived Python is executed.
+### 4. Releasing the inherited VC++ runtime record
 
-The writer requires the private global/target locks, DroidDeck's settings lock,
-a fresh matching plan, scoped process observations and trusted caller readiness
-for provenance, target freshness, runtime and complete stopped scope. A snapshot
-may receive tool writes only inside that same snapshot; it cannot authorize a
-live installation or launch. The live path requires the real runtime/proc roots.
-New installation parents must be owned and not writable by others; unsafe archive
-permissions are refused. This writer remains unavailable through the CLI.
+DroidDeck appends Steam redistributable flags and `Software\Microsoft\VisualStudio\14.0\VC\Runtimes`
+values to a tool's template prefix at its first session with that tool. A prefix created
+afterwards inherits them, and the SoftDenchi installer then skips its VC++ prerequisite and
+stops part way. Right before every SoftDenchi installer run the tool checks the prefix:
 
-Private `installations` records track staging, verification, publication intent and
-observed publication. Failed staging is retained. After publication, any failure
-requires inspection and never deletes the installed tree. If journal persistence
-itself fails, the last durable phase remains; `published: false` in a publication-
-intent record is not proof the destination was never created. Inventory always
-requires reinspection, including after a successful identity check. No automatic
-recovery, staging garbage collection or interrupted-install resume is implemented.
-Only our own empty staging wrapper is removed on success. Existing prefix, game,
-selection and state contents are not written by this operation.
+- If the six keys hold only the template's own values (the original part of the slot's
+  `default_pfx_arm64/system.reg`, hash-checked), nothing is written: `template-original`.
+- Otherwise the values are released only when SoftDenchi is not installed, no `mfc140.dll` and
+  no VC++ 14.x Uninstall entry exists, the values equal the template's appended tail and the
+  initialization fingerprint, and the registry has the shape Wine writes. The template's own
+  values are written back and the added ones deleted with one `reg.exe` run; the registry is then
+  read again. Nothing is signalled.
+- Any failure stops before the installer as `stopped-before-installer` with
+  `inherited_vc_record` saying why and whether running again can clear it (for example
+  `template-unreadable`). Final stops (`template-mismatch`, `investigation-required`, a missing
+  fingerprint, ...) are shown as stops and skipped by the batch run.
+- DroidDeck may append its block to a prefix between initialization and the installer (it does
+  so without a lock). Such a prefix stops and has to be prepared again; run a preparation in one
+  go.
 
-No inspection or plan result file is saved automatically.
+### 5. Installing SoftDenchi
 
-Use the complete directory from a trusted local installation. The entry point uses
-`/usr/bin/python3 -I -B` (Python 3.9 or later), ignoring `PYTHONPATH` and avoiding
-bytecode writes. It does not search the current directory or PATH for Python.
+- One-pass runs use the pinned silent arguments `/s /v/qn /vREBOOT=ReallySuppress`
+  (`SILENT_LAUNCH`, bound to the bootstrap hash). The record states `installer.mode = silent`,
+  `gui_check.status = not-applicable` and `license_consent = one-pass-confirmation`.
+- Interactive fallback: only when the silent run installs nothing (`cancelled-absent`), the run
+  plans the interactive installer and asks for a separate confirmation.
+- `recovery.sh` 5 runs the interactive installer: a Wine `winver` window is shown first, then
+  the bootstrap from a private copy with no arguments. The licence is accepted, or not, by the
+  operator in the installer window. It lists the managed prefixes (game prefixes, and dedicated
+  trial prefixes recorded by earlier versions).
+- Installation runs only when the live state is `absent`. A failed or completed installer
+  record, or an unreadable one, blocks a new attempt for review; nothing is repaired, upgraded,
+  removed or retried on another prefix.
+- The result comes from an offline inspection after the process view is clear: product
+  registration and version, recipe files (size, SHA-256, PE machine), the UCManSvc service and
+  the MSI COM class entries. Only recipe-listed keys of `system.reg` are read; `user.reg` is not
+  read. Other product traces prevent `absent`. Windows exit codes cannot be observed.
+- Timeouts never kill a process. While the installer runs the tool waits without asking for the
+  first 10 minutes, then asks every 30 s; `q` leaves the child running and records
+  `needs-user`. Records live in `dependency-installs`.
 
-Example with synthetic paths and an explicitly chosen ID:
+### 6. Stopping a lingering SdProxy
+
+The SoftDenchi service can keep Wine running after the bootstrap exits. The process inventory
+records PID, start time, parent, a role (`wineserver`, `wine-infrastructure`, `proton-xalia`,
+`softdenchi-service`, `softdenchi-proxy`, `other`) and the image basename; no environment values
+or arguments.
+
+- SIGTERM only, and only to SdProxy processes whose parent chain reaches UCManSvc under
+  `services.exe`, or (right after this run's installer) a chain whose first SdProxy was observed
+  as a descendant of the installer process (origin `installer-run`). The view must be read twice
+  identically, with nothing unreadable, unclassified or belonging to another prefix.
+- Targets are pinned with pidfds and checked again. After each SIGTERM the tool waits for the
+  target to exit and for the view to settle; the next send is allowed only while the view has
+  merely shrunk. Anything new or changed aborts (`not-shrinking`, `timeout`).
+- There is no SIGKILL, no `wineserver -k`, and no other process, prefix or game is signalled. If
+  the view does not clear, the state stays `needs-user`. In a one-pass run the stop is confirmed
+  by the one-pass confirmation (`stop.confirmation = one-pass-preapproved`).
+
+### 7. Binding the game to the slot
+
+The binding writer (`preparation_binding.py`) changes only this game's entries:
+
+- `games.json`: its custom-tool choice;
+- `config/config.vdf`: its compatibility-tool mapping;
+- `state.json`: its applied choice and selection history (`games_applied`, its part of `auto`,
+  `picked`, `native_choices`).
+
+Other games' choices, pending requests and the default are kept. The VDF edit keeps unrelated
+bytes; JSON files keep unrelated values (formatting can change). Unknown formats stop.
+
+- Binding requires every dependency `present-verified` and the target game and Wine seen stopped
+  before and after the dependency checks. These checks, the registration, the slot tree and the
+  prefix are checked again right before each file is replaced.
+- The writer holds the private locks and takes DroidDeck's `settings/lock` (non-blocking). It
+  saves backups (`backups/binding-<id>/{games,config,state}.backup`, private, do not share), a
+  supplementary record in `binding-notes/` (before/after hashes) and a record in `bindings/`.
+- Files are written atomically in the order games, config, state, skipping identical files. A
+  partial failure records `binding-failed` and the files already replaced; there is no rollback.
+  `binding-verified` means the target settings match. `preparation_complete` is never set; a
+  normal launch must still be verified.
+- A normal binding can only assign the bundle slot; a `revert` binding can only assign another
+  slot.
+
+### Safety rules
+
+- Read-only until confirmed; each write step plans again under its locks and stops on any
+  difference from what was confirmed.
+- Existing prefixes are never adopted, overwritten or removed (except by `recovery.sh` 7 after
+  its own confirmation). Existing files are never replaced.
+- No SIGKILL and no `wineserver -k`; timeouts never kill.
+- Records are kept, never deleted; unreadable records stop instead of being guessed.
+- No authentication is performed and no game is launched.
+- Tool launches set `PYTHONDONTWRITEBYTECODE=1` and an absent `PYTHONPYCACHEPREFIX`, so they
+  never run the slot's bytecode caches.
+- Records of newer versions carry fields that earlier tools refuse: do not run an earlier
+  `prepare.sh` after a newer one.
+
+## Moving games to a new Proton and reverting
+
+- Moving (`recovery.sh` 2, and the batch run for slots listed in the bundle's `supersedes`):
+  only games consistently assigned (all three files) to another preparation slot this tool
+  placed (an `installed-tree-verified` placement record). Dependencies must be verified, the
+  prefix version must equal the bundle Proton's `CURRENT_PREFIX_VERSION`, and no game or Wine
+  may run. A DroidDeck screen choice of the bundle slot whose other two files still name the old
+  slot is aligned without rewriting `games.json`. Games returned from this slot, or with a
+  missing supplementary record, are moved only one by one.
+- The x86 layout check accepts a link into the old slot only for the move judgement
+  (`previous-slot-link`); writing steps require a link into the bundle slot.
+- Reverting (`recovery.sh` 3) assigns a game on the bundle slot to another slot whose saved
+  verification data still verifies. It does not need the bundle slot intact and does not require
+  dependencies. It checks the initialization record, the EXE, the prefix, the target slot and that
+  no process uses it. The verified `__pycache__` directories of the slot are moved into the
+  private store (`slot-caches/<binding_id>/`, never deleted) before the settings are written.
+
+## Preparing a game again (recovery.sh 7)
+
+- Offered for a registration with a prefix (either ID form), tool records or a private work
+  folder of its ID, when there is no binding record of that ID (it never reached "ready").
+- Not offered when a record that may belong to it cannot be read; when DroidDeck's settings
+  cannot be read or choose a SoftDenchi Proton for it; when the prefix holds a SoftDenchi folder
+  (`SoftDenchi` under `Program Files (x86)` or `Program Files`, or `windows/ucharge`; links not
+  followed) that no run of the tool's installer in this prefix explains, or that cannot be
+  inspected; when both prefix forms exist; or when the prefix or work folder is not our own
+  directory.
+- Under the lock it checks again and stops if the prefix differs from the one confirmed or a game
+  or Wine runs in it. It then renames the prefix out of DroidDeck's view, moves the tool's records
+  of that ID to `retired/<redo id>/` in the private store (never deleted), renames the work folder
+  to `retired-<id>`, and removes the prefix without following links.
+- A hidden folder left by a `redos` record is removed the next time 7 is opened, when no game or
+  Wine of that prefix runs. An interruption before the records moved leaves them alone; 7 offers
+  the game again.
+- The next `prepare.sh` lists the game as new. Saves in the game folder are not touched; the
+  SoftDenchi authentication inside the prefix is gone.
+
+## What the slot check accepts
+
+The runtime-contract verifier (`verify_fex_runtime_tree`) requires the slot to match the archive
+plus the generated files, with three bounded exceptions:
+
+- FEX's one empty, owned, 0700 `files/share/fex-emu/AppConfig` directory.
+- DroidDeck's appended tail of `files/share/default_pfx_arm64/system.reg` (the original bytes
+  stay a prefix; at most 8 KiB of CommonRedist and VC++ `Runtimes` sections) with its
+  `.droiddeck-redists` / `.droiddeck-redists-checked` markers.
+- CPython `__pycache__` directories next to reviewed `.py` sources, holding only matching
+  `<stem>.cpython-3NN.pyc` files with the source's mtime and size.
+
+This weakens the check: cached bytecode is hashed but not compared with the source. The accepted
+state is reported as `tool_runtime_writes`, is part of plan digests, and must be unchanged when a
+step writes. Failures are located (`redist-registry-tail`, `redist-marker`, `python-cache`, ...).
+To clear a `python-cache` stop, remove the reported `__pycache__` directory of the slot; the next
+game launch recreates it.
+
+## Records and private data
+
+Private store: `~/.local/state/droiddeck-prefix-preparation/tool-store` (0700 directories, 0600
+files). Per-game work folders: `~/.local/share/droiddeck-preparation-work/<id>`.
+
+| Directory | Contents |
+| --- | --- |
+| `installations` | Placement of a slot. |
+| `slot-manifests` | Slot verification data. |
+| `game-prefixes` | Prefix initialization (profile, EXE hash, identities, VC++ fingerprint). |
+| `prefix-dlls` | Prefix DLL placement. |
+| `dependency-installs` | SoftDenchi installation attempts. |
+| `installer-logs` | Installer log state per attempt. |
+| `bindings`, `binding-notes`, `backups` | Binding records, supplementary records, settings backups. |
+| `slot-caches` | Caches moved out of a slot by a revert. |
+| `batch-runs` | Progress of `prepare.sh` runs. |
+| `redos`, `retired` | `recovery.sh` 7 records and the records it moved aside. |
+
+Records of removed features (probe receipts, dedicated trials, rechecks) may still exist in a
+store and are read and validated, never written. Backups and logs contain private data and
+device paths; do not share them.
+
+## Diagnostic log of the SoftDenchi installer
+
+Off unless the bundle sets `"diagnostics": {"installer_log": true}`.
+
+- Each installer run (silent and interactive) gets `WINEDEBUG=fixme-all,warn+msi` and the
+  InstallShield option `/debuglog...` into the prefix's `windows\temp`. Standard error goes to a
+  private append-only file `logs/<install_id>/live.log` in the game's work folder; other
+  launches keep `WINEDEBUG=-all`.
+- `installer-logs/<install_id>.json` stays `open` until the installer has exited and no process
+  of the prefix is visible; then the log is fixed as `final.log`. The status check lists open
+  attempts.
+- Results carry only a summary of allowed forms (counts per channel and function, MSI return
+  values, standard action names). No paths.
+- When an installation did not end `present-verified`, the screen offers to copy the log (and the
+  InstallShield log) next to the shared result, after saying the copy contains device paths and
+  cannot be recalled once shared.
+- The log has no size cap while written, and an empty log does not prove there was no error.
+
+## The bundle (bundle.json)
+
+`validate_selection_config` accepts `schema_version` (1), `payload` and `runtime_reference`
+(required) and `probe_material`, `placement_review`, `initialization_trial`,
+`dependency_installation`, `game_preparation`, `supersedes`, `diagnostics` (optional). Script
+emission additionally requires an operational bundle (`operational_layout`): `probe_material`
+true, `initialization_trial` true, and `placement_review`, `game_preparation` and
+`dependency_installation` present. The two flags no longer enable any menu; they are kept
+because the layout check still requires them.
+
+```json
+{
+  "schema_version": 1,
+  "payload": {
+    "archive": "DroidDeck-Proton-<upstream>-softdenchi-r<N>-aarch64.tar.gz",
+    "sha512": "<128 hex>",
+    "root": "DroidDeck-Proton <upstream>-softdenchi-r<N>",
+    "mode": "cleanup",
+    "tool_slot": "preparation"
+  },
+  "runtime_reference": { "...": "output of the runtime audit on the device" },
+  "probe_material": true,
+  "initialization_trial": true,
+  "placement_review": { "...": "see below" },
+  "dependency_installation": { "handler": "softdenchi-interactive", "recipe_revision": 1, "asset": { "...": "manifest entry" } },
+  "game_preparation": { "profiles": [], "recipes": [], "default_profile": "<profile_id>" },
+  "supersedes": ["SoftDenchi-Prep-Proton <older>"],
+  "diagnostics": { "installer_log": false }
+}
+```
+
+- `payload`: `archive`, `sha512`, `root` (must match the archive name), `mode` (`cleanup` only);
+  optional `alternate_relative_path` (a relative path ending in the archive name) and `tool_slot`
+  (must be `preparation` when `placement_review` is present).
+- `runtime_reference`: the JSON of a live runtime audit (`--emit-runtime-audit`). The runtime
+  check and `diagnose.sh` compare against it.
+- `placement_review`: `schema_version` 1, `basis: "github-artifact-zip-and-inner-sha512"`,
+  `archive_sha512` (must equal `payload.sha512`), `source_commit`, `run_id`, `artifact_id`,
+  `artifact_zip_sha256`, `build_info_sha256`, optional `private_xalia_files`.
+- `dependency_installation`: `handler` (`softdenchi-interactive`), `recipe_revision`, and one
+  `asset` in the asset manifest format. The asset must be the recipe's exact bootstrap.
+- `game_preparation`: `profiles` and `recipes` (1-64 each) and optional `default_profile`.
+  - Profile: `profile_id`, `revision`, `title`, `edition`, `edition_status`
+    (`unconfirmed`/`confirmed`), `dependencies` (recipe IDs, may be empty), `exe_sha256` (or
+    null).
+  - Recipe: `dependency_id`, `revision`, `handler`, `status` (`ready`/`blocked`), `reason`;
+    `prefix-dll` adds `asset` and `destination`; `game-folder-file` adds `file` (`name`, `size`,
+    `sha256`, `pe_machine`) and `required_by` (`exe_sha256`, `import`).
+  - `default_profile` must name a profile without an EXE hash.
+- `supersedes`: earlier preparation slot names whose games the batch run moves (at most 64; not
+  the bundle's own slot).
+- `diagnostics`: only `installer_log`, a strict boolean.
+
+Asset manifest entry fields: `asset_id`, `revision`, `version`, `purpose`, `filename`, `format`,
+`pe_machine`, `expected_size`, `expected_sha256`, `hash_kind`, `hash_reference`, `source_kind`,
+`source_reference`, `acquired_on`, `provenance_status`, `terms_status`.
+
+## Building the scripts and measuring the runtime
+
+`prepare_game.py` (or the wrapper `prepare-game.sh`, which runs it with `/usr/bin/python3 -I -B`)
+is a build-time tool with three modes:
 
 ```bash
-bash prepare-game.sh --inspect \
-  --registrations /test/added-games.json \
-  --steam-root /test/Steam --settings-root /test/droiddeck-compat
+# Emit one script of a bundle (prepare is the default entry)
+bash prepare-game.sh --emit-selection-script --selection-config bundle.json --script-entry prepare > prepare.sh
+bash prepare-game.sh --emit-selection-script --selection-config bundle.json --script-entry status > status.sh
+bash prepare-game.sh --emit-selection-script --selection-config bundle.json --script-entry diagnose > diagnose.sh
+bash prepare-game.sh --emit-selection-script --selection-config bundle.json --script-entry recovery > recovery.sh
 
-bash prepare-game.sh --plan \
-  --registrations /test/added-games.json \
-  --steam-root /test/Steam --settings-root /test/droiddeck-compat \
-  --app-id 42 --exe-root /test/games \
-  --profile /test/profile.json --recipes /test/recipes.json \
-  --droiddeck-version 0.7.1 --proton-version example-proton-r1
+# Print a self-contained read-only audit command to paste into the device terminal
+bash prepare-game.sh --emit-runtime-audit
+
+# Read-only runtime inventory of a root (sources, libraries, label, sockets)
+bash prepare-game.sh --inspect-runtime --runtime-root /
 ```
 
-The first command lists registrations. Select by ID with `--app-id`; selection by
-name or basename is deliberately unsupported. `--exe-root` must explicitly bound
-the selected executable. All explicit input paths must be absolute, without `..`,
-symlink parents or `.env` files. Input files must be single-link regular files. Prefix
-contents are not recursively scanned. Only the offline prefix version is read;
-registry, authentication and save contents are not collected.
+- Emission refuses a bundle that is not operational or does not validate. The script embeds the
+  `preparation_*.py` modules, `install-softdenchi.py` from `banner-proton/` and the bundle; it
+  takes input through FD 3 so the Python heredoc can use stdin.
+- Inputs are rejected with a fixed message, without echoing paths or input content.
+- Neither runtime mode connects to sockets or prints environment values.
 
-The registration input is the **added-games JSON list** consumed by DroidDeck
-0.7.1's `droiddeck-proton-run` via `BL_ADDED_GAMES`. This stage does not discover the
-Android-owned file, read Steam binary `shortcuts.vdf`, or verify the installed
-DroidDeck version. Supply an existing local list explicitly; do not interpret this
-as a request to change game registration. Only `appid`, `exe`, and optional
-`name`/`title` are projected into the report; other registration fields are ignored.
+## Tests
 
-```json
-[{"appid": 42, "exe": "/test/games/Example/Game.exe", "name": "Example"}]
-```
-
-Signed 32-bit IDs are normalized to unsigned. Duplicate normalized IDs and
-multiple signed/unsigned compatdata candidates are rejected. The EXE's current
-SHA-256, size and PE architecture are measured without execution. A measured hash
-is not provenance or a known reference hash. EXE input has a fixed 2 GiB ceiling.
-
-Optional declarative profile (all fields required, unknown fields rejected):
-
-```json
-{
-  "schema_version": 1,
-  "profile_id": "example",
-  "revision": 1,
-  "title": "Example",
-  "edition": "Unconfirmed edition",
-  "edition_status": "unconfirmed",
-  "droiddeck_versions": ["0.7.1"],
-  "proton_versions": ["example-proton-r1"],
-  "dependencies": ["example-runtime"],
-  "evidence": ["Local investigation pending"],
-  "exe_sha256": null
-}
-```
-
-Recipe document (declarative blockers only, **no installer commands or paths**):
-
-```json
-{
-  "schema_version": 1,
-  "dependencies": [{
-    "dependency_id": "example-runtime",
-    "revision": 1,
-    "handler": "mfc-local",
-    "requires": [],
-    "status": "blocked",
-    "reason": "Asset provenance and postconditions not established"
-  }]
-}
-```
-
-Reserved handlers are `mfc-local` and `softdenchi-interactive`; neither is
-executable in this stage. Recipes cannot declare success or arbitrary commands.
-JSON inputs are limited to 1 MiB, nesting depth 16, strings of 4 KiB, 128 dependency
-nodes, and dependency graph depth 16. Rendered reports are limited to 1 MiB.
-Duplicate keys, unknown schema/fields, missing references, cycles and invalid scalar types are rejected.
-
-The report includes an input digest and separate profile/recipe revisions. Local
-paths and registration IDs appear in terminal output, so treat it as private.
-Raw settings, environment values and unrelated configuration fields are omitted;
-terminal controls are escaped. Steam's game/default mapping and the UI's choice
-are reported separately. A choice alone does not prove a matching wrapper or
-payload. The parser accepts bounded quoted text VDF with braces and line comments;
-unsupported syntax fails closed instead of executing the installed helper.
-
-Version arguments are operator declarations. A matching declared version or EXE
-reference hash does not promote a combination to `verified`. Process state, free
-space, dependency postconditions, fonts, payload integrity, sync impact and real
-launch binding remain uninspected. Assets are uninspected unless a manifest is
-supplied. Existing prefixes are read-only.
-Every plan includes `execution-not-implemented`; inspection/plan `writes` is always
-empty. Optional `--assets` and `--asset-root` inspect a local asset manifest and
-include its raw digest plus measured identities in the plan digest. Asset evidence
-remains operator-declared, and assets are not yet bound to executable recipes.
-
-Exit codes: inspection `0` means a report was produced, input rejection `1`,
-blocked plan or local staging paused before preparation `2`. A successful
-inspection exit is not preparation completion.
-
-Primary local validation is the [Ubuntu 26.04/arm64 container](container/README.md),
-which runs these tests plus the slot-file rendering and observer regressions as root and nonroot.
-From the repository root:
+Primary validation is the Linux/arm64 container (Ubuntu 26.04, Python 3.14, the same family as
+DroidDeck's runtime). From the repository root:
 
 ```bash
 bash banner-proton/prefix-preparation/container/run-tests.sh
 ```
 
-Supplementary host tests (synthetic files only, from this directory):
-
-```bash
-/usr/bin/python3 -I -B test_prepare_game.py
-/usr/bin/python3 -I -B test_preparation_store.py
-```
-
-The source contract was checked against DroidDeck commit
-`cdff94e72c45da50af43bbceff28effaf0179caf`:
-[registration and prefix resolution](https://github.com/Droid-Deck/DroidDeck/blob/cdff94e72c45da50af43bbceff28effaf0179caf/tools/linuxfs/overlay/usr/local/bin/droiddeck-proton-run).
-The stricter ambiguity checks intentionally stop instead of choosing among
-multiple prefix candidates. Asset caching, journal persistence and tool/prefix
-preparation locks are available for local staging. A target-only binding planner/writer with the DroidDeck setting
-lock is implemented and locally tested; the writer still requires connection to
-real readiness checks. Executable recipes, installation CLI/readiness integration, final engine
-integration and template cloning remain pending. Device
-validation has not been performed for this tool.
-
-
-## Dedicated registration material
-
-An emitted `prepare.sh` with the explicit boolean bundle option
-`"probe_material": true` adds a numbered common menu. Option 1 retains the
-read-only target plan. Option 2 previews a **new** randomly named folder beside
-`prepare.sh`, then requires a separate `1` confirmation before writing anything.
-Canceling the preview writes nothing. There are no additional user flags.
-
-Creation validates the entire pinned archive, captures only the regular x86
-`files/lib/wine/i386-windows/cmd.exe` member (at most 2 MiB) in memory, and copies
-it as `prefix-probe.exe`, with `probe.json`. It never executes this EXE. A private
-receipt and global/target locks live under
-`HOME/.local/state/droiddeck-prefix-preparation/probe-store`; a new report is
-saved/exported with the existing report rules. Only these new material and private
-record/report paths are written. No existing destination is reused, replaced or
-repaired. Failures preserve partial material and a creating/failed receipt.
-
-Place the launcher in an Android-accessible shared folder. In the Android EXE
-picker, open that same folder, the new `DroidDeck Prefix Test-…` subfolder,
-and `prefix-probe.exe` without launching it. The creation JSON includes the full
-`exe` path and a `selection_hint.relative_exe` relative to the launcher folder.
-Previously created private probes remain untouched; they are not moved or reused.
-Then choose the new registration in the same common entry. This
-Android UI path has not yet been verified on a device. The plan requires the
-private ready receipt, exact marker and executable identity, the same directory
-and EXE inode (allowing real bind aliases), one unambiguous new registration ID
-relative to the pre-copy baseline, and absent compatdata including signed and
-noncanonical numeric aliases. A missing unrelated old EXE does not become a match.
-This confirms only the observed registration, not Android export freshness,
-a game profile, runtime provenance, full stopped scope or permission to execute.
-The registration probe remains distinct from any real game profile.
-
-An executable name or shared marker alone never establishes a trusted probe.
-Existing game files, saves, authenticated prefixes, Android registrations,
-Proton installations and compatibility settings are not copied or modified.
-Template creation, prefix initialization and dependency installation are still
-unavailable through this user entry.
-
-
-Probe verification failures report a fixed `check` and
-`probe_registration_diagnostic.checks` containing only passed/failed step names.
-Marker reads, private receipt/schema/readiness, Steam/source context, path inode
-identity, executable bytes, baseline ID, duplicate registration, prefix absence
-and final reread are distinguished. Raw receipts, marker data, unrelated game
-paths, registry and environment values are never included. A diagnostic failure
-does not repair, recreate, move or execute the probe. Existing 0.14.x receipts
-remain readable; users can select the same registration again without creating
-new material.
-
-
-A non-ready private receipt remains rejected. Before stopping, the plan additionally
-records `incomplete_probe_material` with the whitelisted receipt state and
-independent read-only observations of both created and registered paths, byte and
-marker agreement, directory path/FD guards, existing private lock metadata and
-receipt stability. It does not acquire/create locks, fsync directories, finalize
-receipts or repair files. These are current observations; legacy creation reports
-did not record the original failing condition and cannot replay history.
-Raw private receipts, paths, marker values and exception messages are excluded.
-
-
-## Explicit recovery of a failed registration-material receipt
-
-The common launcher menu adds option 3 for existing probe registrations. This is
-separate from the read-only option 1 and the new-material option 2. It previews
-an exact private history path and receipt update, then requires a separate `1`.
-Canceling writes nothing. No new EXE, marker, Android registration, compatdata or
-Proton installation is created, modified or executed.
-
-Recovery repeats the whole pinned archive checksum/inventory and bounded x86
-member inspection, requires both material and registered EXE/marker to agree,
-and checks the same registration, baseline new ID, uniqueness, absent prefix
-including signed/numeric aliases, source stability and inode/metadata pins.
-It does not authorize a write based on a diagnostic JSON or receipt status.
-All checks are repeated under the existing private global/target locks. Receipt,
-registration, material content and inode pins are checked again immediately before
-the atomic receipt update; the archive is not streamed a third time in that
-callback. Any mismatch stops the operation.
-
-The original receipt is retained without overwrite under `probe-history`, named
-by its original SHA-256. An identical existing backup may be reused after an
-interruption; conflicting history is refused. The updated ready receipt keeps
-its original creation version and adds a strict `revalidation` evidence object
-with the new tool version, old state/hash/history reference, archive/inventory,
-registration identity/source hash and context digest. Normal verification now
-checks this immutable history and the revalidated registration ID. A previously
-ready receipt is inspected without rewriting it or creating new history.
-
-The historical reason for an old creation failure remains unknown. This is a new
-revalidation, not a claim that the original run succeeded. If publication is
-interrupted, private state may already have changed; preserve it and use the same
-menu again. The report explicitly records the uncertain write outcome. It never
-rolls back blindly or marks the receipt failed after a possibly successful update.
-After recovery, the same target's normal blocked preparation plan is generated
-and saved in the same operation. Prefix initialization, dependency installation,
-template creation and game launch remain unavailable through this entry.
-
-
-New material-creation failures also retain a strict `creation_failure` stage,
-error-kind enum and bounded errno in the private failed receipt where possible.
-The visible creation report uses the same fixed stage. No exception message or
-input data is stored. This evidence is preserved through subsequent revalidation;
-legacy failures that lack it remain explicitly unknown.
-
-
-## Static placement of the reviewed preparation tool (0.16.0)
-
-A trusted emitted bundle may include `placement_review`, recording the reviewed
-GitHub build commit/run/artifact ZIP digest, build-info digest and inner archive
-SHA-512. This review is pinned distribution data established before emission;
-format validation alone is not a remote attestation. The archive is still fully
-verified on the device. The common menu exposes option 4 only for this reviewed
-bundle and only for a verified registration probe from the same archive/inventory.
-It shows the new destination, capacity, review identity and write scope, then
-requires a separate `1` before any placement writes. Canceling writes nothing.
-
-This operation copies files into the fixed **preparation** slot only. It checks
-current target/receipt/history identity, prefix absence (including aliases),
-source/runtime identity, private parents and capacity; it rechecks under private
-global/target and cooperative DroidDeck settings locks. Staging is bounded,
-mode-preserving and verified against every archive member plus the six generated
-metadata files. Native `renameat2(RENAME_NOREPLACE)` publishes the new tree;
-post-publication verification repeats the probe and whole-tree checks. Existing
-legacy trees are never repaired or replaced. A matching existing preparation tree
-is observed read-only; a changed tree is refused. Failure preserves staging or
-published data and its journal for inspection. The same target's normal plan is
-then generated automatically, leaving later prefix/execution blockers in place.
-
-The static scope is intentionally separate from full execution readiness. It
-never calls Wine, wrappers, installers or the legacy sync helper, writes
-compatdata, changes tool bindings, or asserts that other process namespaces are
-stopped. Its writes are the new preparation tree/staging, private journal/locks,
-DroidDeck's cooperative lock file and a new report. This is justified by the
-absent new destination and the absence of any existing tool/prefix/config update.
-The existing `apply_installation` API still requires all four independent full
-readiness checks plus its `ProcessStopCheck`; it was not given bypass flags.
-Only the private filesystem transaction is shared with the new scoped caller.
-Runtime equivalence, GUI, stopped scope, dependency capacity and all execution
-requirements remain unverified and cannot be satisfied by this placement report.
-
-Exact confirmation pins the fixed target/destination/action, reviewed archive,
-customizations and probe evidence. Available space is remeasured, not frozen into
-identity; the already allocated staged tree is not counted a second time before
-publication. A race creating the destination causes refusal without replacement.
-The reviewed build identity is recorded in the output; it establishes which
-artifact was copied, not source reproducibility or compatibility of Wine/games.
-
-
-For the reviewed distribution's Xalia files, static placement may preserve a
-small explicit `private_xalia_files` list of regular files with source mode 0666.
-The list must exactly equal all otherwise unsupported entries in the pinned
-inventory; no arbitrary writable path, directory, hardlink or other mode is
-accepted. Every listed name is a direct `files/share/xalia/` file. This is not a
-mode overlay: bytes and source modes remain unchanged. The private tool parent
-must be owned by the current user and exactly 0700, checked before staging,
-during filesystem guards and after publication. No chmod is applied to existing
-parents. A parent becoming readable by others stops the operation. The original
-full writer still has no such exception by default. This copy-only containment
-must not be treated as execution readiness; future launch checks must establish
-their own safe containment and all remaining runtime/process prerequisites.
-
-## Read-only binding diagnostics (0.16.1)
-
-If binding planning rejects an input after an installed tree has been verified,
-the selection report preserves the installation, registration and prefix checks.
-The binding subplan remains blocked. Independent bounded checks of the registered
-tool, requested games, applied history, selection history and target mapping are
-included with fixed diagnostic codes, without raw settings or exception messages.
-These independent observations are not a coherent binding plan and cannot authorize
-any writer. The existing strict binding validation and writer guards still apply.
-
-Use the normal planning option to inspect an already placed tool. Reinstallation,
-probe recreation and execution are unnecessary for this diagnostic step. Placement
-success alone does not establish Wine execution, prefix initialization, dependency
-installation or game compatibility.
-
-## Preserving bounded Steam scalar values (0.16.2)
-
-Steam config planning and candidate validation can preserve unrelated scalar values
-longer than 4096 bytes within the existing 1 MiB file bound. Keys retain the 4096
-byte limit; tool IDs, target IDs, depth, duplicate keys and quoted syntax checks
-remain restricted. Other VDF readers retain their original scalar limit. Only the
-target mapping is edited by the internal guarded writer, which remains unexposed.
-
-For an installed tree, the read-only report compares the old scalar limit and the
-preservation limit on the same bounded read. It records fixed rejection codes, byte
-count and input digest, without settings values. These observations do not authorize
-execution or settings writes. Every VDF rejection now has a fixed diagnostic code;
-the local regression checks this coverage. Device validation of this change remains
-separate from local fixture tests.
-
-## Initialization input inspection (0.17.0)
-
-When the selected tool is already fully verified, normal read-only planning also
-checks the launcher hashes and literal settings restrictions, missing canonical
-prefix and aliases, absent private work/home paths and their existing ancestor,
-and two same-owner proc observations. It aggregates failures using fixed check
-names and error classes without raw settings, process environment values or output.
-No child is started, directory created, lock acquired or settings file changed.
-
-This is input inspection for a future dedicated initialization test. Even a clear
-process view cannot establish other namespaces or external launcher serialization.
-The report retains explicit runtime, process-scope and growth blockers and never
-authorizes execution. The existing launcher guards and CLI execution restrictions
-remain unchanged. Prefix initialization, Wine GUI and dependencies still need
-separate device validation after the test scope and changes have been shared.
-
-## Batched observations and progress reporting (0.18.0)
-
-The normal planning action includes the initialization input inspection and collects
-independent filesystem metadata for Steam, tools, compatdata, settings and proposed
-private work/state roots. It records available bytes/inodes, owner/mode and mount
-read-only/noexec flags. These are observations, not actual write or execution tests.
-Local X11 endpoint and authority-file metadata, known system executable availability,
-and presence of selected runtime variables are collected without reading cookies,
-exporting environment values, opening GUI connections or starting subprocesses.
-The verified inventory also identifies the selected native Wine branch and inputs;
-this is layout information, not runtime validation. No assets are executed.
-
-Same-owner proc observations include fixed failure-stage counts and the peak counts
-from two views, without PIDs, command lines or raw environments. Visibility and
-serialization limitations remain unchanged. Independent context remains available
-in an interactive error report even if target-dependent planning fails.
-
-The JSON and terminal distinguish collected checks that passed, rejected checks,
-observations requiring attention, dependent checks not run, deferred implementation
-steps and unverified runtime limits. A legacy parser-limit refusal that the bounded
-preservation parser handles is informational, not a new failure. The existing
-blocked execution status is retained and is separate from the inspection summary.
-This batch replaces the unrun 0.17.0 inspection; there is no need to run both.
-
-## Dedicated first initialization trial (0.19.0)
-
-A trusted distributed bundle can enable `initialization_trial: true` alongside its
-reviewed build configuration. Menu 5 previews the new dedicated probe prefix,
-private work/home, baseline plus 1 GiB reserve, journal and cooperative lock scope,
-then requires a separate explicit confirmation. It runs only the reviewed preparation
-tool's fixed `run cmd.exe /d /c exit 0`. It cannot execute a game, install assets,
-change bindings or claim normal execution readiness. The default menu action remains
-read-only. A reserve is an admission check, not a growth limit or filesystem sandbox.
-
-The trial requires a matching private probe receipt, absent prefix and aliases,
-absent trial paths, verified installed tree, reviewed source, shipped arm64 prefix,
-live pinned runtime and two clear same-owner process views. Mutable legacy dist and
-SteamPipe maintenance inputs are rejected. Reviewed Xalia modes remain subject to
-the private 0700 tool-parent guard before and after launch. Snapshot runtimes are
-refused. No readiness flags are fabricated for the ordinary LaunchSession API.
-
-After confirmation the caller holds private global/target and cooperative settings
-locks, refreshes the complete plan, creates private work/home and the new prefix,
-and launches with the existing minimal environment/disabled observer and fixes.
-Settings input hashes are compared before/after without exporting contents. Standard
-input/output/error are DEVNULL. There is no raw registry or process-environment dump.
-Waits are bounded, with up to five seconds of grace for lingering visible Wine
-services. Timeout or residual processes retain `needs-user`; the operator can wait
-again or hand off without a signal, deletion, automatic restart or adoption.
-
-A zero command exit still requires the same payload/runtime/target and prefix version,
-directories and registry headers. Result `initialized-unverified` does not establish
-GUI, dependencies, templates or game compatibility. Trial records have their own
-schema under `trials/` and appear in read-only management inventory with mandatory
-reinspection. All partial prefixes, private directories and journals are preserved.
-
-## Post-trial read-only audit (0.20.0)
-
-Menu 6 reads an existing private trial record, then independently inspects the
-current registration, prefix aliases, minimum prefix structure, metadata-only
-prefix size, visible target process view and runtime context. It reconstructs the
-expected tool from the pinned archive and trusted renderer, so a changed installed
-tree does not prevent diagnosis. Strict verification remains unchanged.
-
-The diagnostic comparison records bounded differences across known source members
-and unexpected object boundaries, including modes, missing objects, content identity
-and hardlink topology. Unknown names are hashed, their contents are never read and
-unexpected directory subtrees are not traversed. The list is capped at128 entries
-with explicit truncation. This comparison is diagnostic and cannot authorize a
-writer or replace strict validation. Prefix sizing never follows Wine drive links.
-
-If archive/runtime prerequisites are unavailable, independent prefix/process checks
-still appear and dependent checks are explicitly marked not run. The private trial
-record is read again to detect replacement and is never updated, adopted, retried
-or promoted. Only a new result report is written. Future trial failures retain
-fixed TreeMismatch metadata instead of only the exception class. An exit code zero
-with a post-check failure does not become verified initialization automatically.
-
-## Source-reviewed empty FEX directory and managed recheck (0.21.0)
-
-Proton selects `files/share/fex-emu/` as FEX's local config directory. Pinned FEX
-creates its `AppConfig/` directory during config lookup. `verify_tree` still rejects
-extras by default. A separate runtime verifier permits only that exact directory,
-absent from the source inventory, under an owned0700 tool parent, with an owned0700
-empty directory and stable identity. Nonempty configs, links, other modes/owners,
-other extras and modified source files are rejected. It never creates or removes
-the directory. New dedicated trial post-checks use this narrow runtime contract.
-
-Menu7 performs this verification and then offers a separately confirmed fixed
-`runinprefix cmd.exe /d /c exit 0` for the existing managed trial prefix. It does not
-initialize, clone, repair, install assets, modify bindings or rewrite old history.
-It requires the private trial's prior exit0/unchanged-settings evidence, the original
-probe receipt/current registration, reviewed source, current version and private
-prefix/work/home ancestors, live runtime and clear same-owner process views.
-
-Managed recheck plans carry a distinct trial origin and cannot be executed through
-the ordinary LaunchSession readiness API. Rechecks have a separate journal and
-inventory with mandatory reinspection. New result `probe-exited-unverified` means
-only the fixed command and guarded postconditions passed; GUI, dependencies,
-other-namespace stop scope and complete preparation remain unverified. Timeout
-never kills a process or automatically retries. Old failed records remain intact.
-
-## Measured dependency plans (0.22.0)
-
-`--plan-dependency --assets <manifest> --asset-root <directory>
---dependency-handler softdenchi-interactive --dependency-asset <asset-id>` binds a
-measured asset to a concrete handler plan without a registration or prefix write.
-It is a separate read-only mode and returns2 for a produced blocked plan. No new
-device action or installer execution is enabled by this mode.
-
-The original interactive bootstrap is retained with no guessed silent arguments
-or direct-MSI bypass, including its prerequisite handling. Product registration,
-file hashes/PE/versions, UCManSvc configuration and both COM views must be checked;
-exit0 alone is insufficient. MFC plans remain single-file candidates with an
-unresolved architecture mapping, no broad vcrun6 install, CRT/OLE overrides or
-substitution for MFC140. Original asset provenance, independent reference, terms,
-identity and product-role blockers remain; executable handlers and live probes are
-not yet connected. An unknown/partial/incompatible existing state never requests
-automatic repair, upgrade or deletion. A persisted verified label never authorizes
-a skip without live reinspection. Submitted postcondition observations are reported
-separately and cannot authorize execution or binding.
-
-## Managed-prefix SoftDenchi installation (0.23.0)
-
-When the selection configuration contains `dependency_installation` (handler
-`softdenchi-interactive`, recipe revision and one asset declaration), the short
-launcher offers two more items for a managed trial prefix that already has a
-successful fixed-command recheck:
-
-- 8: interactive installation. A Wine builtin `winver` window is shown first. The
-  original bootstrap starts only after the operator confirms the window appeared and
-  the visible process view is clear again. The bootstrap runs from a new private copy
-  under its distributed file name, with no arguments, no guessed silent switches and
-  no MSI-only launch. The license is accepted, or not, by the operator in the
-  installer window. No authentication is performed.
-- 9: read-only reinspection without starting Wine.
-
-The asset must be the exact bootstrap of the trusted, statically derived recipe in
-`preparation_softdenchi_recipe.py` (SoftDenchi runtime 5.0.9.0, revision 1): a
-self-consistent manifest for another x86 PE is refused. Terms and provenance
-blockers still apply. Installation proceeds only when the live state is `absent`;
-`partial`, `incompatible`, `present-unverified`, `present-verified` and
-`uninspected` are preserved and reported. Nothing is repaired, upgraded, removed or
-retried on another prefix.
-
-The final state comes from an offline inspection after the visible process view is
-clear: product registration and version, all recipe files (size, SHA-256, PE
-machine), the UCManSvc service type/start/image, and the MSI Class-table COM entries
-in the 64-bit and 32-bit registry views. Only recipe-listed keys and value names of
-`system.reg` are interpreted; other data is not kept or exported, and `user.reg` is
-not read. Links, hard links, special files and malformed or duplicated registry
-data make an item failed or the whole state `uninspected`, never `absent`. Further product
-traces (32-bit Uninstall view, Windows Installer product keys, UpgradeCode
-relations) prevent `absent`; another product under the same UpgradeCode makes the
-state `incompatible`. The registry must decode as strict UTF-8. A pending file
-rename keeps the state unverified, and an unexpected value type makes it unknown. The Unix exit status is recorded only:
-Windows exit codes such as 1602 or 3010 cannot be observed through it.
-
-A new attempt is planned only after no record, a cancelled-absent or
-stopped-before-installer record, a record that never reached the installer, or an
-interrupted one; a failed or completed installer record, or any unreadable record,
-blocks it for review. Prefix allocation is measured from metadata before and after
-the installer and recorded with its growth.
-
-Timeouts never kill a process; `q` leaves the child running and records
-`needs-user`, not a cancellation. Records live in the private `dependency-installs`
-journal and always require reinspection. Destination resolution follows standard
-Windows Installer rules and is unverified on device Wine; registrations made by the
-installer's self-registration step are not statically known and are not checked.
-
-## Lingering SoftDenchi processes (0.24.0)
-
-The SoftDenchi service is started at installation and can keep Wine running in the
-managed prefix after the bootstrap exits. When the visible process view of that
-prefix is not clear, the installation record and menu 9 keep a process inventory:
-PID, start time, parent, a role (`wineserver`, `wine-infrastructure`,
-`proton-xalia`, `softdenchi-service`, `softdenchi-proxy`, `other`) and the image
-basename with a coarse place. Environment values, arguments and other paths are not
-kept. `lsass.exe` and `tabtip.exe` count as Wine infrastructure only from the Windows
-system directories; `xalia.exe` counts only as the selected tool's own
-`files/share/xalia/xalia.exe` (its `Z:` or `\\?\unix` DOS forms, as given or resolved)
-with an `explorer.exe` parent in the same view. Any other image ending in
-`files\share\xalia\xalia.exe` is reported with the place `proton-share-xalia` but stays
-unclassified and refuses the stop.
-
-After an explicit confirmation, SIGTERM is sent only to SdProxy processes whose
-parent chain reaches UCManSvc under `services.exe`, with consistent start times and
-one shared executable identity (in menu 8 right after the installer run, also a chain
-whose first SdProxy has no parent left in the view, if that SdProxy was observed as a
-descendant of the installer process while it ran; see 0.26.3), from two identical inventories without unreadable,
-unclassified or prefix-conflicting processes (both prefix variables, when present,
-must name this prefix). The batch is pinned with pidfds and the full conditions are
-evaluated again after pinning; before each further signal the view is read again
-(after a bounded wait for the previous target to exit and for the view to settle; see
-0.26.4) and anything new or unexplained aborts; each later target must keep its confirmed image,
-prefix consistency and executable identity (only its parent may change). A target that
-already exited is recorded as gone, and every per-target result is kept even when the
-stop or a later step fails (0.24.1, 0.24.2). There is no SIGKILL,
-no `wineserver -k` and no other process, prefix or game is signalled. If the view
-does not clear within a bounded wait, the state stays `needs-user`. After a clear
-view the installation continues with the offline post-inspection; menu 9 then
-reinspects as before.
-
-## Registered-game new prefixes (0.25.0)
-
-With `game_preparation` (operator-declared profiles and recipes; only the SoftDenchi
-recipe can be `ready`, MFC stays `blocked`; 0.27.0 adds read-only `game-folder-file`
-recipes), menu 10 initializes a new prefix for a
-registered game that has no compatdata yet. Probe registrations keep the dedicated
-trial scope and existing prefixes stay read-only. The same guarded session as the
-probe trial runs the fixed builtin initialization with the reviewed preparation slot;
-records go to the private `game-prefixes` journal and bind the selected profile and
-the measured game EXE (an undeclared EXE hash is recorded as an operator selection,
-not as a verified edition). Dependency installation (menus 8 and 9) accepts these
-records as well as probe trials; a changed game EXE refuses planning. Binding is not
-written by these steps.
-
-The preparation slot may hold FEX's one empty, owned, 0700 `AppConfig` directory:
-when it exists, the reuse plan and the managed initialization/recheck launch plans
-accept it under the source-reviewed FEX contract. Without it, or for the legacy slot,
-the strict tree check is unchanged, and plans made under the contract are refused by
-the ordinary launch readiness path.
-
-## Target-only binding of a prepared game prefix (0.26.0)
-
-Menu 11 binds one initialized registered-game prefix to the reviewed preparation slot
-only when every dependency of the profile bound at initialization is live
-`present-verified` (offline inspection with a clear process view before and after).
-A `blocked` recipe (MFC today) or an unverified dependency is reported and nothing is
-written. A profile changed since initialization refuses the plan (0.27.0 accepts only a later
-revision of the same profile pinned to the initialized EXE hash; see below). After an exact
-confirmation the existing guarded target-only writer changes this game's entries in
-`games.json`, `config.vdf` and `state.json`, keeps other games' pending choices and the
-default, and stores a private backup and record. Before each file write the
-registration, the tool tree under the FEX contract, the prefix version, the stopped
-view and the dependency state are checked again. No game is launched and no
-authentication is performed; `preparation_complete` stays false until a normal launch
-is verified separately.
-
-## Binding later steps to the initialized prefix and registration (0.26.1)
-
-A registered-game record now stores the created prefix root's directory identity
-(device and inode, saved right after creation and before spawn) and digests of the
-normalized registered EXE path and title. Dependency planning and installation,
-binding plans, and the binding writer's readiness check require the live prefix to be
-the same directory with the recorded version, and the registration to keep the same
-path and title, so a restored or swapped prefix at the same path, or the same EXE
-content registered from another folder, is refused. The readiness check before each
-binding write uses the planning inspection itself, so a process observed during the
-dependency inspection stops the write. A device-number change across reboots would
-also refuse; that has not been measured on the device.
-
-0.26.2 also records the identity of the WINEPREFIX (`pfx`) created by a successful
-initialization and requires it at the same points, so swapping only `pfx` while the
-prefix root and version stay is refused. Restoring files inside the same directories
-is not detected by these identities.
-
-## Stopping what the installer run left behind (0.26.3)
-
-On the device (0.26.2) the bootstrap started SdProxy before UCManSvc and exited, so the
-first SdProxy had no parent left in the prefix view, and `lsass.exe`, `tabtip.exe` and
-Proton's `xalia.exe` stayed beside it. Menu 8 now records the start time of the process
-it spawns for the installer (`installer.spawned_started`, from `/proc/PID/stat`) and,
-while the installer runs, polls every 0.5 s: a SdProxy of this prefix whose same-owner
-ancestry (PID and start time at every step) reaches that process is kept in
-`installer.installer_proxies` (at most 64). In the same session only, a SdProxy chain
-whose first SdProxy lost its parent is accepted when that first SdProxy is in this list
-and the chain shares the executable identity of the one `services.exe` in the view. A
-SdProxy started by any other launch, or one missed between polls, is not attributed and
-refuses the stop. While the installer runs, menu 8 waits without asking for the first
-10 minutes (in steps of up to 120 s), so the operator can work in the installer window
-while the attribution keeps observing; after that it asks every 30 s as before. The
-confirmation and the record state each target's origin
-(`ucmansvc` or `installer-run`). All other conditions (two identical inventories,
-nothing unreadable, unclassified or prefix-conflicting, pidfd pinning and revalidation,
-SIGTERM only) are unchanged. Menu 9 keeps the UCManSvc-only rule because it has no
-installer run to attribute the origin. The menu 10 profile prompt also accepts the
-profile name.
-
-## Sending to the second SdProxy after the first exits (0.26.4)
-
-A stop could abort after the first SIGTERM because the view read before the second send
-contained an unreadable process. The working hypothesis (not confirmed) is that an
-exiting process is briefly unreadable (empty argv or a state change between reads). Now,
-after each SIGTERM, the tool waits up to 5 s for the signaled SdProxy to exit (its pidfd
-turns readable), then reads the view again every 0.25 s for up to 5 s until it is fully
-readable and explained; only such a view allows the next send, and a target that has
-exited meanwhile is recorded as gone. Reading again is allowed only while the view merely
-shrinks (see 0.27.3 for the exact rule); anything new or changed aborts at once. If no
-view qualifies, the stop aborts as before and the record keeps the unreadable PIDs of the
-last view (`stop.unreadable_pids`, at most 16; process summaries also carry
-`unreadable_pids`). Menu 8 prints why a stop was refused or aborted and how many
-SIGTERMs were sent, and, when no post-inspection ran (`post_state` None or
-`uninspected`), to restart DroidDeck and check the prefix with menu 9.
-
-## Game-folder file dependencies and profile revisions (0.27.0)
-
-Some games import a runtime DLL that their own folder already provides (for example an
-x86 executable importing the ANSI `MFC42.DLL`), while the 32-bit MFC140 and VC++
-2015-2019 runtime that SoftDenchi's in-process components load are installed by the
-SoftDenchi bootstrap during menu 8. A new recipe handler,
-`game-folder-file`, declares such a file by name, size, SHA-256 and PE architecture
-together with the EXE hash and import it was derived from (the import must name the
-file); the profile must pin that EXE hash. It is the only handler besides the SoftDenchi
-installer that may be `ready`, so a bound prefix no longer implies a verified SoftDenchi
-unless the profile lists it. Menu 11 checks it read-only: exactly one single-link
-regular file of that ASCII name (case-insensitive) directly in the registered EXE's
-folder, matching size, hash and architecture, and of the same architecture as the
-registered EXE, is `present-verified`; none is `absent`; a symlink, several case
-variants, other content, another architecture or a change while reading is
-`incompatible`; unreadable is `uninspected`. `present-verified` means a match with the
-declaration only: the file's provenance is not checked and the EXE import table is not
-read. The check runs again in the readiness callback before each binding write. Nothing
-is copied, moved, installed or loaded; whether the game loads the file is only
-observable at launch. `mfc-local` (placing MFC into the prefix) stays blocked.
-
-Menu 11 also accepts a later revision of the profile bound at initialization: same
-profile ID, a strictly higher revision, and a pinned EXE hash equal to the one measured
-at initialization (which the recheck still verifies live). Dependencies are evaluated
-live, so a new prefix is not needed. The record keeps no dependency list, title or
-edition, so a revision that drops a dependency or renames the profile cannot be detected;
-menu 11 shows the current title, edition and dependencies for the operator. The plan
-and result record both revisions and digests; any other change still refuses.
-
-Menus 10 and 11 report whether the registered EXE path is ASCII and warn otherwise: a
-game in a folder named with non-ASCII characters has been seen to exit right after start
-while an ASCII-named copy with the same kind of prefix proceeded (the cause is not
-known). The registration path is fixed at initialization, so a folder must be renamed
-and registered again before menu 10.
-
-## DroidDeck's redistributable markers in the preparation slot (0.27.1)
-
-DroidDeck, in its first game session after a compatibility tool appears, appends Steam
-CommonRedist "installed" flags (DirectX, .NET 4.5.2, VC++ 2017/2019/2022) and VC++
-runtime version keys to the tool's `files/share/default_pfx_arm64/system.reg` (keeping
-its mtime) and adds `.droiddeck-redists` and `.droiddeck-redists-checked` beside it, once
-per tool. After that, every step that verified the preparation slot stopped.
-
-The runtime-contract verifier (`verify_fex_runtime_tree`, used by the reuse plan of the
-preparation slot when its FEX directory exists, and directly by trials, recheck,
-dependency steps and binding) now accepts this bounded change in addition to the FEX
-directory: the archive bytes of that `system.reg` must remain a byte-for-byte prefix with
-the same mode, followed by at most 8 KiB starting and ending with a newline, made only of
-sections `Software\[Wow6432Node\]Valve\Steam\Apps\CommonRedist\<part>\<part>` with
-`dword` values and `Software\[Wow6432Node\]Microsoft\VisualStudio\14.0\VC\Runtimes\{x86,x64,arm64}`
-with `Bld`, `Installed`, `Major`, `Minor`, `Rbld` (`dword`) and `Version` (`"v<digits/dots>"`),
-each section with at least one value; such a tail requires the `.droiddeck-redists`
-marker. The two markers must be small single-link regular files without execute or
-group/other write bits; their content is only hashed and reported. Failures carry a
-located tree diagnostic (`redist-registry-tail`, `redist-marker`, `redist-marker-missing`).
-The ordinary strict `verify_tree` is unchanged. Proton copies the template, including
-the tail and the markers, into each new prefix; whether that makes the SoftDenchi
-bootstrap skip its VC++ runtime is not verified, and the SoftDenchi post-inspection
-does not check VC++ runtime files.
-
-## Review fixes (0.27.2)
-
-- Stop: a fresh view is read before every later SIGTERM, also when the previous target
-  had already exited at its send (0.26.4 skipped the read in that case). An abort
-  records `revalidation` (`timeout` or `not-shrinking`, number of reads, the target,
-  PIDs not in the confirmed view, counts of the last view); each later signal entry
-  records its reads and the unreadable PIDs seen while settling.
-- Binding: each dependency state carries its recipe revision and digest, and a
-  `game-folder-file` state also its declared file, so the plan digest and the result
-  change when a recipe changes under the same dependency ID.
-- Tool template: the accepted DroidDeck redist state (sections, appended bytes, tail
-  SHA-256, marker hashes) is reported as `tool_droiddeck_redist` (renamed to
-  `tool_runtime_writes` in 0.27.4) in the reuse plan, the
-  menu 10 preview, the recheck plan and the binding plan, is part of their digests, and
-  the recheck readiness check and the binding readiness check before each write require
-  it to be unchanged (the menu 10 initialization guard re-verifies the tree but does not
-  compare this state).
-
-## Review follow-ups (0.27.3)
-
-- Stop: while settling, a readable process counts as unchanged only if it is in the
-  confirmed view with the same image, prefix consistency and executable identity (its
-  parent may change); otherwise the stop aborts at once (`not-shrinking`). Menu 8 shows
-  the number of SIGTERMs whenever any was sent; menu 9 shows the restart hint only when
-  its inspection is `uninspected`.
-- Binding: non-object recipe entries are refused by validation; ready handlers are
-  dispatched explicitly.
-
-## CPython caches written into the preparation slot (0.27.4)
-
-Once a game is bound to the preparation slot and launched, CPython writes bytecode caches
-for the tool's own modules (for example `__pycache__/user_settings.cpython-314.pyc` and
-`protonfixes/__pycache__/*.pyc`) into the slot, after which every strict tree check
-stopped with `unexpected-object`. The runtime-contract verifier now also accepts a
-`__pycache__` directory (no group/other write) only in an archive directory that holds
-reviewed `.py` sources, containing only `<stem>.cpython-3NN.pyc` for a `<stem>.py` of the
-archive in that directory: single-link regular files without execute or group/other write
-bits, at most 16 MiB and 256 per directory, timestamp-based (flags 0) with the source
-mtime and size of the installed, verified source. Anything else in it, a cache elsewhere,
-or a changed source is refused with a located `python-cache` diagnostic.
-
-This weakens the tree check: the bytecode is hashed and reported but not compared with
-the source, so a cache rewritten with a matching header would run instead of the
-reviewed source. Only a process of the same user can write there, and such a process
-could also change the sources, which the check still detects. The ordinary strict
-`verify_tree` is unchanged.
-
-The accepted state (DroidDeck redist markers and the caches) is reported as
-`tool_runtime_writes` in the reuse plan, the menu 10 preview, the recheck plan and the
-binding plan, is part of their digests, and the recheck and binding readiness checks
-require it to be unchanged; a game launched from the slot between planning and writing
-therefore stops the step.
-
-## Tool launches do not read the slot's bytecode caches (0.27.5)
-
-Accepting caches by header (0.27.4) also meant that the tool's own Proton launches
-(initialization, recheck, dependency steps) imported cached bytecode that is not compared
-with the reviewed sources. Every tool launch now sets `PYTHONPYCACHEPREFIX` to an absent
-path in its private work area (with `PYTHONDONTWRITEBYTECODE=1` nothing is written there),
-so CPython compiles the verified sources instead of reading `__pycache__` in the tool.
-The plan refuses if that path exists, and each spawn checks again that it is still absent.
-Game launches by DroidDeck are not affected and keep the weakening described in 0.27.4.
-Standard-library caches are not used by these launches either, which may make them
-slower.
-
-## Cache rule refinements (0.27.6)
-
-- Cache names: the module stem may start with a digit or contain `-` (per-game fix
-  modules use such names); it must still be a `.py` of the archive in the same
-  directory.
-- Header: the magic must end with `\r\n`; a cache tagged for the verifying interpreter
-  (`sys.implementation.cache_tag`) must carry its magic number. Caches of other CPython
-  versions are accepted by header and hash only, since CPython does not read them.
-- Cache bytes count toward the installed-size bound.
-- Diagnostics name the failing field (`pyc-magic`, `pyc-flags`, `source-mtime-or-size`,
-  `source-missing`) with the cache's location.
-
-Recovery: a stop with `python-cache` (for example a stale cache after the sources were
-copied without their mtimes, a leftover temporary file after an interrupted write, an
-`-O` cache, or group-writable files) is cleared by removing the reported `__pycache__`
-directory of the slot; launching a game from the slot once recreates valid caches. Tool
-launches never write them (`PYTHONDONTWRITEBYTECODE`, 0.27.5).
-
-## Final-review fixes (0.27.7)
-
-- Stop: before every later SIGTERM the view must only have shrunk relative to the
-  confirmed view (no new process, no changed image, prefix consistency or executable
-  identity, no unreadable PID outside it), also when the view would otherwise pass the
-  stop conditions (for example a restarted service or another launch); otherwise the
-  stop aborts at once (`not-shrinking`).
-- Menu 10: the initialization guard right before spawn requires the runtime writes of the
-  preparation slot (`tool_runtime_writes`) to equal those of the plan.
-
-## One-pass preparation of a new game (0.28.0)
-
-Menu 12 runs the steps of menus 10, 8 and 11 for one registered game in one run, with one
-confirmation. It is offered when the bundle enables the initialization trial, the
-reviewed placement, game preparation and dependency installation.
-
-- Selection: registered games without a prefix ("new") and games with a tool record
-  ("resume"). A profile is chosen automatically when exactly one profile pins the
-  measured EXE hash; otherwise it is asked as in menu 10.
-- Confirmation: before anything is written, the run shows the registration, profile,
-  prefix, preparation slot, the SoftDenchi installer with its silent arguments, the
-  license statement, the SdProxy stop rule and the settings files the binding changes.
-  The confirmation is taken for a digest of fixed values (registration and EXE, profile
-  and recipe digests, asset and installer mode, private paths, payload/customization/
-  runtime identity and runtime writes, binding plan digest including the settings
-  inputs). Each later step plans again (the same plans, guards and writers as the
-  separate menus) and stops, without asking again, when its fixed values differ.
-- Locks: the private tool/prefix lock is held from the first write to the last step;
-  the DroidDeck settings lock is held during initialization and installation only, and
-  the binding writer takes it itself.
-- SoftDenchi: the recipe bootstrap runs with pinned silent arguments
-  `/s /v/qn /vREBOOT=ReallySuppress` (InstallShield Basic MSI setup.exe; `SILENT_LAUNCH`,
-  bound to the bootstrap hash and kept out of the recipe digest). There is no winver
-  check; the record states `gui_check.status = not-applicable`, `installer.mode = silent`
-  and `license_consent = one-pass-confirmation`. Menu 8 keeps the interactive installer
-  and its display check. A lingering SdProxy is stopped under the unchanged rules,
-  confirmed by the one-pass confirmation (`stop.confirmation = one-pass-preapproved`).
-- Interactive fallback: only when the silent run installs nothing (`cancelled-absent`),
-  the run plans the interactive installer, requires every fixed value except the
-  installer mode to be unchanged, and asks for a separate confirmation of that plan.
-- Resume: a stopped run is continued by running menu 12 again. A failed or unreadable
-  installation record stops; a record after which a new attempt is allowed leads to an
-  installation when the current state is `absent`; `present-verified` (current, offline
-  inspection with a clear view) moves on to binding. Moving on from a record whose
-  post-inspection never ran is recorded as a separate read-only check. Partial, unverified
-  or incompatible states stop and nothing is repaired.
-- Before the confirmation (nothing written yet): a profile dependency that is not
-  `ready` stops; for a new prefix the installer file is inspected and bound to the
-  recipe bootstrap; binding records are read (any tool version, shape checked) so an
-  unreadable one stops here. Unreadable game prefix records are counted and shown but
-  do not hide other registrations.
-- Binding: decided by the current three settings files, after the dependencies (an
-  unverified dependency stops even for a bound game). All files bound: reported as
-  bound. Some bound: stops. None bound: binds, unless an earlier binding of this game
-  was verified or wrote files.
-- Result: the fixed values are kept per item (digests); a stop names the changed items.
-  Each step keeps its plan summary and record, also when an exception interrupts it.
-- Not done: registering the game, authentication and the first launch. Silent
-  installation on device Wine is not yet measured.
-
-## One declared DLL in the prefix: handler `prefix-dll` (0.29.0)
-
-A recipe with handler `prefix-dll` places one x86 DLL into the initialized game prefix's
-`pfx/drive_c/windows/syswow64/`, as menu 12's step between the initialization and the
-SoftDenchi installation. A profile can then declare a runtime DLL that the game imports
-without pinning the EXE hash or asking the operator to put the file into the game
-folder. `mfc-local` stays reserved and blocked.
-
-- Declaration: the recipe carries an asset declaration in the manifest format and
-  `"destination": "syswow64"`. A ready recipe requires an x86 PE, a reviewed provenance
-  and `personal-use-reviewed` terms, a known size and an independent SHA-256 reference.
-  The file name is a single short ASCII basename ending in `.dll`; it is placed in lower
-  case, and two DLLs of one profile may not share a destination name. The asset file is
-  read from the folder of `prepare.sh`, like the SoftDenchi installer.
-- Not changed: registry, DLL overrides, registration (regsvr32), the game folder, and any
-  existing file (never overwritten, replaced or removed). Wine is not started.
-- Refused: a name that the selected payload ships under `files/lib/wine/` or
-  `files/share/default_pfx*/` (a native copy would hide the builtin); a `syswow64` whose
-  x86 layout cannot be confirmed. The layout check reads `syswow64/kernel32.dll`, which
-  must be a link resolving to the verified payload's `files/lib/wine/i386-windows/kernel32.dll`
-  (compared by file identity, not by the spelling of the link) or an x86 regular file; `system32` is not used, since on ARM64 devices it holds ARM64 and x64
-  images.
-- State (read-only): `absent`, `present-verified` (exactly one single-link regular file
-  whose size, SHA-256 and PE architecture match the declaration), `incompatible` (case
-  variants, links, other content, a Wine builtin or placeholder file), `uninspected`.
-  `present-verified` is a match with the declaration only; whether the game loads the
-  file is observable at launch. Menu 11 and the binding step include it in the
-  dependency check and in the readiness callback before each settings write.
-- Copy (0.29.1): under the private and DroidDeck locks, with the managed recheck guard and a
-  clear process view. Every step works relative to one opened `syswow64` whose device and
-  inode are part of the plan. The plan digest (which includes the latest record) is compared
-  before this run writes its own record; afterwards the running guard applies. The asset is
-  read into memory once and checked (size, SHA-256, PE architecture) before anything is
-  created. The destination name is then created with `O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW`
-  (an existing name is never replaced); its device/inode is recorded as `created` right
-  away, with SIGINT/SIGTERM blocked between the creation and that record. The content is
-  written and read back through the same descriptor. Nothing is ever removed, renamed,
-  truncated or written again later. (0.29.0 named an `O_TMPFILE` file through
-  `/proc/self/fd`; that failed on the device with errno 95.)
-- Records: `prefix-dlls` (phases `planned`, `created`, `present-verified`, `failed`; 0.29.0's
-  `linked` is still read). A failure before the creation ends `failed`; after it the phase
-  stays `created` and the error names the step (`read-asset`, `create`, `record-created`,
-  `identity`, `write`, `fsync-file`, `read-back`, `fsync-directory`, `post-inspection`). The
-  asset is limited to 64 MiB.
-- Resume: the latest record of the same initialization, dependency and destination decides
-  with the current state. A destination matching the declaration is accepted whatever the
-  phase. An absent destination is created after no record, `planned`, `failed` or `created`,
-  and stops after `linked` or `present-verified` (it disappeared). A partial file left by an
-  interrupted write (`created`) is never written again, since inode numbers can be reused
-  across runs; the run stops and the operator removes it. An empty file left between the
-  creation and its record also stops. A replaced `syswow64`, a record for another recipe or
-  asset (the recipe must stay unchanged to continue 0.29.0 records), or an unreadable record
-  stops.
-- Menu 12: the confirmation lists each DLL (name, asset hash, destination); the fixed
-  values gain `dlls` (recipe digest and measured asset per DLL); a missing or different
-  asset stops before anything is written. Since 0.31.1, a resumed game whose
-  DLL is already placed no longer needs the asset file (only a DLL still to place does);
-  the measured asset stays part of the confirmed values. On resume, a profile that changed
-  since the initialization (other than an accepted later revision) stops before any step.
-  The plan observes the process view before and after inspecting; an unclear view stops.
-- Not measured on a device: the 0.29.1 creation in the prefix's `syswow64`, loading from
-  `syswow64`, and whether the file stays through Proton updates.
-
-## Operational entry (0.30.0)
-
-When a bundle enables the probe material, the reviewed placement, the initialization
-trial, dependency installation and game preparation (the conditions of menu 12), the
-first screen offers four entries. A bundle missing one of them keeps the earlier screen.
-
-```
-1. 新しいゲームを準備（初期化→DLL→ソフト電池→割り当て。途中からの再開も可）
-2. ゲームの状態を確認（何も変更しません）
-3. 新しいProtonを準備用slotに置く（起動しない）
-4. 詳細メニュー（検証用・手動の操作）
-```
-
-- 1 is menu 12. 4 shows the earlier menus 1–12 with their numbers unchanged. Any other
-  input, including a number of the earlier screen such as 12, cancels without writing.
-- Guidance follows the screen: with the entry screen it names "詳細メニューの9" and
-  "もう一度 1"; bundles with the earlier screen keep "メニュー9" and "12".
-- 3: placement without a probe. An ordinary registered game (not a probe EXE) is used
-  only to confirm the registration source and the executable DroidDeck records; its
-  prefix, settings and files are only read, and a prefix may exist. Exactly one
-  registration must point at the executable; registrations with two prefix aliases, a
-  symbolic-link prefix, or a game folder that contains or lies inside Steam, the DroidDeck
-  settings or the tool store are listed with
-  the reason and cannot be chosen. The plan carries `confirmation_registration` instead of
-  `probe_registration`, and the witness kind is part of the confirmed digest. Placement
-  itself (review, staging, full tree check, non-replacing publication, locks) is
-  unchanged and creates no follow-up plan. Menu 4 still requires the probe and an absent
-  prefix.
-- Reads from the asset folder (`prepare.sh`'s folder) do not compare timestamps: the
-  payload archive for registered games (planning, staging, managed recheck), declared
-  assets (installer, DLLs) and the source of the installer copied into the private cache
-  (`cache_asset` stays strict for other callers such as `--stage-local`). Every byte is still hashed
-  against the declared size and digest, a size or identity change still stops, and the PE
-  architecture is taken from the hashed bytes. Shared storage was seen to change file
-  times while reading. Probe trials, private records, Steam and DroidDeck settings,
-  installed trees, the game EXE and prefix registry reads stay strict.
-- 2: the state of each game this tool initialized, read-only. No locks (neither the
-  private store locks nor the DroidDeck settings lock), no store creation, no Wine and no
-  SdProxy stop offer; only the result JSON is written. The payload is read once and its
-  inventory is passed to every game's checks; a missing payload or an unplaced slot is
-  reported once and leaves dependencies undetermined. Per game: the initialization record,
-  the profile, the assignment from `games.json`, `config.vdf` and `state.json` (this
-  bundle's slot, another Proton by name, none, partial with the differing files, or
-  another Proton whose three files disagree), the dependency states, and the next step.
-  A game assigned to another Proton is out of this bundle's scope. A running game, or a
-  read that changed underneath, is shown as not checkable. Problems of one game do not
-  stop the others.
-- The next step comes from the read-only evaluation that menu 1 uses before its
-  confirmation (`evaluate_resume`): the pre-write stops (profile and revision, blocked
-  dependencies, the DLL assets and installer of a new prefix, binding records) and each
-  step's decision (DLL resume, with the asset required only for a DLL to place; SoftDenchi
-  state and installation plan, binding). The space
-  check of each later step counts the bytes the earlier steps of the run write (a DLL before
-  the installer; recorded as `capacity_after_earlier_steps`), and one SoftDenchi
-  installation satisfies every dependency it handles. "Ready" means every dependency is verified and the game is bound. When resuming, menu 1 now
-  stops before its confirmation, with the same stage and reason, when a later step would
-  stop (for example a binding that cannot follow because a game-folder file is missing),
-  instead of writing the earlier steps first. Each step still plans again under its locks.
-- Stops and lists: a stop caused by an input that changed while it was read records
-  `reason: input-changed-during-read` and the names of the differing fields
-  (`changed_fields`) in entry 3, menus 1, 4, 7 and the probe material. Menu 1's list shows
-  the current assignment name of each game it can resume. For a game assigned to another
-  Proton, menu 1 stops when this tool's records show an earlier verified binding (or one that
-  wrote files); otherwise it binds the game to this bundle's slot after the confirmation.
-  When resuming and the game or Wine is running, menu 1 stops before its confirmation and asks to end them first. The resume
-  evaluation reuses the payload inventory read for the confirmation (one archive read).
-  Entry 3 lists two registrations of one executable as ambiguous and keeps the excluded
-  candidates and their reasons in the result.
-
-## Proton update and the batch first screen (0.31.0)
-
-With the operational conditions of 0.30.0, the first screen now lists what this bundle
-would do and runs it after one confirmation. 0.30.0's four entries are under 3 with the
-same numbers, followed by two new ones.
-
-```
-1. すべて実行する            (only when something is listed)
-2. ゲームの状態を詳しく見る（何も変更しません）
-3. 個別の操作                (1-4 of 0.30.0, 5 move a game, 6 assign a game to another slot)
-```
-
-- The list is read-only (no locks, no store creation, no Wine), built with the status
-  check's global payload/slot check and menu 1's own planning (`interactive_one_pass`
-  with `mode="plan"`). It shows "to do" items: place the bundle slot, save the slot's
-  verification data, move or align games, resume, prepare new registrations; and "not
-  done" items with their reason. Registrations with a prefix but no record of this tool
-  are grouped once (the tool never adopts an existing prefix). New registrations use the
-  only profile without a pinned EXE hash; non-ASCII EXE paths are left to entry 1. When a
-  SoftDenchi installation is listed, the installer name, hash, arguments and the licence
-  sentence are shown; "1" includes that consent and the SdProxy SIGTERM rule of menu 8.
-  To read the licence on screen, the list points to detailed menu 8 (after menu 10 for a
-  new game). Moves and alignments are planned read-only with the run's own move plan; a
-  move that plan would stop is listed under "not done" with its blockers, and the status
-  check shows the same dependencies and blockers. "Not done" reasons are shown in words
-  (the status check uses the same text) with menu 1's next step when it has one; a resumed
-  game lists what it will do; an initialized game needs a prefix DLL asset file only when
-  that DLL still has to be placed (a ready game is not listed when the files are gone); saved slot data that differs, cannot be read or was saved
-  under other rule versions is listed under "not done" (never rewritten). The payload is
-  read once for the whole list.
-- Without the bundle slot only the placement is listed. It is done with an automatically
-  chosen confirmation registration (registrations assigned to a preparation slot first,
-  then by number); only a registration-specific failure, also in the plan made again under
-  the lock before anything is placed, tries the next one. The screen
-  names the registration used and the state of the slot data; when no registration can
-  confirm, the skipped registrations and their reasons are shown and saved with the advice
-  to register one game first. The list is then built again and confirmed a second time.
-- Running: each step plans again under its own locks. Before a game starts, its entries
-  in `games.json`, `state.json` (`games_applied`, and its part of `auto`, `picked`,
-  `native_choices`) and `config.vdf` (its whole mapping entry) must be the listed ones; a
-  move's decision, including whether the batch run may do it, must be the listed one; menu 1 additionally compares
-  its fixed values (except the whole-file binding digest) and stops when more actions are
-  needed than confirmed, when the kind (new or resume) differs, or when a step under the
-  lock would write something not confirmed; the listed entries are compared again under
-  the lock. A game stopped before writing is skipped; a stop after a game started writing,
-  or a failure not about that game (opening the private store, a private or DroidDeck
-  settings lock held elsewhere), ends the run. Every listed item is in the progress record
-  from the start, and each prefix DLL keeps its own ID. A failure to save the slot data is reported and the run goes on.
-  Outcomes per game: done, not started, stopped before writing, partially applied. A
-  partial game names the stage it stopped at, and the binding backup only when it exists.
-- Progress (`batch-runs/`): before a step writes, the record ID it uses (`trial_id`,
-  prefix DLL `record_id`, `install_id`, `binding_id`) is saved with the locked store of
-  that step. The next first screen reconciles an unfinished run from those IDs, the
-  private records and what was made under them before a record (an installer input
-  folder, binding backups; a binding note alone counts as nothing written). An unfinished
-  binding whose changed files all hold their new bytes (compared with the note's hashes), or
-  whose own entries in those files all assign its slot (another game may have changed the
-  shared files since), is shown as "only the final check is missing". A lock held elsewhere
-  when menu 1 starts a game is "stopped before writing", not "partially applied". Runs are marked reviewed when a new run
-  starts. The result JSON keeps each game's menu 1 report and journaled IDs and is
-  rewritten whenever an ID is recorded and after every step (private copy and one shared
-  copy, atomically).
-- Moving (operation 5, and the batch run for slots listed in the bundle's `supersedes`):
-  only games consistently assigned (all three files, compared by `valve`, `dir` and the
-  tool ID) to another preparation slot this tool placed (an `installed-tree-verified`,
-  published installation record of any tool version; the folder registered with the same
-  tool ID). Dependencies must be verified, the prefix version must equal the bundle
-  Proton's `CURRENT_PREFIX_VERSION` (read from the payload), and no game or Wine may run.
-  The x86 layout check accepts a link into such a slot only for this judgement
-  (`previous-slot-link`); writing paths (prefix DLL placement, SoftDenchi installation,
-  including `winver`) require a link into the bundle slot or an x86 regular file. A
-  DroidDeck screen choice of the bundle slot whose other two files still name the old slot
-  is aligned without rewriting `games.json`; the reverse direction is never written.
-  Games returned from this slot, or with a missing supplementary record, are moved only
-  one by one. Games whose records or settings cannot be read are listed with the reason
-  instead of being left out.
-- Supplementary records (`binding-notes/`): written before the binding record, with the
-  slots involved, the per-file before/after hashes and, for operation 6, the cache move.
-  Binding records keep their 0.30.0 shape, so earlier tools still read the store.
-- Slot verification data (`slot-manifests/`, up to 32 MiB, written once per slot name and
-  never replaced): the payload inventory, the expected generated files and the rule
-  versions, saved when this tool verifies the bundle slot (placement, reuse, the batch
-  run). A different or unreadable record makes the slot unusable for operation 6. The same
-  contents saved under other rule versions are reported as such ("rules-differ"), not as
-  another slot; a later version decides how to save them again.
-- Operation 6 assigns a game currently on the bundle slot to another slot with saved data
-  that still verifies. It does not need the bundle slot to be intact and does not check
-  dependencies or the bundle payload; it checks the initialization record, the game
-  EXE, the prefix, the target slot (registered tool, saved data, prefix version) and that
-  no process uses the target slot (executable, working directory or a path argument; the
-  launcher is a Python script), and its placement record and the game's registration again
-  at writing time. The status check tells a revert that stopped before any setting changed
-  (caches moved, operation 6 again) from one that stopped while replacing the settings. Slots that
-  are not targets are shown with the reason and the manual route (the DroidDeck screen and
-  the sync command); dependency states are shown but never required. Only the
-  `__pycache__` directories the verification accepted are moved into
-  the private store (`slot-caches/<binding_id>/`, non-replacing renames, never deleted)
-  before the files are written, so the next launch rebuilds them from verified sources;
-  their contents are not compared. The binding writer has a separate `revert` kind whose
-  readiness keys are only what is checked; a normal binding can only assign the bundle
-  slot and a revert never can. The bundle slot and the supplementary-record callback are
-  required arguments of the writer.
-
-## Prefix DLL assets of prepared games (0.31.1)
-
-After the 0.31.0 device check: a game whose prefix DLLs are already placed no longer needs
-the asset files in the folder (a ready game was listed under "not done" when `mfc42.dll`
-was absent). An initialized game needs a DLL's asset only when that DLL still has to be
-placed; every missing asset is reported at once; and when a DLL is not placed for another
-reason (a running game, a changed layout), that reason is shown instead of the asset. A
-new prefix still checks every DLL asset before anything is written, and the measured
-assets stay part of the confirmed values.
-
-## Diagnostic log of the SoftDenchi installer (0.31.2)
-
-Off unless the bundle sets `"diagnostics": {"installer_log": true}` (a strict boolean;
-other keys are refused). With it, each SoftDenchi installer run (silent and interactive)
-gets Wine's `err` lines of every channel and `warn` lines of `msi`
-(`WINEDEBUG=fixme-all,warn+msi`; other log switches a slot's `user_settings.py` could set
-are turned off). The installer's standard error is a private append-only file in the
-game's work folder (`logs/<install_id>/live.log`, 0600); nothing reads it while the
-installer runs, and other launches keep `WINEDEBUG=-all` and `/dev/null`. The
-pre-install capacity check adds 16 MiB to the work folder. If the log cannot be opened,
-the installer runs as before and the reason is recorded.
-
-- A separate record `installer-logs/<install_id>.json` (the installation record keeps
-  its shape) is `open` until the installer has exited and no process of the prefix is
-  visible; then the file up to its current end is fixed as `final.log`, and the
-  processes of this user still holding the log are counted (read from `/proc`; nothing
-  is done to them). An attempt left before that (q, Ctrl+C, a refused stop) stays
-  `open`; the status check lists it.
-- Results carry a summary of allowed forms only: counts per channel and per function
-  (functions from a fixed list taken from the pinned Wine source, others as `other`),
-  MSI return values, standard MSI action names (others as `custom`), fixed message
-  counts and the kind of `wine:` lines. No paths or other names.
-- When an install did not end present-verified and its result was saved in the shared
-  folder, the screen offers to copy the whole log next to it as
-  `installer-<install_id>.log` after showing the folder and that the copy contains
-  device paths and cannot be recalled once shared. The copy is written to a temporary
-  file and linked to its name without replacing anything. The batch run asks at the end,
-  per attempt; the option is part of what its list confirmed.
-- Accepted limits: the log has no size cap while it is written (only `err` and
-  `warn:msi`); processes started by the installer keep their copy of the file and can
-  add lines until they end; processes started through paths that rebuild the
-  environment may not write to it, so an empty log does not prove there was no error.
-
-## Releasing the inherited VC++ runtime record (0.32.0)
-
-DroidDeck appends Steam redistributable flags and `Software\Microsoft\VisualStudio\14.0\VC\Runtimes`
-(`x86`, `x64`, `arm64`, also under `Wow6432Node`) to a compatibility tool's template prefix at its
-first session with that tool. A prefix created afterwards inherits these values, and the
-SoftDenchi installer then skips its own VC++ 2019 prerequisite, so `mfc140.dll` stays missing
-and the installation stops part way (InstallShield's StartServices returns 1627). Right before
-the SoftDenchi installer (silent, interactive fallback and detail menu 8 alike), the tool
-releases these inherited values from the prefix it prepared:
-
-- Only when SoftDenchi is not installed, no `mfc140.dll` exists in `syswow64` or `system32`,
-  no VC++ 14.x registration exists under `Uninstall` (display names only), every value equals
-  the template's appended tail (read from the bytes whose hash the tool already verified), every
-  line of the prefix's `system.reg` has a form Wine writes, no key, ancestor or sub-key is a
-  registry link, nothing is duplicated, and the values equal the fingerprint recorded right after the prefix was
-  initialized by 0.32.0 or later (`vc_runtime_fingerprint` in the initialization record).
-  A prefix initialized by an earlier version has no fingerprint; its values are not released.
-- The pinned Proton template already carries Wine's own values in four of these keys
-  (`Version` `14.42.34433.0`, without the leading `v`); DroidDeck's tail overrides them. Those
-  values are written back (`reg.exe add <key> /v <name> /t REG_DWORD|REG_SZ /d <value> /reg:64 /f`),
-  so the prefix ends as the template was before DroidDeck appended to it. Values the template
-  did not have are deleted (`reg.exe delete <key> /v <name> /reg:64 /f`), and a key the template
-  did not have, with no other values and no sub-keys, is deleted itself (`reg delete <key> /reg:64 /f`).
-  One Wine run of `cmd.exe /d /c` does it all, joined by `&&` within a key (a failure stops that
-  key) and `&` between keys.
-  The child is polled (120 s) and the prefix's processes are observed until none is left (60 s);
-  nothing is signalled. The registry file is then read again: written-back values must equal the
-  template's, deleted values and keys must be gone, kept keys and their other data unchanged, and
-  the `Runtimes` keys present.
-- Any failure stops before the installer: the installation record is
-  `stopped-before-installer` and `inherited_vc_record` says why and whether running again can
-  clear it. A partly finished release continues on the next run only when what is left is a
-  subset of the original values; otherwise it stops as `investigation-required`. Stops that
-  running again cannot clear are shown as stops by the status check and skipped by the batch.
-- Gaps accepted by the operator (2026-11-23): another process changing these keys between the
-  last read and the deletion (only with deliberate parallel operation on the same prefix).
-- After the installer, the record keeps `mfc140.dll` (native or not) and the `Runtimes`
-  versions. In diagnostic mode, the installer also gets
-  `/debuglogC:\windows\temp\droiddeck-setup-<install_id>.log` (InstallShield's own log, left in the
-  prefix's `windows\temp`); a copy is kept privately as `setup-debug.log` beside the installer
-  log and is copied with it as `installer-<install_id>-setup.log` when the operator agrees.
-  `reg.exe`'s output goes to `logs/<install_id>-release/release.log`.
-- Written: the released values and empty keys in this prefix's registry, the fingerprint in
-  the initialization record, and in diagnostic mode the InstallShield log in the prefix.
-  Records of 0.32.0 carry new optional fields; earlier tools refuse them, so do not run an
-  earlier `prepare.sh` after 0.32.0.
-
-## Profiles without dependencies and the default profile (0.33.0)
-
-- A profile may declare no dependencies (`"dependencies": []`). Preparing a game with it only
-  initializes the prefix and binds it to the preparation slot: nothing is installed, no DLL is
-  placed and the inherited VC++ runtime record is left as it is. The one-pass confirmation
-  shows "依存 なし", the status check (also for a move) "依存: なし", and detail menu 11
-  "依存: なし" (and "依存 なし" in its profile line when the profile revision changed); the result JSON has an empty `dependencies` list. The SoftDenchi
-  licence, authentication and installation lines appear only for a profile that uses
-  SoftDenchi. A profile without a pinned EXE hash cannot get a later revision for an
-  initialized prefix (as for any profile without one); give a changed profile a new
-  `profile_id` instead. Binding also requires the process observation it is given to be of
-  the planned prefix.
-- Binding now requires on its own that the target game and Wine were seen stopped before and
-  after the dependency checks, the last step of the readiness callback right before each file
-  is replaced. Before, this was implied only by the dependency states, so a profile without
-  dependencies would have had no such check. The binding plan reports a running target as the
-  blocker `process:target-process-view-not-clear`. The one-pass resume drops only the
-  `dependency-not-verified:<id>` blockers of dependencies its earlier steps make verified;
-  every other blocker stays. A one-pass run that stops there says the prefix is initialized and
-  that the next run continues after the games are closed. The batch result of a new or resumed
-  game stopped at binding before its binding run began (no binding id yet) says the next run
-  continues (or the next list names why it cannot); a stop after a binding run began, or one
-  because the binding history needs a look, keeps the earlier text.
-  Detail menu 11 asks to close
-  the game and run again without promising the binding.
-- `game_preparation.default_profile` (optional) names the profile the batch run uses for new
-  registrations. It must name a profile without a pinned EXE hash. Without it, the batch run
-  uses the only profile without a pinned EXE hash, as before; with two or more such profiles
-  new registrations are listed under "not done". Other profiles are chosen with individual
-  operation 1. Prepare games that need another profile with individual operation 1 before
-  running the batch, which would otherwise prepare them with the default profile.
-- Detail menu 8 (SoftDenchi installation) still lists every managed prefix, including one
-  prepared without dependencies; it installs only after the operator selects it and confirms.
-- Tool 0.32.0 reading a record of a profile it does not have stops before writing in
-  preparation, binding, moving and the status check. Reverting (individual operation 6) shows
-  the dependencies as not judgeable and, as that display is advisory, still reverts when its
-  own checks pass; detail menu 8 does not look at the profile.
-
-## A template DroidDeck has not appended to yet (0.33.1)
-
-- Fix: a preparation slot placed moments ago may not carry DroidDeck's appended VC++ runtime
-  record yet (DroidDeck appends at session start and in its idle job). A prefix initialized
-  from it holds only the template's own Runtimes values, yet 0.32.0-0.33.0 stopped such a
-  prefix before the installer as `template-mismatch` (final), because the template had no
-  tail to compare with.
-- The release step now also reads the template's original part: the first `size` bytes of the
-  slot's `default_pfx_arm64/system.reg`, accepted only when their SHA-256 equals the archive
-  inventory's (the same bytes are hashed and parsed), with or without DroidDeck's tail after it.
-  When the prefix's six keys match it exactly (a key the original lacks must not exist, even
-  empty; a key it has must hold the same value names, types and data, the same other values and
-  the same sub-keys, and the registry has its usual shape), nothing is released or written and
-  the installer runs: the record says `template-original` with the value count. This holds
-  without, or against, the initialization fingerprint, because nothing is written. Every other
-  case takes the earlier path; a prefix that holds DroidDeck's values is still released.
-- A read error of the original part or the tail, or a template that changed while it was read
-  (DroidDeck appending at that moment), stops as `template-unreadable` (running again may clear
-  it); a stable hash or content mismatch keeps the earlier final stop.
-- A prefix whose history began or finished a release is never judged this way: its values are
-  Wine's because the tool wrote them back.
-- DroidDeck also appends its block to each prefix without its marker, at session start and in
-  its idle job, without a lock. If that happens between initialization and the installer, the
-  prefix stops as before and has to be registered again; the tool cannot close this window. Do
-  not launch games from DroidDeck while a preparation runs, and run it in one go.
-- A record that already stopped as `template-mismatch` stays final. Earlier tools refuse the
-  new state, so do not run an earlier `prepare.sh` after 0.33.1.
+It builds a test image from an allowlisted snapshot and runs every suite as uid:gid `0:0` and
+`10000:10000`, with no network, a read-only source tree and a tmpfs for fixtures. A new test file
+must be added to both `run-tests.sh` (copy list) and `run-in-container.sh` (run list). See
+[container/README.md](container/README.md). Host runs on macOS are supplementary.
+
+`fixture_legacy_builders.py` holds test-only builders copied from 1.0.0 (`dfd3eb81`): the
+dedicated registration probe, its trial and the legacy slot writer. The tests still build their
+disposable worlds this way; it is never part of an emitted script.
+
+The tests do not run Wine or a real installer and do not establish device equivalence; GUI,
+Wine, authentication and game operation are outside them.
+
+## Limits
+
+- `present-verified` is a match with a declaration; whether a game loads a DLL is seen only at
+  launch.
+- A game whose EXE path has non-ASCII characters has been seen to exit right after start.
+- DroidDeck can append its VC++ block to a new prefix at any time without a lock; a prefix hit
+  between initialization and the installer has to be prepared again.
+- The directory identities in records would also refuse after a device-number change across
+  reboots; not measured on the device.
+- Whether a placed prefix DLL is kept when games move to a new Proton has not been checked on a
+  device.
+
+## Removed in 1.0.1
+
+The last version containing these is commit `dfd3eb81` (tool 1.0.0); read them with
+`git show dfd3eb81:banner-proton/prefix-preparation/<file>`.
+
+- The numbered menus 1-12 and the operational entry screen, and the plan-only selection screen.
+- Probe material creation, its recovery (`preparation_probe_recovery.py`), the probe
+  initialization trial menu, the post-trial audit (`preparation_trial_audit.py`), the FEX recheck
+  menu and binding-only menu 11.
+- The standalone placement entries.
+- Measured dependency plans (`preparation_dependencies.py`) and the runtime preflight
+  (`preparation_preflight.py`).
+- The command-line modes `--inspect`, `--plan`, `--plan-dependency`, `--plan-preparation`,
+  `--stage-local`, `--list-local`, `--inspect-preflight`, `--emit-preflight-script`,
+  `--inspect-payload` and `--select-plan`, and the binding diagnostics.

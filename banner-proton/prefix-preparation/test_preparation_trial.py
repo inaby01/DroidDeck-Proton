@@ -15,12 +15,12 @@ from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 BASE = runpy.run_path(str(HERE / 'test_preparation_static_placement.py'))
+import fixture_legacy_builders as legacy
 import preparation_execution as execution
 import preparation_recheck as recheck
 import preparation_trial as trial
-import preparation_trial_audit as audit
+import preparation_dependency_install as dependency
 from preparation_common import Invalid
-from preparation_execution import LaunchSession
 from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore
 
@@ -68,7 +68,7 @@ class TrialTests(BASE['StaticFixture']):
         patch.object(trial, 'RESERVE', 1024 * 1024).start()
 
     def trial_plan(self):
-        return trial.plan_trial(self.plan(), self.home)
+        return legacy.plan_trial(self.plan(), self.home)
 
     def launch_fixture(self, **kwargs):
         # A native surrogate has no DroidDeck hooks or real Wine dependencies.
@@ -166,28 +166,6 @@ class TrialTests(BASE['StaticFixture']):
         self.assertFalse(plan.work.exists())
         self.assertFalse(plan.compatdata.exists())
 
-    def test_cancelled_trial_menu_does_not_launch_or_create(self):
-        self.config['initialization_trial'] = True
-        before = self.protected()
-        with patch('subprocess.Popen', side_effect=AssertionError('no child')):
-            status, report, output = self.menu('5\n1\nq\n')
-        self.assertEqual(status, 0)
-        self.assertIsNone(report)
-        self.assertIn('新規prefix', output)
-        self.assertEqual(before, self.protected())
-        self.assertFalse((self.home / '.local/share/droiddeck-preparation-work').exists())
-
-    def test_confirmed_trial_menu_saves_result_and_preserves_settings(self):
-        self.config['initialization_trial'] = True
-        before = self.protected()
-        with patch.object(trial, 'plan_launch', side_effect=self.launch_fixture):
-            _, report, _ = self.menu('5\n1\n1\n')
-        self.assertEqual(report['trial']['status'], 'initialized-unverified')
-        self.assertTrue(report['prefix_created'])
-        self.assertFalse(report['binding_written'])
-        self.assertFalse(report['preparation_complete'])
-        self.assertEqual(before, self.protected())
-
     def test_lingering_services_get_bounded_grace_without_forced_termination(self):
         plan = self.trial_plan()
         clear = {'clear_in_view': True, 'device_namespace_verified': False}
@@ -221,50 +199,6 @@ class TrialTests(BASE['StaticFixture']):
         self.assertTrue(plan.compatdata.exists())
         self.assertTrue(plan.work.exists())
 
-    def test_post_audit_reports_tree_changes_and_prefix_together_without_execution(self):
-        self.config['initialization_trial'] = True
-        plan = self.trial_plan()
-        with self.f.store() as store, patch.object(trial, 'plan_launch', side_effect=self.launch_fixture):
-            session = self.session(plan, store).start()
-            session.process.wait(timeout=10)
-            cache = session.launch.spec['tool'] / '__pycache__'
-            cache.mkdir()
-            (cache / 'DUMMY_PRIVATE').write_bytes(b'DUMMY_SECRET')
-            original = session.wait(1)
-        self.assertEqual(original['status'], 'failed')
-        # Refused under the runtime contract's cache rule; the unknown file name is not disclosed.
-        self.assertEqual(original['error']['tree_diagnostic']['check'], 'python-cache')
-        self.assertEqual(original['error']['tree_diagnostic']['relative_path'], '__pycache__')
-        record_file = self.f.store_root / 'trials' / (original['trial_id'] + '.json')
-        before = record_file.read_bytes()
-        with patch('subprocess.Popen', side_effect=AssertionError('audit never executes')):
-            _, report, _ = self.menu('6\n1\n')
-        self.assertEqual(report['origin_status'], 'failed')
-        self.assertTrue(report['trial_record_unchanged'])
-        self.assertFalse(report['status_promoted'])
-        self.assertEqual(report['checks']['prefix-structure']['status'], 'accepted')
-        self.assertEqual(report['checks']['strict-tool-identity']['status'], 'rejected')
-        self.assertEqual(report['checks']['tool-differences']['difference_count'], 1)
-        self.assertEqual(before, record_file.read_bytes())
-        self.assertNotIn('DUMMY_SECRET', json.dumps(report))
-        self.assertTrue(cache.exists())
-
-    def test_post_audit_keeps_independent_checks_when_source_archive_is_missing(self):
-        self.config['initialization_trial'] = True
-        plan = self.trial_plan()
-        with self.f.store() as store, patch.object(trial, 'plan_launch', side_effect=self.launch_fixture):
-            session = self.session(plan, store).start()
-            session.wait(10)
-        archive = self.f.fixture.source.archive
-        archive.rename(archive.with_suffix('.preserved'))
-        with patch('subprocess.Popen', side_effect=AssertionError('no retry')):
-            _, report, _ = self.menu('6\n1\n')
-        self.assertEqual(report['checks']['source-archive']['status'], 'rejected')
-        self.assertEqual(report['checks']['prefix-structure']['status'], 'accepted')
-        self.assertEqual(report['checks']['process-observation']['status'], 'accepted')
-        self.assertTrue(report['dependent_checks_not_run'])
-        self.assertFalse(report['status_promoted'])
-
     def test_prefix_measurement_does_not_follow_drive_links_or_read_values(self):
         root = self.home / 'measure-fixture'
         root.mkdir()
@@ -272,7 +206,7 @@ class TrialTests(BASE['StaticFixture']):
         external.write_bytes(b'DUMMY_SECRET')
         (root / 'drive-link').symlink_to(external)
         with patch('builtins.open', side_effect=AssertionError('metadata only')):
-            result = audit.measure_prefix(root)
+            result = dependency.measure_prefix(root)
         self.assertEqual(result['symlinks_not_followed'], 1)
         self.assertEqual(result['logical_file_bytes'], 0)
         self.assertFalse(result['contents_read'])
@@ -334,35 +268,6 @@ class TrialTests(BASE['StaticFixture']):
         with self.assertRaises(Invalid):
             BASE['probe'].verify_probe_registration(plan.target.exe, plan.record['app_id'], plan.target.source,
                                                    plan.target.steam, plan.probe_store)
-
-    def test_recheck_launch_plan_cannot_use_ordinary_ready_flags(self):
-        record, digest, _directory = self.recheck_origin()
-        plan = self.recheck_plan(record, digest)
-        captured = []
-        def capture(**kwargs):
-            value = self.launch_fixture(**kwargs)
-            captured.append(value)
-            return value
-        with self.f.store() as store, patch.object(recheck, 'plan_launch', side_effect=capture):
-            session = recheck.RecheckSession(plan, store, lambda: self.recheck_plan(record, digest),
-                plan.digest, ProcessStopCheck(plan.compatdata, self.f.proc)).start()
-            session.wait(10)
-            with self.assertRaises(Invalid):
-                LaunchSession(captured[0], store, lambda: {'target': True, 'payload': True, 'runtime': True, 'stopped': True},
-                              ProcessStopCheck(plan.compatdata, self.f.proc)).start()
-        self.assertEqual(captured[0].argv[1], 'runinprefix')
-
-    def test_recheck_menu_cancel_and_confirm_are_scoped_separately(self):
-        self.recheck_origin()
-        with patch('subprocess.Popen', side_effect=AssertionError('cancel never executes')):
-            status, report, _ = self.menu('7\n1\nq\n')
-        self.assertEqual(status, 0)
-        self.assertIsNone(report)
-        with patch.object(recheck, 'plan_launch', side_effect=self.launch_fixture):
-            _, report, _ = self.menu('7\n1\n1\n')
-        self.assertEqual(report['recheck']['status'], 'probe-exited-unverified')
-        self.assertTrue(report['old_trial_record_unchanged'])
-        self.assertFalse(report['prefix_reinitialized'])
 
     def test_recheck_active_view_and_wrong_confirmation_never_launch(self):
         record, digest, _ = self.recheck_origin()

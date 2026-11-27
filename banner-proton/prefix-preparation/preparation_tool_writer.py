@@ -34,7 +34,6 @@ from preparation_payload import (
     _TarInfo,
     verify_tree,
 )
-from preparation_processes import ProcessStopCheck
 from preparation_publication import _publish, _rename_function
 
 
@@ -219,46 +218,6 @@ def validate_installation_record(record, any_version=False):
         require(not published and phase in ("planned", "staging", "tree-verified"), "uncertain publication requires inspection")
     elif status == "running":
         require(phase != "post-verified", "running record cannot claim completion")
-
-
-def apply_installation(plan, refresh, store, settings, ready, stop_check):
-    """Internal only. Identity is not provenance, and clear proc view is not stop scope.
-
-    ready must independently establish target freshness, payload provenance, runtime
-    suitability and the complete stopped scope. No CLI flags can supply readiness.
-    Failure preserves staging/published trees; journal errors never trigger rollback.
-    """
-    require(isinstance(plan, InstallationPlan) and callable(refresh) and callable(ready), "trusted installation inputs required")
-    store._guard()
-    steam = safe_path(plan.target.steam)
-    compatdata = safe_path(steam / "steamapps/compatdata" / plan.target.registration_id, steam)
-    require(store._held_target == hashlib.sha256(str(compatdata).encode()).hexdigest(), "matching target lock required")
-    require(isinstance(stop_check, ProcessStopCheck), "process observation required")
-    settings = safe_path(settings)
-    require(settings.is_dir(), "existing DroidDeck settings required")
-    for root in (steam, settings, plan.target.exe.parent):
-        require(not (store.root == root or store.root.is_relative_to(root) or root.is_relative_to(store.root)), "store overlaps installation inputs")
-    require(steam != settings and not steam.is_relative_to(settings) and not settings.is_relative_to(steam), "settings overlap Steam")
-    if plan.runtime.view != "current-root":
-        require(all(path.is_relative_to(plan.runtime.root) and path != plan.runtime.root
-                    for path in (steam, settings, store.root)), "snapshot writer must remain inside snapshot")
-        require(safe_path(stop_check.proc_root).is_relative_to(plan.runtime.root), "snapshot proc scope outside snapshot")
-    else:
-        require(str(plan.runtime.root) == "/", "live runtime root required")
-        require(safe_path(stop_check.proc_root) == safe_path("/proc"), "live installation requires live proc observation")
-
-    def check_ready(published=False):
-        store._guard()
-        checks = ready()
-        fields(checks, ("target", "payload", "runtime", "stopped"))
-        require(all(value is True for value in checks.values()), "installation prerequisites unverified")
-        require(isinstance(stop_check, ProcessStopCheck) and safe_path(stop_check.compatdata) == compatdata,
-                "matching process observation required")
-        require(stop_check.check()["clear_in_view"], "active or unknown prefix process")
-        plan.target.verify()
-        plan.runtime.verify()
-
-    return _write_installation_tree(plan, refresh, store, settings, check_ready)
 
 
 def _write_installation_tree(plan, refresh, store, settings, check_ready, private_xalia=None):

@@ -241,7 +241,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertFalse(json.loads(result.stdout)["preparation_complete"])
         self.assertEqual(before,self.snapshot())
-        rejected = subprocess.run([sys.executable,"-I","-B",str(script),"--inspect-runtime","--runtime-root",str(self.root),"--app-id","42"],
+        rejected = subprocess.run([sys.executable,"-I","-B",str(script),"--inspect-runtime","--runtime-root",str(self.root),"--script-entry","status"],
                                   capture_output=True,text=True,check=False)
         self.assertEqual(rejected.returncode,1)
 

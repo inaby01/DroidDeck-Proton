@@ -181,9 +181,8 @@ def one_pass_ref(config):
 
 
 def redo_ref(config):
-    """recovery.sh 7 (1.0.0); the earlier screen had no way to prepare the same registration again."""
-    from preparation_selection import operational_layout
-    return "recovery.sh の7" if operational_layout(config) else "名前を変えた新しい登録"
+    """recovery.sh 7 (1.0.0): prepare the same registration again."""
+    return "recovery.sh の7"
 
 
 def restart_then_one_pass(config):

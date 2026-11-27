@@ -15,13 +15,12 @@ from unittest.mock import patch
 HERE = Path(__file__).resolve().parent
 FIX = runpy.run_path(str(HERE / 'test_preparation_tool_writer.py'))
 FOLDER = runpy.run_path(str(HERE / 'test_preparation_folder_reads.py'))
+import fixture_legacy_builders as legacy
 import preparation_probe as probe
 import preparation_selection as selection
-import preparation_slot_manifest as MANIFEST
 import preparation_static_placement as placement
 import preparation_tool_writer as writer
 from preparation_common import Invalid
-from preparation_payload import verify_tree
 from preparation_processes import ProcessStopCheck
 from preparation_store import PrivateStore
 
@@ -70,9 +69,9 @@ class StaticFixture(unittest.TestCase):
         f.fixture.options['tool_slot'] = 'preparation'
         base = f.root / 'shared-probe'
         base.mkdir()
-        material = probe.plan_probe_material(source.archive, source.sha, root, f.added, f.steam, base)
+        material = legacy.plan_probe_material(source.archive, source.sha, root, f.added, f.steam, base)
         with PrivateStore(self.probe_store, create=True) as store, store.locked(hashlib.sha256(material.record['destination'].encode()).hexdigest()):
-            probe.create_probe_material(material, lambda: probe.plan_probe_material(source.archive, source.sha, root,
+            legacy.create_probe_material(material, lambda: legacy.plan_probe_material(source.archive, source.sha, root,
                 f.added, f.steam, base, probe_id=material.record['probe_id']), store)
         self.exe = Path(material.record['destination']) / probe.EXE
         games = json.loads(f.added.read_bytes())
@@ -98,7 +97,7 @@ class StaticFixture(unittest.TestCase):
         self.environment = {**f.environment, 'BL_ADDED_GAMES': str(f.added)}
 
     def plan(self):
-        return placement.plan_static_placement(self.f.plan(), self.review, self.f.store_root, self.probe_store, self.f.settings)
+        return legacy.plan_static_placement(self.f.plan(), self.review, self.f.store_root, self.probe_store, self.f.settings)
 
     def apply(self, plan=None, refresh=None):
         plan = self.plan() if plan is None else plan
@@ -110,6 +109,10 @@ class StaticFixture(unittest.TestCase):
         return {str(p): (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ino) for p in paths}
 
     def menu(self, text):
+        """prepare.sh for an operational bundle; for any other fixture bundle, the earlier menu numbers
+        that still exist (see detail_menu)."""
+        if not selection.operational_layout(self.config):
+            return self.detail_menu(text)
         output = io.StringIO()
         status, name = probe.interactive_workflow(self.f.fixture.source.root, self.f.fixture.options['renderer'], self.config,
             input_stream=io.StringIO(text), output_stream=output, environment=self.environment, steam=self.f.steam,
@@ -139,8 +142,7 @@ class StaticFixture(unittest.TestCase):
 
     def entry_menu(self, text):
         """0.31.0's individual operations, mapped to the 1.0.0 scripts: 1 is recovery.sh 1, 2 status.sh,
-        5 and 6 recovery.sh 2 and 3. 3 and 4 are no longer offered; their functions are called directly
-        until that code is removed (design: 1.0.0, 3)."""
+        5 and 6 recovery.sh 2 and 3, 4 the earlier menu numbers that still exist (3 was removed in 1.0.1)."""
         first, _, rest = text.partition('\n')
         if first == '1':
             return self.script('recovery', '1\n' + rest)
@@ -148,17 +150,23 @@ class StaticFixture(unittest.TestCase):
             return self.script('status', rest)
         if first in ('5', '6'):
             return self.script('recovery', {'5': '2', '6': '3'}[first] + '\n' + rest)
-        if first == '3':
-            from preparation_static_placement import interactive_confirmed_placement
-            return self.direct(interactive_confirmed_placement, rest)
         if first == '4':
             return self.detail_menu(rest)
         return self.script('recovery', text)
 
     def detail_menu(self, text):
-        """The earlier screen (menus 1-12), no longer offered in the operational layout; called directly
-        until that code is removed."""
-        return self.direct(probe.detailed_menu, text)
+        """The earlier screen's numbers (removed in 1.0.1) for the functions that remain, called directly
+        as that screen did: 8 and 9 (recovery.sh 5 and 6), 10 (4) and 12 (1). q cancels."""
+        import preparation_dependency_install as dependency
+        import preparation_game_prefix as game_prefix
+        import preparation_one_pass as one_pass
+        first, _, rest = text.partition('\n')
+        function = {'8': dependency.interactive_dependency_install, '9': dependency.interactive_dependency_reinspect,
+                    '10': game_prefix.interactive_game_prefix, '12': one_pass.interactive_one_pass}.get(first.strip())
+        if function is None:
+            self.assertIn(first.strip(), ('q', ''), 'menu ' + first + ' was removed in 1.0.1')
+            return 0, None, ''
+        return self.direct(function, rest)
 
 
 class StaticPlanTests(StaticFixture):
@@ -219,21 +227,13 @@ class StaticPlanTests(StaticFixture):
     def test_snapshot_cannot_write_outside_snapshot(self):
         outside = self.f.fixture.source.root / 'outside-management'
         with self.assertRaises(Invalid):
-            placement.plan_static_placement(self.f.plan(), self.review, outside, self.probe_store, self.f.settings)
+            legacy.plan_static_placement(self.f.plan(), self.review, outside, self.probe_store, self.f.settings)
 
     def test_review_must_match_emitted_bundle_payload(self):
         altered = copy.deepcopy(self.config)
         altered['placement_review']['archive_sha512'] = '0' * 128
         with self.assertRaises(Invalid):
             selection.validate_selection_config(altered)
-
-    def test_cancel_selection_and_preview_write_nothing(self):
-        before = self.f.fixture.snapshot()
-        for answer in ('4\nq\n', '4\n1\nq\n', '4\n1\n', '4\n1\nyes\n'):
-            status, report, _ = self.menu(answer)
-            self.assertEqual((status, report), (0, None))
-        self.assertEqual(before, self.f.fixture.snapshot())
-
 
 @unittest.skipUnless(sys.platform == 'linux', 'native static placement requires Linux renameat2')
 class StaticNativeTests(StaticFixture):
@@ -358,26 +358,6 @@ class StaticNativeTests(StaticFixture):
             self.apply(plan, refresh)
         self.assertFalse(self.f.destination().exists())
 
-    def test_menu_installs_then_generates_same_target_followup_plan(self):
-        before = self.protected()
-        status, report, output = self.menu('4\n1\n1\n')
-        self.assertEqual(status, 2)
-        self.assertEqual(report['mode'], 'static-preparation-tool-installed', report)
-        self.assertNotIn('error', report)
-        followup = report['followup_plan']
-        self.assertEqual(followup['installation_plan']['action'], 'reuse-verified-tree')
-        self.assertTrue(followup['probe_registration']['prefix_absent'])
-        self.assertIn('execution-not-exposed', followup['blockers'])
-        self.assertNotIn('payload-provenance-unreviewed', followup['blockers'])
-        self.assertIn('runtime-equivalence-unverified', followup['blockers'])
-        self.assertFalse(report['preparation_complete'])
-        self.assertEqual(before, self.protected())
-        self.assertIn('まだ起動しません', output)
-        _, again, _ = self.menu('4\n1\n')
-        self.assertEqual(again['mode'], 'static-matching-tool-observed')
-        self.assertEqual(len(again['writes']), 1)
-
-
 class PrivateModePlanTests(StaticFixture):
     writable_xalia = True
 
@@ -399,18 +379,6 @@ class PrivateModePlanTests(StaticFixture):
             self.plan()
         self.assertEqual(tools.stat().st_mode & 0o777, 0o755)
         self.assertEqual(before, self.f.fixture.snapshot())
-
-    def test_nonprivate_parent_error_is_saved_with_specific_reason(self):
-        tools = self.f.steam / 'compatibilitytools.d'
-        tools.mkdir()
-        tools.chmod(0o755)
-        _, report, output = self.menu('4\n1\n')
-        self.assertEqual(report['mode'], 'static-placement-stopped')
-        self.assertEqual(report['error']['reason'], 'tool-parent-not-owned-private-0700')
-        self.assertFalse(report['published_tree_or_staging_may_exist'])
-        self.assertEqual(len(report['writes']), 1)
-        self.assertIn('tool-parent-not-owned-private-0700', output)
-        self.assertEqual(tools.stat().st_mode & 0o777, 0o755)
 
     def test_review_cannot_name_arbitrary_writable_payload_paths(self):
         self.review['private_xalia_files'] = ['files/bin-arm64/wine']
@@ -464,14 +432,6 @@ class ConfirmedFixture(StaticFixture):
         compatdata = self.f.steam / 'steamapps/compatdata/42'
         with PrivateStore(self.f.store_root, create=True) as store, store.locked(hashlib.sha256(str(compatdata).encode()).hexdigest()):
             return placement.apply_static_placement(plan, self.confirmed_plan, store, plan.digest)
-
-    def confirmed_menu(self, text):
-        output = io.StringIO()
-        status, name = placement.interactive_confirmed_placement(self.f.fixture.source.root, self.f.fixture.options['renderer'],
-            self.config, input_stream=io.StringIO(text), output_stream=output, environment=self.environment, steam=self.f.steam,
-            settings=self.f.settings, home=self.home, runtime_root=self.f.root)
-        report = json.loads((self.f.fixture.source.root / name).read_bytes()) if name else None
-        return status, report, output.getvalue()
 
     def game_files(self):
         paths = [self.f.exe, self.f.added, self.steam_config, self.games_config]
@@ -560,78 +520,12 @@ class ConfirmedPlanTests(ConfirmedFixture):
                                           '62': 'game folder overlaps tool folders',
                                           '70': 'ambiguous confirmation registration', '71': 'ambiguous confirmation registration'})
 
-    def test_stop_by_a_changing_input_names_the_fields(self):
-        with patch.object(placement, 'plan_confirmed_placement', side_effect=Invalid('input changed during read (size,mtime_ns)')):
-            _, report, output = self.confirmed_menu('1\n')
-        self.assertEqual(report['error']['reason'], 'input-changed-during-read')
-        self.assertEqual(report['error']['changed_fields'], ['size', 'mtime_ns'])
-        self.assertIn('input-changed-during-read', output)
-        self.assertEqual(placement.input_change(Invalid('other')), {})
-        self.assertEqual(placement.input_change(OSError('input changed during read (size)')), {})
-
-    def test_cancel_writes_nothing(self):
-        before = self.f.fixture.snapshot()
-        for answer in ('q\n', '', '1\nq\n', '1\n', '9\n'):
-            status, report, output = self.confirmed_menu(answer)
-            if answer == '9\n':
-                self.assertEqual(status, 2)
-                self.assertEqual(report['error']['reason'], 'input-rejected')
-                self.assertEqual([w['scope'] for w in report['writes']], ['report-only'])
-                self.assertEqual(report['excluded_confirmation_candidates'], [])
-                (self.f.fixture.source.root / report_name(output)).unlink()
-            else:
-                self.assertEqual((status, report), (0, None))
-        self.assertEqual(before, self.f.fixture.snapshot())
-
-    def test_selection_lists_the_ordinary_game_and_says_it_is_not_changed(self):
-        _, _, output = self.confirmed_menu('q\n')
-        self.assertIn('1. Example  [ID 42]', output)
-        self.assertNotIn('ID 43', output)
-        self.assertIn('確認に使うだけで、変更しません', output)
-
-
 def report_name(output):
     return output.rsplit('結果を保存しました: ', 1)[1].strip()
 
 
 @unittest.skipUnless(sys.platform == 'linux', 'native static placement requires Linux renameat2')
 class ConfirmedNativeTests(ConfirmedFixture):
-    def test_menu_places_without_probe_and_leaves_the_game_untouched(self):
-        prefix = self.f.steam / 'steamapps/compatdata/42/pfx'
-        prefix.mkdir(parents=True)
-        (prefix / 'user.reg').write_text('fixture')
-        before, probe_before = self.game_files(), self.protected()
-        status, report, output = self.confirmed_menu('1\n1\n')
-        self.assertEqual(status, 2)
-        self.assertEqual(report['mode'], 'static-preparation-tool-installed', report)
-        self.assertEqual(report['confirmation_registration']['app_id'], '42')
-        self.assertNotIn('probe_registration', report)
-        self.assertNotIn('followup_plan', report)
-        self.assertEqual(before, self.game_files())
-        self.assertEqual(probe_before, self.protected())
-        self.assertIn('まだ起動しません', output)
-        self.assertTrue(self.f.destination().is_dir())
-        _, again, _ = self.confirmed_menu('1\n')
-        self.assertEqual(again['mode'], 'static-matching-tool-observed')
-        # The slot's verification data is saved once and reused unchanged (0.31.0, design 4.7).
-        self.assertEqual(report['slot_manifest'], {'state': 'created'})
-        self.assertEqual(again['slot_manifest'], {'state': 'same'})
-        with PrivateStore(self.f.store_root) as store:
-            state, saved = MANIFEST.state(store, self.f.destination().name)
-        self.assertEqual(state, 'same')
-        self.assertTrue(MANIFEST.usable(saved))
-        verify_tree(self.f.destination(), MANIFEST.inventory_of(saved), saved['overlays'])
-
-    def test_unreadable_saved_data_is_kept_and_does_not_stop_the_placement(self):
-        _, report, _ = self.confirmed_menu('1\n1\n')
-        self.assertEqual(report['slot_manifest'], {'state': 'created'})
-        path = self.f.store_root / MANIFEST.DIRECTORY / MANIFEST.record_name(self.f.destination().name)
-        path.write_bytes(b'{broken')
-        _, again, _ = self.confirmed_menu('1\n')
-        self.assertEqual(again['mode'], 'static-matching-tool-observed')
-        self.assertEqual(again['slot_manifest'], {'state': 'broken'})
-        self.assertEqual(path.read_bytes(), b'{broken')
-
     def test_change_of_the_confirmation_game_after_preview_publishes_nothing(self):
         plan = self.confirmed_plan()
         with self.f.exe.open('ab') as out:
@@ -640,25 +534,10 @@ class ConfirmedNativeTests(ConfirmedFixture):
             self.confirmed_apply(plan)
         self.assertFalse(self.f.destination().exists())
 
-    def test_placement_passes_while_the_archive_timestamps_change_on_every_read(self):
-        with FOLDER['touching_asset_folder'](self.f.fixture.source.root) as touched:
-            _, report, output = self.confirmed_menu('1\n1\n')
-        self.assertEqual(report['mode'], 'static-preparation-tool-installed', output)
-        self.assertGreaterEqual(touched.count(self.f.fixture.source.archive.name), 3)
-
     def test_probe_placement_stays_strict_about_archive_timestamps(self):
         with FOLDER['touching_asset_folder'](self.f.fixture.source.root), \
                 self.assertRaisesRegex(Invalid, r'input changed during read \(mtime_ns'):
             self.plan()
-
-    def test_held_lock_of_the_confirmation_game_stops_before_publication(self):
-        compatdata = self.f.steam / 'steamapps/compatdata/42'
-        with PrivateStore(self.f.store_root, create=True) as store, store.locked(hashlib.sha256(str(compatdata).encode()).hexdigest()):
-            status, report, output = self.confirmed_menu('1\n1\n')
-        self.assertEqual(status, 2)
-        self.assertEqual(report['mode'], 'confirmed-placement-stopped', output)
-        self.assertEqual(report['error']['stage'], 'confirmed-placement-apply')
-        self.assertFalse(self.f.destination().exists())
 
     def test_direct_apply_matches_the_menu_result(self):
         result = self.confirmed_apply(self.confirmed_plan())

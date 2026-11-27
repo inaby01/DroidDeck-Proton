@@ -1,8 +1,7 @@
-"""Explicitly scoped first initialization trial; never normal execution readiness.
+"""The guarded initialization session shared by registered-game new prefixes.
 
-An absent dedicated probe prefix and reviewed preparation payload are mandatory.
-The trial tests runtime compatibility; it cannot assert prior runtime validation or
-other-namespace visibility. Ordinary LaunchSession prerequisites are unchanged.
+Game prefixes (preparation_game_prefix) subclass the session; the dedicated probe trial menu
+was removed in 1.0.1. Trial records of earlier versions are still validated when read.
 """
 
 import hashlib
@@ -14,7 +13,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from preparation_assets import digest_json
 from preparation_binding import _raw
 from preparation_common import (
     SHA256,
@@ -35,11 +33,7 @@ from preparation_execution import (
 )
 from preparation_payload import runtime_writes, verify_fex_runtime_tree
 from preparation_processes import ProcessStopCheck
-from preparation_static_placement import (
-    StaticPlacementPlan,
-    _private_xalia_context,
-    _proof,
-)
+from preparation_static_placement import _private_xalia_context
 
 SCOPE = "dedicated-new-prefix-initialization-trial"
 RESERVE = 1024**3
@@ -68,46 +62,6 @@ class TrialPlan:
 def _live_runtime(installation):
     require(installation.runtime.root == Path("/") and installation.runtime.view == "current-root",
             "live current-root runtime required for trial")
-
-
-def plan_trial(placement, home):
-    require(isinstance(placement, StaticPlacementPlan), "trusted reviewed placement required")
-    installation = placement.installation
-    _live_runtime(installation)
-    report = installation.summary()
-    require(report["action"] == "reuse-verified-tree", "verified installed preparation tool required")
-    require(report["tool_slot"] == "preparation" and not report["prefix"]["exists"], "new dedicated prefix required")
-    require(_proof(installation, placement.probe_store_root) == placement.probe, "dedicated probe changed")
-    inventory = installation.inventory
-    require(inventory.external_links == 0, "external payload links forbidden")
-    require(not any(name in inventory.entries for name in ("dist", "dist.lock", "steampipe_fixups.json")),
-            "mutable distribution maintenance path not supported for trial")
-    require(inventory.entries.get("files/share/default_pfx_arm64", {}).get("kind") == "directory",
-            "shipped arm64 default prefix required")
-    home = safe_path(home)
-    key = installation.target.registration_id
-    work = safe_path(home / ".local/share/droiddeck-preparation-work" / key / "work", home)
-    private_home = safe_path(work.parent / "home", home)
-    compatdata = safe_path(installation.target.steam / "steamapps/compatdata" / key, installation.target.steam)
-    _aliases(installation.target.steam, key)
-    require(not os.path.lexists(compatdata) and not os.path.lexists(work.parent), "new trial paths required")
-    for path in (work.parent, placement.store_root):
-        for protected in (installation.target.steam, placement.settings, installation.target.exe.parent):
-            require(path != protected and not path.is_relative_to(protected) and not protected.is_relative_to(path),
-                    "trial paths overlap protected inputs")
-    policy = _private_xalia_context(installation, placement.review)
-    if policy is not None:
-        policy.guard()
-    files = [value for name, value in inventory.entries.items() if name.startswith("files/share/default_pfx_arm64/")]
-    fs = os.statvfs(compatdata.parent)
-    block = fs.f_frsize or fs.f_bsize
-    require(block > 0 and files, "prefix allocation baseline unavailable")
-    baseline = block + sum(((entry["size"] + block - 1) // block) * block if entry["kind"] == "file" else block for entry in files)
-    require(fs.f_bavail * block >= baseline + RESERVE, "insufficient prefix baseline and trial reserve")
-    require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
-    signature = {"scope": SCOPE, "version": VERSION, "placement": placement.digest,
-                 "home": str(home), "work": str(work), "compatdata": str(compatdata), "baseline": baseline}
-    return TrialPlan(digest_json(signature), placement, home, work, private_home, compatdata, baseline)
 
 
 def _new_private(path, anchor):
@@ -347,111 +301,3 @@ class TrialSession:
             if hasattr(error, "tree_diagnostic"):
                 self.record["error"]["tree_diagnostic"] = error.tree_diagnostic
         return self._save()
-
-
-def interactive_trial(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
-                      steam=None, settings=None, home=None, runtime_root=None):
-    """One explicit device action with preview, confirmation and automatic report."""
-    import sys
-    from pathlib import Path
-
-    import preparation_selection as selection
-    from preparation_binding import droiddeck_lock
-    from preparation_installation import plan_installation
-    from preparation_probe import EXE
-    from preparation_static_placement import plan_static_placement
-    from preparation_store import PrivateStore
-
-    stream = sys.stdin if input_stream is None else input_stream
-    output = sys.stdout if output_stream is None else output_stream
-    environment = os.environ if environment is None else environment
-    directory = safe_path(directory)
-    home = safe_path(home if home is not None else Path.home())
-    steam = safe_path(steam if steam is not None else home / ".local/share/Steam")
-    settings = safe_path(settings if settings is not None else home / ".local/share/droiddeck-compat")
-    runtime_root = Path("/") if runtime_root is None else runtime_root
-    protected = [steam, settings]
-    report, session = None, None
-    stage, started = "trial-plan", False
-    try:
-        selection.validate_selection_config(config)
-        require(config.get("initialization_trial") is True and "placement_review" in config, "trial menu not enabled")
-        source, _, games = selection.registration_catalog(environment)
-        protected.extend(Path(game["exe"]).parent for game in games.values())
-        candidates = [key for key, game in games.items() if Path(game["exe"]).name == EXE]
-        require(candidates, "registered dedicated probe required")
-        for number, key in enumerate(candidates, 1):
-            print(f"{number}. {selection._text(games[key]['title'])} [ID {key}]", file=output)
-        print("初期化する専用検証登録の番号（qで取消）: ", end="", file=output, flush=True)
-        answer = stream.readline(32).strip()
-        if answer == "q":
-            return 0, None
-        require(answer.isascii() and answer.isdecimal() and 1 <= int(answer) <= len(candidates), "invalid trial selection")
-        key = candidates[int(answer) - 1]
-        management = home / ".local/state/droiddeck-prefix-preparation/tool-store"
-        probe_store = management.parent / "probe-store"
-
-        def refresh():
-            current, _, now = selection.registration_catalog(environment)
-            require(current == source and key in now, "trial registration changed")
-            payload = config["payload"]
-            installation = plan_installation(archive=selection._archive(directory, payload), sha512=payload["sha512"],
-                archive_root=payload["root"], mode=payload["mode"], runtime_root=runtime_root,
-                runtime_audit=config["runtime_reference"], registrations=source, registration_id=key,
-                exe_root=Path(now[key]["exe"]).parent, steam=steam, renderer=renderer,
-                parent_environment=environment, tool_slot=payload.get("tool_slot", "legacy"))
-            placement = plan_static_placement(installation, config["placement_review"], management, probe_store, settings)
-            return plan_trial(placement, home)
-
-        print("配布物・配置済みtool全体・runtime識別・専用登録・未作成prefixを再照合しています。", file=output, flush=True)
-        plan = refresh()
-        preview = plan.summary()
-        print("新規prefix: " + selection._text(preview["prefix"]), file=output)
-        print("専用work: " + selection._text(preview["work"]), file=output)
-        print("専用HOME: " + selection._text(preview["home"]), file=output)
-        print(f"出荷時prefix見積 {plan.baseline_bytes / 1024**2:.1f} MiB + 余裕1 GiB。実増分の上限は未測定です。", file=output)
-        print("実行: 選択済み準備用Proton run cmd.exe /d /c exit 0（ゲーム・installerは起動しません）", file=output)
-        print("新規prefix、専用work/HOME、私有trial記録/lock、設定の協調lock、結果JSONを書きます。", file=output)
-        print("他namespaceの停止は保証できません。すべてのゲーム・Wineを終了してから続行してください。", file=output)
-        print("時間超過や失敗では強制終了・削除・自動再試行せず、記録と作成物を残します。", file=output)
-        print("この初期化試験を実行する場合は1、取消はq: ", end="", file=output, flush=True)
-        if stream.readline(32).strip() != "1":
-            return 0, None
-        stage, started = "trial-start", True
-        selection._private_report_directory(home, protected)
-        lock = hashlib.sha256(str(plan.compatdata).encode()).hexdigest()
-        with PrivateStore(management, create=True) as store, store.locked(lock), droiddeck_lock(settings):
-            session = TrialSession(plan, store, refresh, plan.digest, ProcessStopCheck(plan.compatdata))
-            session.start()
-            while True:
-                stage = "trial-wait"
-                outcome = session.wait(30)
-                if outcome["status"] != "needs-user":
-                    break
-                print("未完了です。強制終了していません。さらに待つ場合は1、記録を残して戻る場合はq: ", end="", file=output, flush=True)
-                if stream.readline(32).strip() != "1":
-                    break
-            report = {"mode": "initialization-trial-result", "scope": SCOPE, "trial": outcome,
-                      "planned_scope": preview, "prefix_created": plan.compatdata.exists(),
-                      "wine_launch_attempted": True, "binding_written": False, "preparation_complete": False,
-                      "writes": [{"scope": "dedicated-new-prefix", "path": str(plan.compatdata)},
-                                 {"scope": "new-private-trial-work-home", "path": str(plan.work.parent)},
-                                 {"scope": "private-trial-journal-and-locks", "path": str(management)},
-                                 {"scope": "cooperative-settings-lock-only", "path": str(settings / "lock")}],
-                      "raw_child_output_collected": False}
-    except (OSError, ValueError, TypeError, KeyError) as error:
-        report = {"mode": "initialization-trial-result", "scope": SCOPE, "stage": stage,
-                  "check": getattr(error, "preparation_check", stage), "error_class": type(error).__name__,
-                  "errno": getattr(error, "errno", None), "preparation_complete": False,
-                  "writes": [] if not started else [{"scope": "partial-trial-preserve-and-inspect"}]}
-        if session is not None:
-            report["trial"] = dict(session.record)
-        print("初期化試験は停止しました。作成物を削除せず、結果を保存します。", file=output)
-    try:
-        saved, _ = selection.save_selection_result(directory, home, report, protected)
-    except (OSError, ValueError):
-        print("結果JSONを保存できませんでした。私有trial記録と作成物を保持しています。", file=output)
-        return 1, None
-    print("結果を保存しました: " + selection._text(str(saved)), file=output)
-    print("初期化試験の状態: " + report.get("trial", {}).get("status", "stopped-before-result"), file=output)
-    return 2, str(saved)

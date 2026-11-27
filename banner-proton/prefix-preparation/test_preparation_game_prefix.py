@@ -294,17 +294,6 @@ class GamePrefixTests(DEP['InstallTests']):
                          {k: v for k, v in games_before['games'].items() if k != '42'})
         self.assertFalse(result['preparation_complete'])
 
-    def test_binding_menu_reports_blockers_without_writing(self):
-        self.initialize()
-        before = self.protected()
-        with patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe):
-            status, report, output = self.detail_menu('11\n1\n')
-        self.assertEqual(status, 2, output)
-        self.assertFalse(report['binding_written'])
-        self.assertIn('dependency-blocked:mfc42-candidate', report['plan']['blockers'])
-        self.assertIn('全依存が検証済みになるまで割り当てません', output)
-        self.assertEqual(before, self.protected())
-
     def test_profile_change_after_initialization_refuses_binding(self):
         record, digest = self.initialize()
         self.config['game_preparation']['profiles'][0]['revision'] = 2
@@ -462,12 +451,6 @@ class GamePrefixTests(DEP['InstallTests']):
         change = plan.summary()['profile_revision_change']
         self.assertEqual((change['initialized_revision'], change['current_revision']), (1, 2))
         self.assertEqual(change['initialized_digest'], record['profile']['profile_digest'])
-        with patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe):
-            status, report, output = self.detail_menu('11\n1\nq\n')
-        self.assertEqual((status, report), (0, None))
-        self.assertIn('初期化時の改訂1から改訂2へ', output)
-        self.assertIn('現在のプロファイル: Synthetic game profile / unconfirmed edition / 依存 softdenchi-runtime, mfc42-game-folder', output)
-        self.assertIn('mfc42-game-folder / present-verified', output)
         profile = self.config['game_preparation']['profiles'][0]
         for changed in ({'revision': 1}, {'exe_sha256': 'b' * 64}):
             with self.subTest(changed=changed):
@@ -668,22 +651,6 @@ class GamePrefixTests(DEP['InstallTests']):
         with patch.object(ProcessStopCheck, 'check', return_value={'clear_in_view': False}):
             plan = self.binding_plan(record, digest)
         self.assertEqual(plan.blockers, ('dependency-not-verified:softdenchi-runtime', game.PROCESS_BLOCKER))
-
-    def test_binding_menu_names_a_running_game_without_promising_the_binding(self):
-        self.config['game_preparation']['profiles'][0]['dependencies'] = []
-        self.initialize()
-        before = self.protected()
-        with patch('preparation_softdenchi_recipe.softdenchi_recipe', return_value=self.recipe), \
-                patch.object(ProcessStopCheck, 'check', return_value={'clear_in_view': False}):
-            status, report, output = self.detail_menu('11\n1\n')
-        self.assertEqual(status, 2, output)
-        self.assertFalse(report['binding_written'])
-        self.assertEqual(report['plan']['blockers'], [game.PROCESS_BLOCKER])
-        self.assertIn('ゲームかWineが動いています', output)
-        self.assertIn('依存の確認からやり直します', output)
-        self.assertIn('依存: なし', output)
-        self.assertNotIn('全依存が検証済みになるまで', output)
-        self.assertEqual(before, self.protected())
 
     def test_dependency_menu_lists_game_prefixes_beside_probe_trials(self):
         self.initialize()

@@ -1,4 +1,4 @@
-"""Internal preparation launcher; no CLI execution or dependency installer yet.
+"""Launch plans for the tool's own Wine runs (initialization, recheck, installers).
 
 Full payload identity, pinned registration and proc observations are mandatory.
 The caller must additionally establish provenance and actual runtime/stop scope;
@@ -10,10 +10,6 @@ import copy
 import hashlib
 import json
 import os
-import re
-import secrets
-import stat
-import subprocess
 from dataclasses import dataclass, field
 
 from preparation_common import (
@@ -29,7 +25,6 @@ from preparation_common import (
     unchanged,
 )
 from preparation_payload import PayloadInventory, verify_fex_runtime_tree, verify_tree
-from preparation_processes import ProcessStopCheck
 from preparation_runtime_context import HOOK_KEYS, RuntimeEnvironmentPlan
 from preparation_target import RegistrationPin
 
@@ -104,151 +99,6 @@ def _identities(tool, expected):
     return measured
 
 
-def inspect_initialization_inputs(*, tool, steam, registration_id, expected_hashes, work, home):
-    """Read-only qualification inputs for a future dedicated initialization test.
-
-    Does not make directories, lock, launch or interpret observations as permission.
-    Proc absence remains limited to the visible same-owner view, including on proot.
-    """
-    tool, steam, work, home = map(safe_path, (tool, steam, work, home))
-    key = app_id(registration_id)
-    compatdata = safe_path(steam / "steamapps/compatdata" / key, steam)
-    result = {"mode": "inspect-initialization-inputs", "command": list(OPERATIONS["initialize"]),
-              "execution_authorized": False, "prefix_initialization_authorized": False,
-              "preparation_complete": False, "writes": [], "checks": {},
-              "blockers": ["initialization-test-not-exposed", "device-process-scope-unverified",
-                           "wine-runtime-and-gui-unverified", "initialization-growth-unmeasured"]}
-
-    def inspect(name, function):
-        try:
-            value = function()
-            result["checks"][name] = {"status": "accepted", **(value if type(value) is dict else {})}
-        except (OSError, ValueError, TypeError, KeyError) as error:
-            result["checks"][name] = {"status": "rejected", "error_class": type(error).__name__,
-                                      "errno": getattr(error, "errno", None)}
-            result["blockers"].append(name + "-rejected")
-
-    def launcher():
-        _identities(tool, expected_hashes)
-        return {"identity": "matched", "settings": "restricted-literal-only", "code_executed": False}
-
-    def prefix():
-        _aliases(steam, key)
-        exists = os.path.lexists(compatdata)
-        require(not exists, "new compatdata required")
-        return {"exists": False, "action": "new-prefix-only-blocked"}
-
-    def private_paths():
-        for private in (work, home):
-            require(not os.path.lexists(private), "private launch path already exists")
-            for protected in (steam, tool):
-                require(private != protected and not private.is_relative_to(protected) and
-                        not protected.is_relative_to(private), "launch directories overlap")
-            ancestor = private.parent
-            while not ancestor.exists():
-                ancestor = ancestor.parent
-            safe_path(ancestor)
-            info = ancestor.stat()
-            require(ancestor.is_dir() and info.st_uid == os.getuid() and not info.st_mode & 0o022,
-                    "unsafe private launch ancestor")
-        require(work != home and not work.is_relative_to(home) and not home.is_relative_to(work),
-                "overlapping private launch paths")
-        return {"existing_paths_adopted": False, "creation_authorized": False}
-
-    def processes():
-        observation = ProcessStopCheck(compatdata).check()
-        if not observation["clear_in_view"]:
-            result["blockers"].append("target-process-view-not-clear")
-        return observation
-
-    inspect("launcher-inputs", launcher)
-    inspect("prefix-absence", prefix)
-    inspect("private-launch-paths", private_paths)
-    inspect("process-observation", processes)
-    return result
-
-
-def inspect_prelaunch_context(*, steam, settings, home, environment, runtime_root):
-    """Independent metadata observations, also usable when target planning fails.
-
-    No directories, locks, connections or subprocesses; no credential content,
-    command lines, environment values or mount tables are exported.
-    """
-    result = {"scope": "read-only-prelaunch-context", "checks": {}, "writes": [],
-              "execution_authorized": False, "active_connection_tested": False}
-
-    def inspect(name, function):
-        try:
-            result["checks"][name] = {"status": "accepted", **function()}
-        except (OSError, ValueError, TypeError, KeyError) as error:
-            result["checks"][name] = {"status": "rejected", "error_class": type(error).__name__,
-                                      "errno": getattr(error, "errno", None)}
-
-    def filesystem(path):
-        path = safe_path(path)
-        nearest = path
-        while not nearest.exists():
-            nearest = nearest.parent
-        safe_path(nearest)
-        info, fs = nearest.stat(), os.statvfs(nearest)
-        require(nearest.is_dir(), "filesystem directory required")
-        return {"exists": path.exists(), "ancestor_owner_matches_self": info.st_uid == os.getuid(),
-                "ancestor_mode": format(stat.S_IMODE(info.st_mode), "04o"),
-                "ancestor_other_writer": bool(info.st_mode & 0o022),
-                "available_bytes": fs.f_bavail * (fs.f_frsize or fs.f_bsize),
-                "available_inodes": fs.f_favail,
-                "read_only": bool(fs.f_flag & getattr(os, "ST_RDONLY", 1)),
-                "noexec": bool(fs.f_flag & getattr(os, "ST_NOEXEC", 8)),
-                "actual_write_tested": False}
-
-    for name, path in (("steam", steam), ("tool-parent", steam / "compatibilitytools.d"),
-                       ("compatdata-parent", steam / "steamapps/compatdata"), ("settings", settings),
-                       ("private-work-parent", home / ".local/share/droiddeck-preparation-work"),
-                       ("private-state-parent", home / ".local/state/droiddeck-prefix-preparation")):
-        inspect("filesystem-" + name, lambda path=path: filesystem(path))
-
-    def metadata(path):
-        path = safe_path(path)
-        if not path.exists():
-            return {"exists": False}
-        info = path.stat()
-        return {"exists": True, "regular": stat.S_ISREG(info.st_mode),
-                "socket": stat.S_ISSOCK(info.st_mode), "mode": format(stat.S_IMODE(info.st_mode), "04o"),
-                "owner_matches_self": info.st_uid == os.getuid(), "link_count": info.st_nlink,
-                "readable": os.access(path, os.R_OK), "content_read": False}
-
-    def display():
-        value = environment.get("DISPLAY", "")
-        require(type(value) is str, "invalid display input")
-        match = re.fullmatch(r":([0-9]{1,5})(?:\.[0-9]{1,3})?", value)
-        if match is None:
-            return {"present": bool(value), "local_socket_form": False, "connection_verified": False}
-        return {"present": True, "local_socket_form": True, "connection_verified": False,
-                "endpoint": metadata(runtime_root / "tmp/.X11-unix" / ("X" + match[1]))}
-
-    def authority():
-        path = environment.get("XAUTHORITY")
-        if path:
-            return {"explicit": True, **metadata(safe_path(path))}
-        parent_home = environment.get("HOME")
-        return {"explicit": False, **metadata(safe_path(parent_home or home) / ".Xauthority")}
-
-    inspect("gui-display-metadata", display)
-    inspect("gui-authority-metadata", authority)
-    for name, relative in (("system-python", "usr/bin/python3"), ("arm64-loader", "lib/ld-linux-aarch64.so.1")):
-        # System paths are commonly symlinks: observe existence/access only,
-        # never follow them to read content or treat them as trusted code.
-        def system_file(relative=relative):
-            path = runtime_root / relative
-            return {"exists": path.exists(), "executable": os.access(path, os.X_OK), "code_executed": False}
-        inspect(name, system_file)
-    result["environment_presence"] = {key: bool(environment.get(key)) for key in
-        ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY", "PULSE_SERVER", "DBUS_SESSION_BUS_ADDRESS",
-         "FEX_ROOTFS", "FEX_APP_CONFIG_LOCATION", "PROOT_FP_KEY", "LD_PRELOAD", "LD_AUDIT")}
-    result["copy_prefix_requested"] = environment.get("COPYPREFIX") == "1"
-    return result
-
-
 def _prefix(compatdata):
     safe_path(compatdata)
     require(compatdata.is_dir(), "prefix absent")
@@ -304,8 +154,7 @@ def plan_launch(*, tool, steam, registration_id, install, work, home, runtime_en
     """Read-only plan. Hashes/runtime inputs come from trusted adapters, never profile JSON.
 
     ``fex_runtime_contract`` is for the managed initialization scopes only: the reviewed
-    preparation slot may then hold FEX's one empty AppConfig directory. Plans made with it
-    (or with a trial origin) are refused by the ordinary LaunchSession readiness path.
+    preparation slot may then hold FEX's one empty AppConfig directory.
     """
     require(operation in OPERATIONS, "unsupported preparation operation")
     require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
@@ -407,25 +256,6 @@ def _payload_digest(inventory, overlays):
                     "overlays": overlays})
 
 
-def _verify_payload(plan):
-    inventory, overlays = plan.spec["payload_inventory"], plan.spec["payload_overlays"]
-    require(_payload_digest(inventory, overlays) == plan.payload_pin_digest, "payload pin changed")
-    return verify_tree(plan.spec["tool"], inventory, overlays)
-
-
-def _verify_runtime(plan):
-    context = plan.spec["runtime_plan"]
-    if context is not None:
-        context.verify()
-        require(plan.spec["runtime_environment"] == context.environment, "runtime inputs changed")
-
-
-def _verify_target(plan):
-    pin = plan.spec["target_pin"]
-    require(isinstance(pin, RegistrationPin) and pin.digest == plan.target_pin_digest, "target pin changed")
-    return pin.verify()
-
-
 def _launch_id(value):
     require(type(value) is str and value.startswith("launch-") and len(value) == 39 and
             all(c in "0123456789abcdef" for c in value[7:]), "invalid launch ID")
@@ -445,119 +275,3 @@ def validate_launch_record(record):
     require(record["exit_code"] is None or type(record["exit_code"]) is int, "invalid launch exit code")
     version = record["prefix_version_sha256"]
     require(version is None or type(version) is str and SHA256.fullmatch(version), "invalid prefix version digest")
-
-
-class LaunchSession:
-    """A live child handle. Caller retains preparation locks through wait/stop checks.
-
-    Timeout never kills a child or claims Wine has stopped. An abandoned session
-    stays running/needs-user on disk; reopening inventory never promotes it.
-    """
-
-    def __init__(self, plan, store, ready, stop_check):
-        self.plan, self.store, self.ready = plan, store, ready
-        self.stop_check = stop_check
-        self.process = None
-        self.record_hash = None
-        self.record = {"schema_version": 2, "tool_version": VERSION, "launch_id": "launch-" + secrets.token_hex(16),
-                       "app_id": plan.registration_id, "operation": plan.operation, "input_digest": plan.digest,
-                       "context_digest": plan.context_digest, "payload_pin_digest": plan.payload_pin_digest, "target_pin_digest": plan.target_pin_digest, "status": "running", "exit_code": None, "prefix_version_sha256": None,
-                       "preparation_complete": False}
-
-    def _guard(self):
-        self.store._guard()
-        require(self.plan.spec.get("trial_recheck_id") is None and not self.plan.spec.get("fex_runtime_contract"),
-                "managed trial plans cannot use ordinary launch readiness")
-        require(os.environ.get("COPYPREFIX") != "1", "COPYPREFIX=1 forbidden")
-        compatdata = self.plan.spec["steam"] / "steamapps/compatdata" / self.plan.registration_id
-        require(self.store._held_target == hashlib.sha256(str(compatdata).encode()).hexdigest(), "target launch lock required")
-        if self.plan.operation == "probe":
-            origin, _ = self.store.read_record("launches", self.plan.spec["origin_launch_id"] + ".json")
-            validate_launch_record(origin)
-            require(origin["operation"] == "initialize" and origin["status"] == "initialized-unverified"
-                    and origin["exit_code"] == 0 and origin["app_id"] == self.plan.registration_id
-                    and origin["target_pin_digest"] == self.plan.target_pin_digest
-                    and origin["payload_pin_digest"] == self.plan.payload_pin_digest
-                    and origin["context_digest"] == self.plan.context_digest
-                    and origin["prefix_version_sha256"] == self.plan.spec["prefix_version_sha256"],
-                    "matching initialization record required")
-        require(callable(self.ready), "trusted launch readiness checks required")
-        checks = self.ready()
-        fields(checks, ("target", "payload", "runtime", "stopped"))
-        require(all(type(value) is bool for value in checks.values()), "boolean launch checks required")
-        require(isinstance(self.stop_check, ProcessStopCheck) and
-                safe_path(self.stop_check.compatdata) == compatdata, "matching process observation required")
-        observation = self.stop_check.check()
-        checks = dict(checks)
-        checks["stopped"] = checks["stopped"] and observation["clear_in_view"]
-        return checks
-
-    def _save(self):
-        validate_launch_record(self.record)
-        self.record_hash = self.store.write_record("launches", self.record["launch_id"] + ".json",
-                                                  self.record, expected_hash=self.record_hash)
-        return dict(self.record)
-
-    def start(self):
-        require(self.process is None and self.record_hash is None, "launch session already started")
-        checks = self._guard()
-        require(all(checks.values()), "launch prerequisites not verified")
-        fresh = plan_launch(**self.plan.spec)
-        require(fresh == self.plan, "launch plan changed")
-        for path in (self.plan.spec["tool"], self.plan.spec["steam"], self.plan.spec["install"],
-                     self.plan.spec["work"], self.plan.spec["home"]):
-            root = self.store.root
-            require(root != path and not root.is_relative_to(path) and not path.is_relative_to(root), "store overlaps launch directories")
-        self._save()
-        try:
-            compatdata = self.plan.spec["steam"] / "steamapps/compatdata" / self.plan.registration_id
-            if self.plan.operation == "initialize":
-                compatdata.mkdir(mode=0o700)  # Never replace or remove an existing prefix, including failed attempts.
-            checks = self._guard()
-            require(all(checks.values()), "launch prerequisites changed")
-            _verify_runtime(self.plan)
-            _verify_target(self.plan)
-            _verify_payload(self.plan)
-            _identities(self.plan.spec["tool"], self.plan.spec["expected_hashes"])
-            safe_path(compatdata)
-            _aliases(self.plan.spec["steam"], self.plan.registration_id)
-            require_no_bytecode_cache(self.plan)
-            self.process = subprocess.Popen(self.plan.argv, cwd=self.plan.spec["work"], env=self.plan.environment,
-                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                            shell=False, close_fds=True, start_new_session=True)
-        except (OSError, Invalid):
-            self.record["status"] = "failed"
-            self._save()
-            raise
-        return self
-
-    def wait(self, timeout=30):
-        require(type(timeout) is int and 1 <= timeout <= 120, "bounded wait required")
-        require(self.process is not None, "launch session not started")
-        self._guard()
-        if self.record["status"] in ("failed", "initialized-unverified", "probe-exited"):
-            return dict(self.record)
-        try:
-            code = self.process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self.record["status"] = "needs-user"
-            return self._save()
-        self.record["exit_code"] = code
-        checks = self._guard()
-        self.record["status"] = "needs-user" if not checks["stopped"] else "failed"
-        if checks["stopped"] and checks["target"] and checks["payload"] and checks["runtime"] and code == 0:
-            try:
-                _verify_runtime(self.plan)
-                _verify_target(self.plan)
-                _verify_payload(self.plan)
-                _identities(self.plan.spec["tool"], self.plan.spec["expected_hashes"])
-                _aliases(self.plan.spec["steam"], self.plan.registration_id)
-                compatdata = self.plan.spec["steam"] / "steamapps/compatdata" / self.plan.registration_id
-                version = _prefix(compatdata)
-                expected = self.plan.spec["prefix_version_sha256"]
-                require(expected is None or expected == version, "prefix version changed")
-                self.record["prefix_version_sha256"] = version
-                self.record["status"] = "initialized-unverified" if self.plan.operation == "initialize" else "probe-exited"
-            except (OSError, Invalid):
-                self.record["status"] = "failed"
-        return self._save()

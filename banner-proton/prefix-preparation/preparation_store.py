@@ -1,7 +1,6 @@
 """Private, bounded cache and journal primitives. Never writes a game or prefix."""
 
 import contextlib
-import copy
 import fcntl
 import hashlib
 import itertools
@@ -10,7 +9,6 @@ import os
 import re
 import secrets
 import stat
-import time
 
 from preparation_assets import (
     INPUT_LIMITS,
@@ -29,7 +27,6 @@ from preparation_common import (
     bounded,
     fields,
     identifier,
-    load_json,
     pairs,
     regular_open,
     require,
@@ -73,10 +70,6 @@ def encode(value):
     raw = (json.dumps(value, sort_keys=True, ensure_ascii=True, indent=2) + "\n").encode()
     require(len(raw) <= MAX_JSON, "record too large")
     return raw
-
-
-def target_key(report):
-    return hashlib.sha256(str(safe_path(report["prefix"]["compatdata"])).encode()).hexdigest()
 
 
 def check_results(value):
@@ -542,20 +535,6 @@ class PrivateStore:
         return result
 
 
-def run_context(report):
-    return {
-        "profile": {key: report["profile"][key] for key in ("profile_id", "revision")},
-        "recipes": {item["dependency_id"]: item["revision"] for item in report["dependencies"]},
-        "assets": {item["asset_id"]: {"revision": item["revision"], "spec_digest": item["spec_digest"],
-                                      "sha256": item["measured"]["sha256"] if item["measured"] else None}
-                   for item in report.get("assets", [])},
-        "compatibility": report["compatibility"],
-        "target": {"app_id": report["target"]["app_id"], "exe_sha256": report["target"]["identity"]["sha256"],
-                   "exe_size": report["target"]["identity"]["size"]},
-        "template": None,
-    }
-
-
 def validate_run(record):
     bounded(record)
     fields(record, ("schema_version", "tool_version", "run_id", "created_ns", "updated_ns", "target_key", "input_digest", "input_hashes",
@@ -616,153 +595,3 @@ def validate_run(record):
             check_results(step["checks"])
         if step["status"] == "succeeded":
             require(step["exit_code"] == 0 and check_results(step["checks"]), "success without postconditions")
-
-
-class RunJournal:
-    """Trusted callers supply reinspection callbacks; loaded markers are never enough."""
-
-    def __init__(self, store, report, refresh, run_id=None):
-        store._guard()
-        self.store = store
-        self.refresh = refresh
-        resumed = run_id is not None
-        self.expected_digest = sha256(report["input_digest"])
-        require(store._held_target == target_key(report), "wrong target lock")
-        self._fresh()
-        context = run_context(report)
-        if run_id is None:
-            run_id = "run-" + secrets.token_hex(16)
-            now = time.time_ns()
-            self.record = {"schema_version": 1, "tool_version": VERSION, "run_id": run_id,
-                           "created_ns": now, "updated_ns": now,
-                           "target_key": target_key(report), "input_digest": self.expected_digest,
-                           "input_hashes": report["input_hashes"],
-                           **copy.deepcopy(context),
-                           "status": "pending", "preparation_complete": False,
-                           "steps": {key: {"status": "pending", "attempt": 0, "checks": [], "exit_code": None,
-                                           "started_ns": None, "finished_ns": None, "last_checked_ns": None}
-                                     for key in ("asset-cache", "prefix-preparation")}}
-            self.record_hash = None
-            self._save()
-        else:
-            identifier(run_id)
-            self.record, self.record_hash = store.read_record("runs", run_id + ".json")
-            validate_run(self.record)
-            require(self.record["run_id"] == run_id and self.record["input_digest"] == self.expected_digest
-                    and self.record["target_key"] == target_key(report), "run inputs or target changed")
-            require(digest_json({key: self.record[key] for key in context}) == digest_json(context), "run provenance changed")
-        self.run_id = run_id
-        self._needs_reinspection = resumed
-
-    def _fresh(self):
-        self.store._guard()
-        current = self.refresh()
-        require(current["input_digest"] == self.expected_digest and target_key(current) == self.store._held_target,
-                "inputs changed; discard plan and reinspect")
-
-    def _save(self, record=None):
-        self._fresh()
-        candidate = self.record if record is None else record
-        candidate["updated_ns"] = time.time_ns()
-        validate_run(candidate)
-        record_hash = self.store.write_record("runs", candidate["run_id"] + ".json", candidate, self.record_hash, before_commit=self._fresh)
-        self.record, self.record_hash = candidate, record_hash
-
-    def transition(self, step_id, status, verify=None, exit_code=None):
-        require(not self._needs_reinspection, "loaded run must be reinspected first")
-        self._fresh()
-        require(step_id in self.record["steps"], "unknown step")
-        candidate = copy.deepcopy(self.record)
-        step = candidate["steps"][step_id]
-        require((status == "running" and step["status"] in ("pending", "failed", "needs-user")) or
-                (step["status"] == "running" and status in ("succeeded", "failed", "needs-user")) or
-                (step["status"] == "pending" and status == "needs-user"), "invalid transition")
-        checks = []
-        if status == "succeeded":
-            require(callable(verify) and exit_code == 0, "postcondition callback and zero exit required")
-            checks = verify()
-            require(check_results(checks), "postconditions failed or uninspected")
-        now = time.time_ns()
-        step.update(status=status, attempt=step["attempt"] + int(status == "running"), checks=checks, exit_code=exit_code,
-                    started_ns=now if status == "running" else step["started_ns"],
-                    finished_ns=None if status == "running" else now,
-                    last_checked_ns=now if checks else None)
-        self._status(candidate)
-        self._save(candidate)
-
-    @staticmethod
-    def _status(record):
-        values = [step["status"] for step in record["steps"].values()]
-        record["status"] = next((value for value in ("running", "failed", "needs-user") if value in values),
-                                     "pending" if "pending" in values else "needs-user")
-
-    def reinspect(self, verifiers):
-        """Convert interrupted steps and recheck successes before reuse; no automatic execution."""
-        self._fresh()
-        candidate = copy.deepcopy(self.record)
-        for name, step in candidate["steps"].items():
-            if step["status"] == "running":
-                step.update(status="needs-user", checks=[{"check_id": "interrupted", "result": "uninspected"}],
-                            exit_code=None, finished_ns=time.time_ns(), last_checked_ns=time.time_ns())
-            elif step["status"] == "succeeded":
-                verifier = verifiers.get(name)
-                try:
-                    checks = verifier() if callable(verifier) else [{"check_id": "postconditions", "result": "uninspected"}]
-                except (OSError, Invalid):
-                    checks = [{"check_id": "postconditions", "result": "failed"}]
-                passed = check_results(checks)
-                step.update(status="succeeded" if passed else "failed", checks=checks, exit_code=0 if passed else None,
-                            last_checked_ns=time.time_ns())
-        self._status(candidate)
-        self._save(candidate)
-        self._needs_reinspection = False
-        return self.record
-
-
-def stage_local(args, refresh):
-    """Cache declared assets and pause a journal; never execute prefix preparation."""
-    require(args.assets is not None and args.asset_root is not None and args.profile is not None
-            and args.recipes is not None and args.app_id is not None, "stage requires assets and selected profile")
-    report = refresh()
-    require(report.get("assets") and not any(item["blockers"] for item in report["assets"]), "asset checks blocked")
-    root = safe_path(args.management_root)
-    # The management root must be disjoint from every protected/source tree and input file.
-    for other in (args.steam_root, args.settings_root, args.exe_root, args.asset_root,
-                  args.registrations, args.profile, args.recipes, args.assets):
-        other = safe_path(other)
-        require(not (root == other or root.is_relative_to(other) or other.is_relative_to(root)), "management root overlaps inputs")
-    document, _ = load_json(args.assets)
-    specs = validate_manifest(document)
-    expected = {entry["asset_id"]: entry["spec_digest"] for entry in report["assets"]}
-    require({key: digest_json(spec) for key, spec in specs.items()} == expected, "asset manifest changed")
-    with PrivateStore(root, create=True) as store, store.locked(target_key(report)):
-        journal = RunJournal(store, report, refresh, args.resume_run)
-
-        def verify_cache():
-            for spec in specs.values():
-                store.verify_asset(spec)
-            return [{"check_id": "cache-integrity", "result": "passed"}]
-
-        actions = []
-        if args.resume_run is not None:
-            journal.reinspect({"asset-cache": verify_cache})
-        if journal.record["steps"]["asset-cache"]["status"] != "succeeded":
-            journal.transition("asset-cache", "running")
-            try:
-                for key, spec in specs.items():
-                    journal._fresh()
-                    cached = store.cache_asset(spec, args.asset_root)
-                    actions.append({"asset_id": key, "action": cached["action"]})
-                journal.transition("asset-cache", "succeeded", verify_cache, exit_code=0)
-            except (OSError, Invalid):
-                # A stale plan may prevent even a failure update. Its stored running state
-                # remains interrupted, never success; inventory/resume exposes it later.
-                journal.transition("asset-cache", "failed", exit_code=1)
-                raise
-        else:
-            actions = [{"asset_id": key, "action": "revalidated"} for key in specs]
-        if journal.record["steps"]["prefix-preparation"]["status"] == "pending":
-            journal.transition("prefix-preparation", "needs-user")
-        return {"schema_version": 1, "tool_version": VERSION, "mode": "stage-local", "run_id": journal.run_id,
-                "preparation_complete": False, "status": journal.record["status"], "cached_assets": actions,
-                "blockers": report["blockers"], "writes": [str(root / name) for name in ("store.json", "locks", "assets", "runs")]}

@@ -41,7 +41,6 @@ for test in \
     /input/prefix-preparation/test_preparation_slot_manifest.py \
     /input/prefix-preparation/test_preparation_installer_log.py \
     /input/prefix-preparation/test_preparation_vc_record.py \
-    /input/prefix-preparation/test_preparation_dependencies.py \
     /input/prefix-preparation/test_preparation_binding.py \
     /input/prefix-preparation/test_preparation_execution.py \
     /input/prefix-preparation/test_preparation_processes.py \
@@ -51,7 +50,6 @@ for test in \
     /input/prefix-preparation/test_preparation_runtime_context.py \
     /input/prefix-preparation/test_preparation_installation.py \
     /input/prefix-preparation/test_preparation_tool_writer.py \
-    /input/prefix-preparation/test_preparation_preflight.py \
     /input/prefix-preparation/test_preparation_static_placement.py \
     /input/prefix-preparation/test_preparation_trial.py \
     /input/prefix-preparation/test_preparation_dependency_install.py \
@@ -64,7 +62,6 @@ for test in \
     /input/prefix-preparation/test_preparation_diagnose.py \
     /input/prefix-preparation/test_preparation_redo.py \
     /input/prefix-preparation/test_preparation_folder_reads.py \
-    /input/prefix-preparation/test_preparation_probe_recovery.py \
     /input/prefix-preparation/test_preparation_probe.py \
     /input/prefix-preparation/test_preparation_selection.py \
     /input/banner-proton/test-softdenchi-install.py \

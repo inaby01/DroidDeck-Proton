@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 
 from preparation_common import (
     MAX_JSON,
-    MAX_STRING,
     SHA256,
     VERSION,
     Invalid,
@@ -113,114 +112,6 @@ def _games_document(raw):
     require(type(value["version"]) is int and value["version"] == 1, "unknown choices version")
     _requests(value["games"])
     return value
-
-
-def binding_error(error):
-    """Fixed diagnostic vocabulary only; never expose exception text or values."""
-    conditions = {
-        "unsupported VDF token": "vdf-token",
-        "duplicate or incomplete VDF entry": "vdf-duplicate-or-incomplete",
-        "missing VDF block": "vdf-missing-block",
-        "VDF too large": "vdf-size",
-        "expected VDF string": "vdf-string",
-        "invalid VDF tail": "vdf-tail",
-        "unclosed VDF block": "vdf-unclosed",
-        "VDF string too long": "vdf-string-length",
-        "VDF nesting too deep": "vdf-depth",
-        "unexpected VDF close": "vdf-unexpected-close",
-        "invalid VDF value limit": "vdf-value-limit",
-        "canonical unsigned game ID required": "mapping-canonical-id",
-        "invalid tool ID": "mapping-tool-id",
-        "Steam VDF block required": "mapping-steam-block",
-        "result VDF too large": "mapping-result-size",
-        "mapping block required": "mapping-block",
-        "game mapping must be a block": "mapping-game-block",
-        "mapping name must be a string": "mapping-name-string",
-        "unknown or missing fields": "object-fields",
-        "unknown choices version": "choices-version",
-        "invalid binding JSON": "json-encoding-or-structure",
-        "binding JSON must be an object": "json-object",
-        "invalid game request map": "request-map",
-        "noncanonical request ID": "request-id",
-        "invalid app ID": "app-id",
-        "invalid choice kind": "choice-kind",
-        "invalid choice directory": "choice-directory",
-        "invalid choice tool ID": "choice-tool-id",
-        "unsupported auto history format": "auto-history",
-        "invalid selection history": "selection-history",
-        "invalid history ID": "history-id",
-        "single-link regular file required": "regular-single-link-file",
-        "tool wrapper not registered": "tool-wrapper",
-        "tool launchers not executable": "launcher-executable",
-        "invalid registered tool ID": "tool-id",
-    }
-    return {"check": getattr(error, "preparation_check", "binding-input"),
-            "error_class": type(error).__name__, "errno": getattr(error, "errno", None),
-            "condition": "text-encoding" if isinstance(error, UnicodeError) else conditions.get(str(error), "input-rejected")}
-
-
-def inspect_steam_config(steam):
-    """Compare parser limits on one bounded read, without disclosing values.
-
-    This independent observation is diagnostic only, never writer authorization.
-    Long scalar values may be preserved; keys and identifiers retain their limits.
-    """
-    report = {"scope": "independent-read-only-parser-checks", "coherent_plan": False,
-              "writes": [], "execution_authorized": False, "checks": {}}
-    try:
-        raw = checked("binding-read-config", _raw, safe_path(steam / "config/config.vdf", steam))
-        require(raw is not None, "existing config required")
-    except (OSError, ValueError, TypeError, KeyError) as error:
-        report["error"] = binding_error(error)
-        return report
-    report["input_sha256"] = hashlib.sha256(raw).hexdigest()
-    report["input_bytes"] = len(raw)
-    for name, limit in (("legacy-string-limit", MAX_STRING), ("preserve-bounded-values", MAX_JSON)):
-        try:
-            Document(raw, value_limit=limit).node(STEAM_PATH)
-            report["checks"][name] = {"status": "accepted"}
-        except (OSError, ValueError, TypeError, KeyError) as error:
-            report["checks"][name] = {"status": "rejected", **binding_error(error)}
-    return report
-
-
-def inspect_binding_inputs(steam, settings, registration_id, directory):
-    """Independent bounded read checks after a rejected plan; no raw config data.
-
-    A successful subcheck is diagnostic only and cannot authorize a writer. Each
-    input is reopened safely; these observations are not a coherent binding plan.
-    """
-    results = {}
-
-    def inspect(name, function):
-        try:
-            function()
-            results[name] = {"status": "accepted"}
-        except (OSError, ValueError, TypeError, KeyError) as error:
-            results[name] = {"status": "rejected", **binding_error(error)}
-
-    inspect("registered-tool", lambda: registered_tool(steam, directory))
-    inspect("games-schema", lambda: _games_document(_raw(safe_path(settings / "games.json", settings))))
-
-    def state_field(name):
-        state = _json(_raw(safe_path(settings / "state.json", settings)), {})
-        if name not in state:
-            return
-        value = state[name]
-        if name == "games_applied":
-            _requests(value)
-        elif name == "auto":
-            require(type(value) is dict, "unsupported auto history format")
-        else:
-            require(type(value) is list and len(value) <= 4096, "invalid selection history")
-            require(all(type(app) is str and app_id(app) == app for app in value), "invalid history ID")
-
-    for name in ("games_applied", "auto", "picked", "native_choices"):
-        inspect("state-" + name, lambda name=name: state_field(name))
-    inspect("target-mapping", lambda: patch_game_mapping(
-        _raw(safe_path(steam / "config/config.vdf", steam)), registration_id, "Diagnostic-Tool"))
-    return {"scope": "independent-read-only-checks", "coherent_plan": False,
-            "checks": results, "writes": [], "execution_authorized": False}
 
 
 @dataclass(frozen=True)

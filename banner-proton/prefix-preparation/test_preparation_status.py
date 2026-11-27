@@ -470,14 +470,6 @@ class EntryTests(StatusMixin, ONE['OnePassTests']):
         self.assertEqual((code, report['mode']), (2, 'game-status-result'))
         self.assertEqual(self.entry(report)['next']['actions'], ['softdenchi-silent', 'binding'])
 
-    def test_entry_3_uses_an_ordinary_game_and_observes_the_placed_slot(self):
-        self.initialize()
-        code, report, output = self.entry_menu('3\n1\n')
-        self.assertEqual((code, report['mode']), (2, 'static-matching-tool-observed'), output)
-        self.assertEqual(report['confirmation_registration']['app_id'], '42')
-        self.assertIn('1. Example  [ID 42]', output)
-        self.assertNotIn('ID 43', output)
-
     def test_entry_1_is_the_one_pass_preparation_with_operational_wording(self):
         self.use_installer(ONE['DEP']['installer'](silent_noop=True))
         self.pin_silent()
@@ -508,9 +500,9 @@ class EntryTests(StatusMixin, ONE['OnePassTests']):
                 script.unlink()
         with self.assertRaises(Exception):
             selection.selection_script(self.config, 'detailed')
+        # A bundle without the operational layout has no scripts at all since 1.0.1.
         earlier = {key: value for key, value in self.config.items() if key != 'game_preparation'}
-        self.assertTrue(selection.selection_script(earlier, 'prepare'))
-        for entry in ('status', 'diagnose', 'recovery'):
+        for entry in ('prepare', 'status', 'diagnose', 'recovery'):
             with self.subTest(earlier=entry), self.assertRaises(Exception):
                 selection.selection_script(earlier, entry)
 

@@ -2,10 +2,8 @@
 """recovery.sh 7 (1.0.0): prepare a game again under the same registration, and finishing an
 interrupted placement record in prepare.sh."""
 
-import json
 import os
 import runpy
-import stat
 import sys
 import unittest
 import unittest.mock

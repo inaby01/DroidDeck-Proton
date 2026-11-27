@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Target-only binding against disposable settings, never a real game or helper."""
 
-import ast
 import copy
 import hashlib
 import json
@@ -15,19 +14,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 FIXTURES = runpy.run_path(str(Path(__file__).with_name("test_prepare_game.py")))
-ENGINE = FIXTURES["ENGINE"]
 import preparation_binding as binding
 from preparation_common import MAX_DEPTH, MAX_JSON, MAX_STRING, Invalid
 from preparation_store import PrivateStore
-from preparation_vdf import Document, parse_vdf, patch_game_mapping
+from preparation_vdf import Document, patch_game_mapping
 
 
 class BindingTests(unittest.TestCase):
-    write_json = FIXTURES["InspectionTests"].write_json
-    snapshot = FIXTURES["InspectionTests"].snapshot
+    write_json = FIXTURES["SettingsFixture"].write_json
+    snapshot = FIXTURES["SettingsFixture"].snapshot
 
     def setUp(self):
-        FIXTURES["InspectionTests"].setUp(self)
+        FIXTURES["SettingsFixture"].setUp(self)
         self.key = "4294967295"
         self.directory = "Example Proton"
         self.tool = self.steam / "compatibilitytools.d" / self.directory
@@ -81,43 +79,18 @@ class BindingTests(unittest.TestCase):
         self.assertNotIn("DUMMY", repr(plan))
         self.assertIn("payload-integrity-unverified", summary["blockers"])
 
-    def test_diagnostic_rejections_never_echo_raw_errors_or_config(self):
-        self.games.write_text('{"version": 1, "games": {"PRIVATE_ID": {"SECRET": "value"}}}')
-        self.state.write_text('{"games_applied": null, "picked": ["SECRET_ID"]}')
-        before = self.snapshot()
-        report = binding.inspect_binding_inputs(self.steam, self.settings, self.key, self.directory)
-        self.assertEqual(report["checks"]["games-schema"]["status"], "rejected")
-        self.assertEqual(report["checks"]["state-games_applied"]["status"], "rejected")
-        self.assertEqual(report["checks"]["state-picked"]["status"], "rejected")
-        self.assertFalse(report["coherent_plan"])
-        self.assertFalse(report["execution_authorized"])
-        self.assertEqual(before, self.snapshot())
-        self.assertNotIn("SECRET", json.dumps(report))
-        self.assertNotIn("PRIVATE_ID", json.dumps(report))
-        for error in (Invalid("SECRET_EXCEPTION"), OSError(5, "SECRET_PATH")):
-            self.assertNotIn("SECRET", json.dumps(binding.binding_error(error)))
-
-    def test_diagnostic_tool_read_identifies_file_without_exposing_contents(self):
+    def test_tool_read_failure_names_the_file(self):
         (self.tool / "proton").write_bytes(b"x" * (1024 * 1024 + 1))
         with self.assertRaises(Invalid) as raised:
             self.plan()
         self.assertEqual(raised.exception.preparation_check, "binding-tool-read-proton")
-        report = binding.inspect_binding_inputs(self.steam, self.settings, self.key, self.directory)
-        self.assertEqual(report["checks"]["registered-tool"]["check"], "binding-tool-read-proton")
-        self.assertEqual(report["checks"]["target-mapping"]["status"], "accepted")
 
     def test_preserves_long_unrelated_values_in_binding_plan_and_guarded_writer(self):
         value = "DUMMY_PRIVATE_VALUE_" * 500
         self.config.write_text(self.config.read_text().replace('"Secret"', '"Untouched" "' + value + '" "Secret"'))
-        before = self.config.read_bytes()
         plan = self.plan()
         self.assertIn(value.encode(), plan.after["config"])
         self.assertEqual(patch_game_mapping(plan.after["config"], self.key, "Example-Proton"), plan.after["config"])
-        legacy = binding.inspect_steam_config(self.steam)
-        self.assertEqual(legacy["checks"]["legacy-string-limit"]["condition"], "vdf-string-length")
-        self.assertEqual(legacy["checks"]["preserve-bounded-values"]["status"], "accepted")
-        self.assertEqual(legacy["input_sha256"], hashlib.sha256(before).hexdigest())
-        self.assertNotIn(value, json.dumps(legacy))
         self.assertNotIn(value, json.dumps(plan.summary()))
         self.apply(plan)
         self.assertEqual(self.config.read_bytes(), plan.after["config"])
@@ -139,26 +112,9 @@ class BindingTests(unittest.TestCase):
             with self.assertRaises(Invalid):
                 Document(raw, value_limit=MAX_JSON)
 
-    def test_every_vdf_validation_has_a_fixed_diagnostic_code(self):
-        tree = ast.parse(Path(binding.__file__).with_name("preparation_vdf.py").read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "require":
-                message = ast.literal_eval(node.args[1])
-                with self.subTest(message=message):
-                    self.assertNotEqual(binding.binding_error(Invalid(message))["condition"], "input-rejected")
-
-    def test_parser_diagnostic_handles_missing_and_non_utf8_without_exposing_data(self):
-        self.config.unlink()
-        self.assertIn("error", binding.inspect_steam_config(self.steam))
-        self.config.write_bytes(b'"PRIVATE_KEY" "\xffPRIVATE_VALUE"')
-        result = binding.inspect_steam_config(self.steam)
-        for item in result["checks"].values():
-            self.assertEqual(item["condition"], "text-encoding")
-        self.assertNotIn("PRIVATE", json.dumps(result))
-
     def test_changes_only_target_mapping_and_preserves_other_config_bytes(self):
         plan = self.plan()
-        before, after = parse_vdf(plan.before["config"]), parse_vdf(plan.after["config"])
+        before, after = Document(plan.before["config"]).value(), Document(plan.after["config"]).value()
         for value in (before, after):
             node = value
             for name in binding.STEAM_PATH:
@@ -425,18 +381,6 @@ except Invalid:
             path.write_text(json.dumps(value))
             self.assertEqual(store.inventory()["bindings"][0]["status"], "invalid")
 
-    def test_cli_exposes_only_read_only_target_binding_plan(self):
-        self.args.tool_directory = self.directory
-        before = self.snapshot()
-        report = ENGINE["build_report"](self.args)
-        self.assertEqual(report["binding_plan"]["tool"], "Example-Proton")
-        self.assertEqual(report["writes"], [])
-        self.assertEqual(before, self.snapshot())
-        self.assertIn("binding-writer-not-exposed", report["blockers"])
-        self.assertNotIn("DUMMY_STATE_SECRET", ENGINE["display"](report))
-        self.assertIn("binding", report["input_hashes"])
-
-
 class VdfTests(unittest.TestCase):
     def config(self, content):
         return ('"InstallConfigStore" {"Software" {"Valve" {"Steam" {' + content + '}}}}').encode()
@@ -445,7 +389,7 @@ class VdfTests(unittest.TestCase):
         raw = self.config('"Secret" "keep" // keep this comment\n')
         changed = patch_game_mapping(raw, "42", "Example-Proton")
         self.assertIn(b'"Secret" "keep" // keep this comment\n', changed)
-        node = parse_vdf(changed)
+        node = Document(changed).value()
         for name in binding.STEAM_PATH:
             node = node[name]
         self.assertEqual(node["CompatToolMapping"]["42"]["name"], "Example-Proton")

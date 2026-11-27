@@ -1,44 +1,23 @@
-"""Create registration-only probe material from one pinned Wine archive member.
+"""Common entry of the four scripts, and the read-only checks of a dedicated registration probe.
 
-Material creation never runs the Windows executable, writes Android registration/
-preferences, or initializes compatdata. The workflow dispatches a separately
-confirmed dedicated initialization trial when enabled. Private receipts distinguish staged material from
-a genuinely new registration observed later. No existing destination is reused.
+The tool no longer creates probe material (removed in 1.0.1). Probe receipts written by earlier
+versions are only read: a probe registration is verified, never executed, and its files are kept.
 """
 
-import gzip
 import hashlib
-import io
-import json
 import os
 import re
-import secrets
 import stat
-import tarfile
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from preparation_assets import digest_json, exe_identity, pe_machine
+from preparation_assets import exe_identity
 from preparation_common import (
-    MAX_JSON,
-    VERSION,
     app_id,
     checked,
     fields,
-    input_change,
     load_json,
-    regular_open,
     require,
     safe_path,
-    unchanged,
-)
-from preparation_payload import (
-    CHUNK,
-    MAX_ARCHIVE,
-    MAX_EXPANDED,
-    _Reader,
-    _TarInfo,
-    inspect_archive,
 )
 from preparation_store import PrivateStore
 from preparation_target import registrations
@@ -119,167 +98,6 @@ def _verify_revalidation_history(record, store_root):
 def _marker(record):
     return {"schema_version": 1, "purpose": "registration-only-probe", "probe_id": record["probe_id"],
             "member": MEMBER, "archive_sha512": record["archive_sha512"], "exe_sha256": record["exe_identity"]["sha256"]}
-
-
-def _capture_probe(archive, inventory):
-    expected = inventory.entries.get(MEMBER)
-    require(expected is not None and expected["kind"] == "file" and 0 < expected["size"] <= MAX_PROBE,
-            "bounded x86 cmd member required")
-    raw, count = None, 0
-    digest = hashlib.sha512()
-    with regular_open(archive, MAX_ARCHIVE) as source:
-        before = os.fstat(source.fileno())
-        compressed = _Reader(source, MAX_ARCHIVE, digest)
-        with gzip.GzipFile(fileobj=compressed, mode="rb") as unpacked:
-            reader = _Reader(unpacked, MAX_EXPANDED + 128 * CHUNK)
-            with tarfile.open(fileobj=reader, mode="r|", tarinfo=_TarInfo) as package:
-                for member in package:
-                    if member.name != inventory.root + "/" + MEMBER:
-                        continue
-                    count += 1
-                    require(count == 1 and member.isfile() and member.size == expected["size"] and not member.issparse(), "probe member changed")
-                    with package.extractfile(member) as data:
-                        raw = data.read(member.size + 1)
-                        require(len(raw) == member.size, "probe member truncated")
-            while reader.read(CHUNK):
-                pass
-        while compressed.read(CHUNK):
-            pass
-        unchanged(before, os.fstat(source.fileno()))
-        require(compressed.count == before.st_size and digest.hexdigest() == inventory.archive_sha512, "probe archive changed")
-    require(raw is not None and hashlib.sha256(raw).hexdigest() == expected["sha256"] and
-            pe_machine(io.BytesIO(raw), len(raw)) == "x86", "probe executable identity mismatch")
-    return raw
-
-
-@dataclass(frozen=True)
-class ProbeMaterialPlan:
-    digest: str
-    record: dict = field(repr=False)
-    archive: object = field(repr=False)
-    archive_root: str
-    raw: bytes = field(repr=False)
-
-    def summary(self):
-        record = self.record
-        return {"mode": "probe-material-plan", "input_digest": self.digest, "probe_id": record["probe_id"],
-                "destination": record["destination"], "exe": str(Path(record["destination"]) / EXE),
-                "source_member": MEMBER, "exe_identity": dict(record["exe_identity"]),
-                "baseline_registration_count": len(record["baseline_ids"]), "registration_action": "manual-or-app-rescan-not-performed",
-                "planned_files": [EXE, MARKER], "private_receipt_required": True, "prefix_created": False,
-                "exe_executed": False, "preparation_complete": False, "writes": []}
-
-
-def plan_probe_material(archive, sha512, archive_root, source, steam, base, *, probe_id=None):
-    archive, source, steam, base = map(safe_path, (archive, source, steam, base))
-    require(steam.is_dir() and base.is_dir(), "existing Steam and probe base required")
-    require(not (base == steam or base.is_relative_to(steam)), "probe base is inside Steam")
-    document, source_digest = load_json(source)
-    games = registrations(document)
-    probe_id = "probe-" + secrets.token_hex(16) if probe_id is None else probe_id
-    require(type(probe_id) is str and ID.fullmatch(probe_id), "invalid probe ID")
-    destination = safe_path(base / ("DroidDeck Prefix Test-" + probe_id[6:]), base)
-    require(not os.path.lexists(destination), "probe destination already exists")
-    for game in games.values():
-        protected = Path(game["exe"]).parent
-        require(not (destination == protected or destination.is_relative_to(protected) or protected.is_relative_to(destination)),
-                "probe destination overlaps registered game")
-    inventory = checked("probe-archive-inspection", inspect_archive, archive, sha512, archive_root)
-    raw = checked("probe-member-capture", _capture_probe, archive, inventory)
-    identity = {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw), "pe_machine": "x86", "provenance": "local-measurement-only"}
-    record = {"schema_version": 1, "tool_version": VERSION, "probe_id": probe_id, "probe_revision": 1, "status": "creating",
-              "destination": str(destination), "steam": str(steam), "registration_source": str(source),
-              "baseline_ids": sorted(games, key=int), "registration_sha256": source_digest,
-              "archive_sha512": sha512, "inventory_digest": inventory.digest, "member": MEMBER,
-              "exe_identity": identity, "preparation_complete": False}
-    _record_valid(record)
-    fs = os.statvfs(base)
-    require(fs.f_bavail * (fs.f_frsize or fs.f_bsize) >= len(raw) + 2 * MAX_JSON, "insufficient probe material space")
-    require(load_json(source)[1] == source_digest, "registration changed before probe plan completed")
-    return ProbeMaterialPlan(digest_json(record), record, archive, archive_root, raw)
-
-
-def create_probe_material(plan, refresh, store):
-    require(isinstance(plan, ProbeMaterialPlan) and callable(refresh), "trusted probe plan required")
-    store._guard()
-    record = dict(plan.record)
-    _record_valid(record)
-    destination = safe_path(record["destination"])
-    require(store._held_target == hashlib.sha256(str(destination).encode()).hexdigest(), "matching probe material lock required")
-    require(not (store.root == destination or store.root.is_relative_to(destination) or destination.is_relative_to(store.root)), "probe store overlaps destination")
-    fresh = refresh()
-    require(isinstance(fresh, ProbeMaterialPlan) and fresh.digest == plan.digest and fresh.record == record and fresh.raw == plan.raw,
-            "probe material plan changed")
-    require(plan.digest == digest_json(record) and hashlib.sha256(plan.raw).hexdigest() == record["exe_identity"]["sha256"], "probe plan mutated")
-    filename = record["probe_id"] + ".json"
-    record_hash = store.write_record("probe-runs", filename, record)
-    parent_fd, fd = None, None
-    phase = "open-parent"
-    try:
-        parent = safe_path(destination.parent)
-        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        parent_identity = os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino
-        phase = "mkdir"
-        os.mkdir(destination.name, 0o700, dir_fd=parent_fd)
-        phase = "open-destination"
-        fd = os.open(destination.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-        identity = os.fstat(fd).st_dev, os.fstat(fd).st_ino
-        def guard():
-            store._guard()
-            parent_now = safe_path(parent).stat()
-            current = os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
-            require((parent_now.st_dev, parent_now.st_ino) == parent_identity and (current.st_dev, current.st_ino) == identity,
-                    "probe directory changed")
-        for name, raw in ((EXE, plan.raw), (MARKER, (json.dumps(_marker(record), ensure_ascii=True, indent=2) + "\n").encode())):
-            phase = "directory-guard"
-            guard()
-            phase = "open-exe" if name == EXE else "open-marker"
-            out_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
-            with os.fdopen(out_fd, "wb") as output:
-                info = os.fstat(output.fileno())
-                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "invalid new probe file")
-                phase = "write-exe" if name == EXE else "write-marker"
-                output.write(raw)
-                output.flush()
-                phase = "sync-exe" if name == EXE else "sync-marker"
-                os.fsync(output.fileno())
-        phase = "directory-guard"
-        guard()
-        phase = "verify-exe"
-        require(exe_identity(destination / EXE) == record["exe_identity"], "copied probe identity changed")
-        phase = "verify-marker"
-        require(load_json(destination / MARKER)[0] == _marker(record), "probe marker changed")
-        phase = "sync-directory"
-        os.fsync(fd)
-        phase = "sync-parent"
-        os.fsync(parent_fd)
-        phase = "record-ready"
-        record["status"] = "probe-ready"
-        store.write_record("probe-runs", filename, record, record_hash)
-        return {"mode": "probe-material-created", "probe_id": record["probe_id"], "destination": str(destination),
-                "exe": str(destination / EXE), "exe_identity": record["exe_identity"],
-                "selection_hint": {"base": "same-folder-as-prepare.sh", "relative_exe": destination.name + "/" + EXE},
-                "writes": [{"path": str(destination), "scope": "new-registration-probe-files-only"},
-                           {"path": str(store.root), "scope": "private-probe-receipt-and-locks"}],
-                "prefix_created": False, "exe_executed": False, "registration_written": False, "preparation_complete": False}
-    except BaseException as error:
-        if not hasattr(error, "preparation_check"):
-            error.preparation_check = "probe-create-" + phase
-        code = getattr(error, "errno", None)
-        record["status"] = "probe-failed"
-        record["creation_failure"] = {"stage": phase,
-            "kind": "invalid" if isinstance(error, ValueError) else "os-error" if isinstance(error, OSError) else "interrupted",
-            "errno": code if type(code) is int and 0 < code < 4096 else None}
-        try:
-            store.write_record("probe-runs", filename, record, record_hash)
-        except (OSError, ValueError):
-            pass
-        raise  # Preserve partial files and private creating/failed receipt; never delete user data.
-    finally:
-        if fd is not None:
-            os.close(fd)
-        if parent_fd is not None:
-            os.close(parent_fd)
 
 
 def inspect_incomplete_material(record, exe, key, source, steam, store_root, receipt_digest):
@@ -514,146 +332,20 @@ def _verify_registered_context(record, marker, exe, key, source, steam, receipt_
 
 def interactive_workflow(directory, renderer, config=None, *, input_stream=None, output_stream=None, environment=None,
                          steam=None, settings=None, home=None, runtime_root=Path("/"), entry="prepare"):
-    """Common short entry; material creation requires a separate concrete opt-in.
+    """Common entry of the four scripts (1.0.0): prepare, status, diagnose or recovery.
 
-    ``entry`` is the script that started it (1.0.0): prepare, status, diagnose or recovery.
+    Only an operational bundle is accepted; the earlier screens were removed in 1.0.1.
     """
     import sys
 
     import preparation_selection as selection
+    from preparation_batch import interactive_entry
 
     stream = sys.stdin if input_stream is None else input_stream
     output = sys.stdout if output_stream is None else output_stream
     environment = os.environ if environment is None else environment
     options = {"input_stream": stream, "output_stream": output, "environment": environment,
                "steam": steam, "settings": settings, "home": home, "runtime_root": runtime_root}
-    if config is None or not config.get("probe_material", False):
-        return selection.interactive_selection(directory, renderer, config, **options)
+    require(selection.operational_layout(config), "operational bundle required")
     selection.validate_selection_config(config)
-    if selection.operational_layout(config):
-        # One script per use (1.0.0); the batch run is prepare.sh.
-        from preparation_batch import interactive_entry
-        return interactive_entry(entry, directory, renderer, config, **options)
-    return detailed_menu(directory, renderer, config, **options)
-
-
-def detailed_menu(directory, renderer, config, *, input_stream=None, output_stream=None, environment=None,
-                  steam=None, settings=None, home=None, runtime_root=Path("/")):
-    """The earlier screen (menus 1-12, numbers unchanged); the detailed menu of the operational layout."""
-    import sys
-
-    import preparation_selection as selection
-
-    stream = sys.stdin if input_stream is None else input_stream
-    output = sys.stdout if output_stream is None else output_stream
-    environment = os.environ if environment is None else environment
-    options = {"input_stream": stream, "output_stream": output, "environment": environment,
-               "steam": steam, "settings": settings, "home": home, "runtime_root": runtime_root}
-    if selection.operational_layout(config):
-        print("詳細メニュー（番号は従来どおり）", file=output)
-    print("1. 登録済み対象の読み取り検査・計画\n2. 新規登録用の検証ファイルを用意\n3. 未完了の検証用記録を全照合して復帰", file=output)
-    if "placement_review" in config:
-        print("4. 準備用Protonを別の新規フォルダーへ配置（起動しない）", file=output)
-    if config.get("initialization_trial") is True and "placement_review" in config:
-        print("5. 専用の新規prefixを初期化試験（実Proton/Wineを起動）", file=output)
-        print("6. 既存の初期化試験を読み取り検査（再実行・修復しない）", file=output)
-        print("7. FEX空directoryを限定照合し、管理済みprefixで疎通再照会", file=output)
-    if config.get("initialization_trial") is True and "placement_review" in config and "dependency_installation" in config:
-        print("8. 管理済みprefixへソフト電池を対話導入（winver確認→正規インストーラ、実Wineを起動）", file=output)
-        print("9. 管理済みprefixのソフト電池導入状態を読み取り検査（Wineを起動しない）", file=output)
-    if config.get("initialization_trial") is True and "placement_review" in config and "game_preparation" in config:
-        print("10. 実ゲーム登録の新規prefixを初期化（実Proton/Wineを起動。ゲームは起動しない）", file=output)
-        print("11. 依存が揃った実ゲームprefixを準備用slotへ割り当て（Wine・ゲームは起動しない）", file=output)
-    if config.get("initialization_trial") is True and "placement_review" in config and "game_preparation" in config \
-            and "dependency_installation" in config:
-        print("12. 新しいゲームを1回で準備（初期化→（ソフト電池を使うプロファイルでは）ソフト電池を画面なしで導入→割り当て。"
-              "途中からの再開も可）", file=output)
-    print("q. 取消", file=output)
-    answer = stream.readline(32).strip()
-    if answer == "4" and "placement_review" in config:
-        from preparation_static_placement import interactive_static_placement
-        return interactive_static_placement(directory, renderer, config, **options)
-    if answer == "10" and config.get("initialization_trial") is True and "placement_review" in config \
-            and "game_preparation" in config:
-        from preparation_game_prefix import interactive_game_prefix
-        return interactive_game_prefix(directory, renderer, config, **options)
-    if answer == "12" and config.get("initialization_trial") is True and "placement_review" in config \
-            and "game_preparation" in config and "dependency_installation" in config:
-        from preparation_one_pass import interactive_one_pass
-        return interactive_one_pass(directory, renderer, config, **options)
-    if answer == "11" and config.get("initialization_trial") is True and "placement_review" in config \
-            and "game_preparation" in config:
-        from preparation_game_prefix import interactive_game_binding
-        return interactive_game_binding(directory, renderer, config, **options)
-    if answer in ("8", "9") and config.get("initialization_trial") is True and "placement_review" in config \
-            and "dependency_installation" in config:
-        import preparation_dependency_install as dependency
-        action = dependency.interactive_dependency_install if answer == "8" else dependency.interactive_dependency_reinspect
-        return action(directory, renderer, config, **options)
-    if answer == "7" and config.get("initialization_trial") is True and "placement_review" in config:
-        from preparation_recheck import interactive_recheck
-        return interactive_recheck(directory, renderer, config, **options)
-    if answer == "6" and config.get("initialization_trial") is True and "placement_review" in config:
-        from preparation_trial_audit import interactive_trial_audit
-        return interactive_trial_audit(directory, renderer, config, **options)
-    if answer == "5" and config.get("initialization_trial") is True and "placement_review" in config:
-        from preparation_trial import interactive_trial
-        return interactive_trial(directory, renderer, config, **options)
-    if answer == "1":
-        return selection.interactive_selection(directory, renderer, config, **options)
-    if answer == "3":
-        from preparation_probe_recovery import interactive_recovery
-        return interactive_recovery(directory, renderer, config, **options)
-    if answer != "2":
-        print("取り消しました。", file=output)
-        return 0, None
-    directory = safe_path(directory)
-    home = safe_path(home if home is not None else Path.home())
-    steam = safe_path(steam if steam is not None else home / ".local/share/Steam")
-    settings = safe_path(settings if settings is not None else home / ".local/share/droiddeck-compat")
-    protected = [steam, settings]
-    stage, started, plan = "probe-material-plan", False, None
-    try:
-        source, _, games = selection.registration_catalog(environment)
-        protected.extend(Path(game["exe"]).parent for game in games.values())
-        archive = selection._archive(directory, config["payload"])
-        payload = config["payload"]
-        plan = plan_probe_material(archive, payload["sha512"], payload["root"], source, steam, directory)
-        print("新しく作るフォルダー: " + selection._text(plan.record["destination"]), file=output)
-        print(f"内容: {EXE}（{len(plan.raw):,} bytes）と {MARKER}", file=output)
-        print("Androidではprepare.sh を置いたフォルダー内から、この新しいフォルダーを選びます。", file=output)
-        print("元ファイル: 配布物内 " + MEMBER, file=output)
-        print("私有記録: " + selection._text(home / ".local/state/droiddeck-prefix-preparation/probe-store"), file=output)
-        print("私有記録・ロック・結果JSONも新規作成します。既存ファイルは上書きしません。", file=output)
-        print("EXEは実行しません。ゲーム登録・prefix作成・Proton配置・設定変更は行いません。", file=output)
-        print("この内容で新規作成する場合は1、取消はq: ", end="", file=output, flush=True)
-        if stream.readline(32).strip() != "1":
-            print("取り消しました。", file=output)
-            return 0, None
-        stage, started = "probe-material-create", True
-        # Only after opt-in. Ancestors are checked, never chmodded or repaired.
-        private = selection._private_report_directory(home, protected)
-        with PrivateStore(private.parent / "probe-store", create=True) as store:
-            key = hashlib.sha256(plan.record["destination"].encode()).hexdigest()
-            with store.locked(key):
-                report = create_probe_material(plan, lambda: plan_probe_material(
-                    archive, payload["sha512"], payload["root"], source, steam, directory, probe_id=plan.record["probe_id"]), store)
-        print("検証ファイルを作成しました。DroidDeckのEXE追加で、prepare.sh を置いたフォルダーを開いてください。", file=output)
-        print("選ぶファイル: " + selection._text(report["selection_hint"]["relative_exe"]), file=output)
-        print("追加後も起動せず、このprepare.sh の" + selection.menu_ref(config, 1) + "で新しい登録を検査してください。", file=output)
-    except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
-        report = {"mode": "probe-material-stopped", "stage": stage, "check": getattr(error, "preparation_check", stage), "error_class": type(error).__name__,
-                  "errno": getattr(error, "errno", None), "writes": [], "partial_files_may_exist": started,
-                  "prefix_created": False, "exe_executed": False, "preparation_complete": False, **input_change(error)}
-        if plan is not None:
-            report["destination"] = plan.record["destination"]
-        print("処理停止: " + report["check"] + " / " + type(error).__name__ + " / errno=" + str(report["errno"]), file=output)
-        print("途中のファイルは削除・再利用しません。prefixや設定は変更していません。", file=output)
-    report.update(schema_version=1, tool_version=VERSION)
-    try:
-        saved, _ = selection.save_selection_result(directory, home, report, protected)
-    except (OSError, ValueError):
-        print("結果JSONを保存できませんでした。上記の作成先・停止段階を確認してください。", file=output)
-        return 1, None
-    print("結果を保存しました: " + selection._text(saved if saved.parent != directory else saved.name), file=output)
-    return 2, str(saved) if saved.parent != directory else saved.name
+    return interactive_entry(entry, directory, renderer, config, **options)

@@ -37,9 +37,11 @@ from preparation_common import (
     regular_open,
     require,
     safe_path,
+    unchanged,
 )
 from preparation_dependency_state import inspect_dependency_state
 from preparation_execution import plan_launch, require_no_bytecode_cache
+from preparation_payload import MAX_MEMBERS
 from preparation_processes import (
     SYSTEM_DIRECTORIES,
     WINE_INFRASTRUCTURE,
@@ -62,7 +64,6 @@ from preparation_softdenchi_recipe import (
 )
 from preparation_store import PrivateStore
 from preparation_trial import _new_private
-from preparation_trial_audit import measure_prefix
 
 SCOPE = "managed-prefix-dependency-installation"
 RECORDS = "dependency-installs"
@@ -1820,3 +1821,45 @@ def interactive_dependency_reinspect(directory, renderer, config, *, input_strea
         print(f"読み取り検査は停止しました。SdProxyへのSIGTERMは{sent}件送信済み、それ以外の変更はしていません。" if sent
               else "読み取り検査は停止しました。変更はしていません。", file=output)
     return _save_result(selection, directory, home, report, protected, output)
+
+
+def measure_prefix(root):
+    """Count metadata only, without following Wine's drive or user symlinks."""
+    root = safe_path(root)
+    result = {"entries": 0, "regular_files": 0, "symlinks_not_followed": 0,
+              "logical_file_bytes": 0, "allocated_file_bytes": 0, "contents_read": False}
+    seen = set()
+
+    def walk(fd):
+        before = os.fstat(fd)
+        with os.scandir(fd) as children:
+            for child in children:
+                result["entries"] += 1
+                require(result["entries"] <= MAX_MEMBERS, "prefix measurement limit exceeded")
+                info = os.stat(child.name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode):
+                    result["symlinks_not_followed"] += 1
+                elif stat.S_ISREG(info.st_mode):
+                    result["regular_files"] += 1
+                    identity = (info.st_dev, info.st_ino)
+                    if identity not in seen:
+                        seen.add(identity)
+                        result["logical_file_bytes"] += info.st_size
+                        result["allocated_file_bytes"] += info.st_blocks * 512
+                elif stat.S_ISDIR(info.st_mode):
+                    nested = os.open(child.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    try:
+                        unchanged(info, os.fstat(nested))
+                        walk(nested)
+                    finally:
+                        os.close(nested)
+        unchanged(before, os.fstat(fd))
+
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        walk(fd)
+        unchanged(before, safe_path(root).stat())
+    finally:
+        os.close(fd)
+    return result

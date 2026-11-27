@@ -26,11 +26,11 @@ MEMBERS = [("files", "directory", None, 0o755), ("files/bin-arm64", "directory",
 
 
 class PayloadTests(unittest.TestCase):
-    write_json = FIXTURES["InspectionTests"].write_json
-    snapshot = FIXTURES["InspectionTests"].snapshot
+    write_json = FIXTURES["SettingsFixture"].write_json
+    snapshot = FIXTURES["SettingsFixture"].snapshot
 
     def setUp(self):
-        FIXTURES["InspectionTests"].setUp(self)
+        FIXTURES["SettingsFixture"].setUp(self)
         self.archive = self.root / "Example Proton.tar.gz"
         self.installed = self.root / "installed"
         self.installed.mkdir()
@@ -371,63 +371,6 @@ class PayloadTests(unittest.TestCase):
         with self.assertRaises(payload.TreeMismatch):
             payload.verify_fex_runtime_tree(self.installed, inventory)
 
-    def test_difference_audit_aggregates_changes_extras_and_missing_without_adoption(self):
-        self.installed.chmod(0o755)
-        (self.installed / "proton").write_bytes(b"changed-content")
-        (self.installed / "proton").chmod(0o600)
-        (self.installed / "files/bin-arm64/wine").unlink()
-        extra = self.installed / "DUMMY_PRIVATE_NAME"
-        extra.write_bytes(b"DUMMY_PRIVATE_CONTENT")
-        result = payload.inspect_tree_differences(self.installed, self.inspect())
-        checks = [item["check"] for item in result["differences"]]
-        self.assertIn("entry-differs", checks)
-        self.assertIn("missing-object", checks)
-        self.assertIn("unexpected-object", checks)
-        self.assertFalse(result["observed_tree_matches"])
-        self.assertFalse(result["unknown_contents_read"])
-        self.assertFalse(result["execution_authorized"])
-        self.assertNotIn("DUMMY_PRIVATE", json.dumps(result))
-        with self.assertRaises(Invalid):
-            payload.verify_tree(self.installed, self.inspect())
-        self.assertEqual(extra.read_bytes(), b"DUMMY_PRIVATE_CONTENT")
-
-    def test_difference_audit_does_not_traverse_unknown_directories_or_links(self):
-        self.installed.chmod(0o755)
-        cache = self.installed / "__pycache__"
-        cache.mkdir()
-        (cache / "DUMMY_PRIVATE_FILE").write_bytes(b"DUMMY_PRIVATE_BYTES")
-        (self.installed / "DUMMY_PRIVATE_LINK").symlink_to(cache)
-        result = payload.inspect_tree_differences(self.installed, self.inspect())
-        self.assertFalse(result["unexpected_subtrees_traversed"])
-        self.assertEqual(result["difference_count"], 2)
-        self.assertIn("python-bytecode-cache", json.dumps(result))
-        self.assertNotIn("DUMMY_PRIVATE", json.dumps(result))
-
-    def test_difference_audit_marks_bounded_output_truncation(self):
-        self.installed.chmod(0o755)
-        for index in range(4):
-            (self.installed / f"DUMMY_UNKNOWN_{index}").write_bytes(b"x")
-        result = payload.inspect_tree_differences(self.installed, self.inspect(), limit=2)
-        self.assertTrue(result["truncated"])
-        self.assertEqual(len(result["differences"]), 2)
-        self.assertEqual(result["difference_count"], 4)
-        self.assertFalse(result["observed_tree_matches"])
-
-    def test_difference_audit_matching_tree_remains_diagnostic_only(self):
-        self.installed.chmod(0o755)
-        result = payload.inspect_tree_differences(self.installed, self.inspect())
-        self.assertEqual(result["difference_count"], 0)
-        self.assertTrue(result["observed_tree_matches"])
-        self.assertFalse(result["execution_authorized"])
-        self.assertEqual(result["writes"], [])
-
-    def test_difference_audit_dist_lock_is_identified_without_reading_contents(self):
-        self.installed.chmod(0o755)
-        (self.installed / "dist.lock").write_bytes(b"DUMMY_PRIVATE_CONTENT")
-        result = payload.inspect_tree_differences(self.installed, self.inspect())
-        self.assertEqual(result["differences"][0]["category"], "distribution-lock")
-        self.assertNotIn("DUMMY_PRIVATE_CONTENT", json.dumps(result))
-
     def test_inspection_no_write_extract_or_process(self):
         before = self.snapshot()
         with patch("subprocess.Popen",side_effect=AssertionError("no process")), patch("tarfile.TarFile.extractall",side_effect=AssertionError("no extraction")):
@@ -611,27 +554,6 @@ class PayloadTests(unittest.TestCase):
         link.symlink_to(self.installed,target_is_directory=True)
         with self.assertRaises(Invalid):
             payload.verify_tree(link,self.inspect())
-
-    def test_cli_inspection_reports_identity_and_remains_read_only(self):
-        before = self.snapshot()
-        result = self.cli("--payload-directory",str(self.installed))
-        self.assertEqual(result.returncode,0,result.stderr)
-        report = json.loads(result.stdout)
-        self.assertTrue(report["installed_payload"]["tree_matches"])
-        self.assertFalse(report["preparation_complete"])
-        self.assertEqual(before,self.snapshot())
-
-    def test_cli_does_not_mix_payload_and_preparation_modes(self):
-        result = self.cli("--registrations",str(self.added))
-        self.assertEqual(result.returncode,1)
-        self.assertNotIn(str(self.added),result.stderr)
-        self.assertEqual(self.cli("--stage-local").returncode,2)
-
-    def test_cli_incorrect_checksum_never_reports_match(self):
-        self.sha = "0"*128
-        result = self.cli()
-        self.assertEqual(result.returncode,1)
-        self.assertNotIn('"checksum_matches": true',result.stdout)
 
     def test_oversized_extended_header_rejected_before_metadata_read(self):
         info = tarfile.TarInfo(ROOT)

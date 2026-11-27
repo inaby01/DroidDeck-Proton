@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Composed plans using generated archives/runtime/registrations, without Wine."""
 
-import contextlib
 import copy
-import io
 import json
 import os
 import runpy
@@ -16,7 +14,6 @@ HERE = Path(__file__).resolve().parent
 CUSTOM = runpy.run_path(str(HERE / "test_preparation_customization.py"))
 CONTEXT = runpy.run_path(str(HERE / "test_preparation_runtime_context.py"))
 GAME = runpy.run_path(str(HERE / "test_prepare_game.py"))
-ENGINE = runpy.run_path(str(HERE / "prepare_game.py"))
 import preparation_customization as customization
 import preparation_runtime as runtime
 from preparation_common import Invalid
@@ -58,7 +55,7 @@ class InstallationTests(unittest.TestCase):
         helper_patch = patch.object(customization, "HELPER_SHA256", self.source.helper_hash)
         helper_patch.start()
         self.addCleanup(helper_patch.stop)
-        self.game = GAME["InspectionTests"]()
+        self.game = GAME["SettingsFixture"]()
         self.addCleanup(self.game.doCleanups)
         self.game.setUp()
         reference = runtime.inspect_runtime(self.context.root, self.context.environment)
@@ -67,7 +64,7 @@ class InstallationTests(unittest.TestCase):
         self.reference = reference
         self.options = {"archive": self.source.archive, "sha512": self.source.sha, "archive_root": CUSTOM["ROOT"],
                         "mode": "cleanup", "runtime_root": self.context.root, "runtime_audit": reference,
-                        "registrations": self.game.added, "registration_id": self.game.args.app_id,
+                        "registrations": self.game.added, "registration_id": "4294967295",
                         "exe_root": self.game.exe_root, "steam": self.game.steam,
                         "renderer": CUSTOM["INSTALLER"]["render_installation"], "parent_environment": self.context.environment}
 
@@ -100,20 +97,6 @@ class InstallationTests(unittest.TestCase):
             (directory / name).write_bytes(raw)
             (directory / name).chmod(expected.overlays[name]["mode"])
         return directory
-
-    def cli(self, extras=()):
-        audit = self.game.root / "runtime-audit.json"
-        audit.write_text(json.dumps(self.reference))
-        argv = ["prepare_game.py", "--plan-preparation", "--payload-archive", str(self.source.archive),
-                "--payload-sha512", self.source.sha, "--payload-root", CUSTOM["ROOT"],
-                "--runtime-root", str(self.context.root), "--runtime-audit", str(audit), "--installation-mode", "cleanup",
-                "--registrations", str(self.game.added), "--steam-root", str(self.game.steam),
-                "--settings-root", str(self.game.settings), "--exe-root", str(self.game.exe_root),
-                "--app-id", self.game.args.app_id, *extras]
-        output = io.StringIO()
-        with patch("sys.argv", argv), patch.dict(os.environ, self.context.environment, clear=True), contextlib.redirect_stdout(output):
-            code = ENGINE["main"]()
-        return code, json.loads(output.getvalue())
 
     def test_new_plan_is_read_only_without_importing_runtime_or_launching(self):
         before = self.snapshot()
@@ -237,7 +220,7 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(report["prefix"]["compatdata"], str(directory))
         self.assertIn("existing-prefix-preserve", report["blockers"])
         self.assertEqual(before, self.snapshot())
-        (directory.parent / self.game.args.app_id).mkdir()
+        (directory.parent / "4294967295").mkdir()
         with self.assertRaises(Invalid):
             self.plan()
 
@@ -268,41 +251,6 @@ class InstallationTests(unittest.TestCase):
         report = plan.summary()
         report["runtime"]["environment_names"].append("mutated")
         self.assertNotIn("mutated", plan.summary()["runtime"]["environment_names"])
-
-    def test_cli_composes_new_install_with_target_and_keeps_blocked_exit(self):
-        code, report = self.cli()
-        self.assertEqual(code, 2)
-        self.assertEqual(report["mode"], "plan-preparation")
-        self.assertEqual(report["installation_plan"]["action"], "install-new")
-        self.assertEqual(report["target"]["app_id"], self.game.args.app_id)
-        self.assertNotIn("payload-integrity", report["uninspected"])
-        self.assertEqual(report["proposed_steps"][0]["status"], "install-new")
-        self.assertIn("installation", report["input_hashes"])
-        self.assertIn("runtime_audit", report["input_hashes"])
-        self.assertEqual(report["writes"], [])
-
-    def test_cli_reuse_connects_target_only_binding_plan(self):
-        self.install_fixture()
-        code, report = self.cli()
-        self.assertEqual(code, 2)
-        self.assertEqual(report["installation_plan"]["action"], "reuse-verified-tree")
-        self.assertNotIn("payload-integrity-unverified", report["blockers"])
-        self.assertEqual(report["binding_plan"]["payload"], "verified-expected-tree")
-        self.assertFalse(report["binding_plan"]["other_games_changed"])
-        self.assertFalse(report["binding_plan"]["default_changed"])
-        self.assertEqual(report["writes"], [])
-
-    def test_cli_rejects_partial_inputs_and_overrides_without_traceback(self):
-        for argv in (["--plan-preparation"], ["--inspect", "--installation-mode", "cleanup"],
-                     ["--inspect-payload", "--runtime-audit", "/test/audit.json"]):
-            with self.subTest(argv=argv), patch("sys.argv", ["prepare_game.py", *argv]), \
-                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
-                ENGINE["main"]()
-            self.assertEqual(result.exception.code, 1)
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
-            self.cli(["--tool-directory", "override"])
-        self.assertEqual(result.exception.code, 1)
-
 
 if __name__ == "__main__":
     unittest.main()

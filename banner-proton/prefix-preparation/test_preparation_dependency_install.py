@@ -23,7 +23,6 @@ import preparation_dependency_install as dep
 import preparation_dependency_state as state
 import preparation_recheck as recheck
 from preparation_common import Invalid
-from preparation_execution import LaunchSession
 from preparation_processes import ProcessStopCheck
 from preparation_softdenchi_recipe import softdenchi_recipe, validate_recipe
 
@@ -788,19 +787,6 @@ class InstallTests(TRIAL['TrialTests']):
             with patch.object(ProcessStopCheck, 'check', return_value={'clear_in_view': False}), self.assertRaises(Invalid):
                 self.install_session(store).start_gui_check()
 
-    def test_scoped_launch_plan_cannot_use_ordinary_readiness(self):
-        captured = []
-
-        def capture(**kwargs):
-            captured.append(self.launch_fixture(**kwargs))
-            return captured[-1]
-        with self.f.store() as store, patch.object(dep, 'plan_launch', side_effect=capture):
-            session = self.install_session(store).start_gui_check()
-            session.wait_gui_check(10)
-            with self.assertRaises(Invalid):
-                LaunchSession(captured[0], store, lambda: {'target': True, 'payload': True, 'runtime': True, 'stopped': True},
-                              ProcessStopCheck(session.plan.recheck.compatdata, self.f.proc)).start()
-
     SERVICES = 'C:\\windows\\system32\\services.exe'
     SERVICE = 'C:\\Program Files (x86)\\SoftDenchi\\UCManSvc.exe'
     PROXY = 'C:\\Program Files (x86)\\SoftDenchi\\SdProxy.exe'
@@ -1021,7 +1007,7 @@ class InstallTests(TRIAL['TrialTests']):
         self.assertIsNone(result['post_state'])
         text = output.getvalue()
         self.assertIn('停止を中止しました（unreadable process in prefix view）。送信済み 1件。', text)
-        self.assertIn('導入後の検査は済んでいません。DroidDeckを完全に終了して起動し直してから、メニュー9', text)
+        self.assertIn('導入後の検査は済んでいません。DroidDeckを完全に終了して起動し直してから、recovery.sh の6', text)
         dep.validate_install_record(result)
         self.clear_fake()
 

@@ -137,8 +137,7 @@ class ActionTableTests(unittest.TestCase):
     def test_next_step_after_an_unfinished_installation(self):
         operational = {'probe_material': True, 'initialization_trial': True, 'placement_review': {}, 'game_preparation': {},
                        'dependency_installation': {}}
-        earlier = {key: value for key, value in operational.items() if key != 'game_preparation'}
-        for config, again, menu9 in ((operational, 'もう一度 recovery.sh の1 ', 'recovery.sh の6'), (earlier, 'もう一度 12 ', 'メニュー9')):
+        for config, again, menu9 in ((operational, 'もう一度 recovery.sh の1 ', 'recovery.sh の6'),):
             with self.subTest(again=again):
                 self.assertIn(again, one_pass.installation_next_step(None, config))
                 self.assertEqual(one_pass.installation_next_step({'status': 'failed', 'post_state': None}, config),
@@ -148,7 +147,7 @@ class ActionTableTests(unittest.TestCase):
                                  one_pass.restart_then_one_pass(config))
                 self.assertIn(again, one_pass.restart_then_one_pass(config))
                 self.assertIn(menu9, one_pass.installation_next_step({'status': 'partial', 'post_state': 'partial'}, config))
-        self.assertNotIn('詳細メニュー', one_pass.failed_then_menu9(earlier))
+        self.assertNotIn('詳細メニュー', one_pass.failed_then_menu9(operational))
 
     def test_silent_arguments_are_pinned_to_the_recipe_bootstrap(self):
         real = recipe_module.softdenchi_recipe()
@@ -195,16 +194,12 @@ class OnePassTests(GAME['GamePrefixTests']):
         _, _, output = self.entry_menu('q\n')
         self.assertIn('1. 1本だけ準備する', output)
         self.assertNotIn('12. ', output)
-        _, _, output = self.detail_menu('q\n')
-        self.assertIn('12. 新しいゲームを1回で準備', output)
         for missing in ('dependency_installation', 'game_preparation'):
             config = dict(self.config)
             del self.config[missing]
-            # Without every step the earlier screen stays (validation bundles), with its own numbers.
-            _, _, output = self.menu('q\n')
-            self.assertTrue(output.startswith('1. 登録済み対象の読み取り検査・計画'), (missing, output))
-            self.assertNotIn('12. ', output)
-            self.assertNotIn('新しいゲームを準備（', output)
+            # Without every step there is no screen at all since 1.0.1 (the earlier screen was removed).
+            with self.subTest(missing=missing), self.assertRaisesRegex(Invalid, 'operational bundle required'):
+                self.script('recovery', 'q\n')
             self.config = config
 
     def test_cancel_before_confirmation_writes_nothing(self):

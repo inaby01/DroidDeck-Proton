@@ -44,29 +44,10 @@ Containers run with no network, all capabilities dropped, no new privileges,
 on exit; the dedicated test image remains locally for reuse. The script does not
 prune images/volumes, restart Docker, or operate on unrelated containers.
 
-For each UID the harness runs the same tests without replacing assertions:
-
-| Suite | Tests |
-| --- | ---: |
-| Offline preparation | 23 |
-| Asset/cache/journal/locks | 36 |
-| Target-only binding / VDF | 30 |
-| Internal initialization/probe launch contracts | 48 |
-| Scoped process observation | 13 |
-| Payload archive/tree identity | 36 |
-| Expected installation/adoption metadata | 15 |
-| Read-only runtime audit/emitted command | 22 |
-| Pinned minimum runtime environment | 10 |
-| Composed installation/reuse plans | 17 |
-| Internal tool staging/publication/failure contracts | 27 |
-| Runtime preflight / standalone / native capability probes | 21 |
-| Numbered selection / source pins / report storage/export / short launcher | 33 |
-| Slot file rendering (`install-softdenchi.py`) | 3 |
-| Existing observer/cleanup | 74 |
-| Total | 419 |
-
-These counts were recorded in an earlier version and are not kept up to date; each test file
-prints its own count when it runs (1.0.0 removed the manual installer and setup suites).
+For each UID the harness runs the same test files (the list is in `run-in-container.sh`)
+without replacing assertions. Each file prints its own count when it runs. 1.0.1 removed the
+suites of the removed code (preflight, measured dependency plans, probe recovery and the old
+command-line modes).
 
 The script stops at the first failing suite and preserves the raw console error.
 A zero script exit means both UID runs finished; it is not a device preparation
